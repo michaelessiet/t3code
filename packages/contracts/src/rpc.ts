@@ -74,6 +74,9 @@ import {
   ProjectSearchEntriesError,
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
+  ProjectWatchError,
+  ProjectWatchInput,
+  ProjectWatchStreamEvent,
   ProjectWriteFileError,
   ProjectWriteFileInput,
   ProjectWriteFileResult,
@@ -142,6 +145,31 @@ import {
   SourceControlRepositoryInfo,
   SourceControlRepositoryLookupInput,
 } from "./sourceControl.ts";
+import {
+  ProjectSearchContentError,
+  ProjectSearchContentInput,
+  ProjectSearchContentResult,
+} from "./search.ts";
+import {
+  LspCompletionItem,
+  LspCompletionResult,
+  LspDidChangeInput,
+  LspDidOpenInput,
+  LspDocumentInput,
+  LspError,
+  LspFormattingInput,
+  LspFormattingResult,
+  LspHoverResult,
+  LspLocationsResult,
+  LspPositionInput,
+  LspRenameInput,
+  LspResolveCompletionInput,
+  LspServerStatusResult,
+  LspSignatureHelpResult,
+  LspSubscribeDiagnosticsInput,
+  LspDiagnosticsStreamEvent,
+  LspWorkspaceEditResult,
+} from "./lsp.ts";
 import { VcsError } from "./vcs.ts";
 
 export const WS_METHODS = {
@@ -153,6 +181,21 @@ export const WS_METHODS = {
   projectsReadFile: "projects.readFile",
   projectsSearchEntries: "projects.searchEntries",
   projectsWriteFile: "projects.writeFile",
+  projectsSearchContent: "projects.searchContent",
+
+  // Language-intelligence methods
+  lspDidOpen: "lsp.didOpen",
+  lspDidChange: "lsp.didChange",
+  lspDidClose: "lsp.didClose",
+  lspCompletion: "lsp.completion",
+  lspResolveCompletion: "lsp.resolveCompletion",
+  lspSignatureHelp: "lsp.signatureHelp",
+  lspHover: "lsp.hover",
+  lspDefinition: "lsp.definition",
+  lspReferences: "lsp.references",
+  lspRename: "lsp.rename",
+  lspFormat: "lsp.format",
+  lspServerStatus: "lsp.serverStatus",
 
   // Shell methods
   shellOpenInEditor: "shell.openInEditor",
@@ -224,6 +267,8 @@ export const WS_METHODS = {
   sourceControlPublishRepository: "sourceControl.publishRepository",
 
   // Streaming subscriptions
+  subscribeWorkspaceChanges: "projects.subscribeWorkspaceChanges",
+  subscribeLspDiagnostics: "lsp.subscribeDiagnostics",
   subscribeVcsStatus: "subscribeVcsStatus",
   subscribeTerminalEvents: "subscribeTerminalEvents",
   subscribeTerminalMetadata: "subscribeTerminalMetadata",
@@ -393,6 +438,95 @@ export const WsAssetsCreateUrlRpc = Rpc.make(WS_METHODS.assetsCreateUrl, {
   payload: AssetCreateUrlInput,
   success: AssetCreateUrlResult,
   error: Schema.Union([AssetAccessError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectsSearchContentRpc = Rpc.make(WS_METHODS.projectsSearchContent, {
+  payload: ProjectSearchContentInput,
+  success: ProjectSearchContentResult,
+  error: Schema.Union([ProjectSearchContentError, EnvironmentAuthorizationError]),
+});
+
+export const WsLspDidOpenRpc = Rpc.make(WS_METHODS.lspDidOpen, {
+  payload: LspDidOpenInput,
+  error: Schema.Union([LspError, EnvironmentAuthorizationError]),
+});
+
+export const WsLspDidChangeRpc = Rpc.make(WS_METHODS.lspDidChange, {
+  payload: LspDidChangeInput,
+  error: Schema.Union([LspError, EnvironmentAuthorizationError]),
+});
+
+export const WsLspDidCloseRpc = Rpc.make(WS_METHODS.lspDidClose, {
+  payload: LspDocumentInput,
+  error: Schema.Union([LspError, EnvironmentAuthorizationError]),
+});
+
+export const WsLspCompletionRpc = Rpc.make(WS_METHODS.lspCompletion, {
+  payload: LspPositionInput,
+  success: LspCompletionResult,
+  error: Schema.Union([LspError, EnvironmentAuthorizationError]),
+});
+
+export const WsLspResolveCompletionRpc = Rpc.make(WS_METHODS.lspResolveCompletion, {
+  payload: LspResolveCompletionInput,
+  success: LspCompletionItem,
+  error: Schema.Union([LspError, EnvironmentAuthorizationError]),
+});
+
+export const WsLspSignatureHelpRpc = Rpc.make(WS_METHODS.lspSignatureHelp, {
+  payload: LspPositionInput,
+  success: LspSignatureHelpResult,
+  error: Schema.Union([LspError, EnvironmentAuthorizationError]),
+});
+
+export const WsLspHoverRpc = Rpc.make(WS_METHODS.lspHover, {
+  payload: LspPositionInput,
+  success: LspHoverResult,
+  error: Schema.Union([LspError, EnvironmentAuthorizationError]),
+});
+
+export const WsLspDefinitionRpc = Rpc.make(WS_METHODS.lspDefinition, {
+  payload: LspPositionInput,
+  success: LspLocationsResult,
+  error: Schema.Union([LspError, EnvironmentAuthorizationError]),
+});
+
+export const WsLspReferencesRpc = Rpc.make(WS_METHODS.lspReferences, {
+  payload: LspPositionInput,
+  success: LspLocationsResult,
+  error: Schema.Union([LspError, EnvironmentAuthorizationError]),
+});
+
+export const WsLspRenameRpc = Rpc.make(WS_METHODS.lspRename, {
+  payload: LspRenameInput,
+  success: LspWorkspaceEditResult,
+  error: Schema.Union([LspError, EnvironmentAuthorizationError]),
+});
+
+export const WsLspFormatRpc = Rpc.make(WS_METHODS.lspFormat, {
+  payload: LspFormattingInput,
+  success: LspFormattingResult,
+  error: Schema.Union([LspError, EnvironmentAuthorizationError]),
+});
+
+export const WsLspServerStatusRpc = Rpc.make(WS_METHODS.lspServerStatus, {
+  payload: Schema.Struct({ cwd: Schema.String }),
+  success: LspServerStatusResult,
+  error: Schema.Union([LspError, EnvironmentAuthorizationError]),
+});
+
+export const WsSubscribeLspDiagnosticsRpc = Rpc.make(WS_METHODS.subscribeLspDiagnostics, {
+  payload: LspSubscribeDiagnosticsInput,
+  success: LspDiagnosticsStreamEvent,
+  error: Schema.Union([LspError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+export const WsSubscribeWorkspaceChangesRpc = Rpc.make(WS_METHODS.subscribeWorkspaceChanges, {
+  payload: ProjectWatchInput,
+  success: ProjectWatchStreamEvent,
+  error: Schema.Union([ProjectWatchError, EnvironmentAuthorizationError]),
+  stream: true,
 });
 
 export const WsSubscribeVcsStatusRpc = Rpc.make(WS_METHODS.subscribeVcsStatus, {
@@ -703,6 +837,21 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsReadFileRpc,
   WsProjectsSearchEntriesRpc,
   WsProjectsWriteFileRpc,
+  WsProjectsSearchContentRpc,
+  WsSubscribeWorkspaceChangesRpc,
+  WsLspDidOpenRpc,
+  WsLspDidChangeRpc,
+  WsLspDidCloseRpc,
+  WsLspCompletionRpc,
+  WsLspResolveCompletionRpc,
+  WsLspSignatureHelpRpc,
+  WsLspHoverRpc,
+  WsLspDefinitionRpc,
+  WsLspReferencesRpc,
+  WsLspRenameRpc,
+  WsLspFormatRpc,
+  WsLspServerStatusRpc,
+  WsSubscribeLspDiagnosticsRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
   WsAssetsCreateUrlRpc,

@@ -127,6 +127,12 @@ export const ProjectReadFileResult = Schema.Struct({
   contents: Schema.String,
   byteLength: NonNegativeInt,
   truncated: Schema.Boolean,
+  /**
+   * Content-derived revision token for the returned `contents` (see
+   * `@t3tools/shared/fileRevision`). Optional on the wire so newer clients can
+   * decode results from older servers; current servers always set it.
+   */
+  revision: Schema.optional(TrimmedNonEmptyString),
 });
 export type ProjectReadFileResult = typeof ProjectReadFileResult.Type;
 
@@ -136,6 +142,7 @@ export const ProjectFileFailure = Schema.Literals([
   "path_not_file",
   "binary_file",
   "operation_failed",
+  "stale_revision",
 ]);
 export type ProjectFileFailure = typeof ProjectFileFailure.Type;
 
@@ -159,6 +166,8 @@ type ProjectFileFailureContext = {
   readonly resolvedWorkspaceRoot?: string;
   readonly operation?: ProjectFileOperation;
   readonly operationPath?: string;
+  readonly expectedRevision?: string;
+  readonly actualRevision?: string;
   readonly cause?: unknown;
 };
 
@@ -191,13 +200,81 @@ export const ProjectWriteFileInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),
   contents: Schema.String,
+  /**
+   * Optimistic-concurrency token: the revision of the disk contents this
+   * write is based on (from `ProjectReadFileResult.revision` or a prior
+   * write's `ProjectWriteFileResult.revision`). When set, the server rejects
+   * the write with a `stale_revision` failure if the file on disk no longer
+   * matches — e.g. because an agent or terminal command changed it since the
+   * client last loaded it. Omit to write unconditionally.
+   */
+  baseRevision: Schema.optional(TrimmedNonEmptyString),
 });
 export type ProjectWriteFileInput = typeof ProjectWriteFileInput.Type;
 
 export const ProjectWriteFileResult = Schema.Struct({
   relativePath: TrimmedNonEmptyString,
+  /**
+   * Revision of the written contents; use as `baseRevision` for the next
+   * write. Optional on the wire so newer clients can decode results from
+   * older servers; current servers always set it.
+   */
+  revision: Schema.optional(TrimmedNonEmptyString),
 });
 export type ProjectWriteFileResult = typeof ProjectWriteFileResult.Type;
+
+export const ProjectWatchInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+});
+export type ProjectWatchInput = typeof ProjectWatchInput.Type;
+
+/**
+ * Streaming workspace-change events.
+ *
+ * Change notifications are advisory: a listed path *may* have changed
+ * (created, modified, or deleted). Consumers re-read the path and compare
+ * revisions rather than trusting a change-kind classification, which is not
+ * reliable across watch backends and platforms.
+ *
+ * - `changes`: coalesced batch of workspace-root-relative paths (`/`
+ *   separated) that changed since the previous event.
+ * - `overflow`: the watcher saw more churn than it could enumerate (or had to
+ *   recover from a backend error); consumers should treat every path they
+ *   care about as possibly changed.
+ */
+export const ProjectWatchStreamEvent = Schema.Union([
+  Schema.TaggedStruct("changes", {
+    paths: Schema.Array(TrimmedNonEmptyString),
+  }),
+  Schema.TaggedStruct("overflow", {}),
+]);
+export type ProjectWatchStreamEvent = typeof ProjectWatchStreamEvent.Type;
+
+export const ProjectWatchFailure = Schema.Literals(["workspace_root_not_found", "watch_failed"]);
+export type ProjectWatchFailure = typeof ProjectWatchFailure.Type;
+
+export class ProjectWatchError extends Schema.TaggedErrorClass<ProjectWatchError>()(
+  "ProjectWatchError",
+  {
+    cwd: Schema.optional(TrimmedNonEmptyString),
+    failure: Schema.optional(ProjectWatchFailure),
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  // @effect-diagnostics-next-line overriddenSchemaConstructor:off
+  constructor(props: {
+    readonly cwd: string;
+    readonly failure: ProjectWatchFailure;
+    readonly cause?: unknown;
+  }) {
+    super({
+      ...props,
+      message:
+        decodedProjectErrorMessage(props) ?? `Failed to watch workspace changes in '${props.cwd}'.`,
+    } as any);
+  }
+}
 
 export class ProjectWriteFileError extends Schema.TaggedErrorClass<ProjectWriteFileError>()(
   "ProjectWriteFileError",
@@ -209,6 +286,13 @@ export class ProjectWriteFileError extends Schema.TaggedErrorClass<ProjectWriteF
     resolvedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
     operation: Schema.optional(ProjectFileOperation),
     operationPath: Schema.optional(TrimmedNonEmptyString),
+    /** For `stale_revision` failures: the `baseRevision` the client sent. */
+    expectedRevision: Schema.optional(TrimmedNonEmptyString),
+    /**
+     * For `stale_revision` failures: the revision currently on disk. Absent
+     * when the file no longer exists.
+     */
+    actualRevision: Schema.optional(TrimmedNonEmptyString),
     message: TrimmedNonEmptyString,
     cause: Schema.optional(Schema.Defect()),
   },
