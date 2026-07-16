@@ -799,13 +799,43 @@ label:has(> select#reasoning-effort) select {
   animation: var(--animate-fade-in);
 }
 
-/* Soft fade on the streaming text edge: the newest ~1.5em of an actively
-   streaming assistant message materializes gently as it settles. Static,
-   GPU-composited mask (no JS, no per-frame cost); removed automatically when
-   the `data-streaming` attribute drops at turn completion. */
+/* Soft fade on the streaming text edge: the newest ~1.2em of an actively
+   streaming assistant message materializes gently as it settles. Fades to
+   partial (not full) transparency so the smoothed per-character reveal and
+   the caret stay legible at the edge. Static, GPU-composited mask (no JS,
+   no per-frame cost); removed automatically when the `data-streaming`
+   attribute drops at turn completion. */
 [data-streaming="true"] {
-  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 1.5em), transparent);
-  mask-image: linear-gradient(to bottom, #000 calc(100% - 1.5em), transparent);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 1.2em), rgb(0 0 0 / 0.45));
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 1.2em), rgb(0 0 0 / 0.45));
+}
+
+/* Streaming caret: a small breathing dot riding the end of the revealed text.
+   Scoped to a top-level trailing paragraph or the last list item — the common
+   streaming tails — so it never decorates code blocks or tables. */
+[data-streaming="true"] .chat-markdown > p:last-child::after,
+[data-streaming="true"] .chat-markdown > :is(ul, ol):last-child > li:last-child::after {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 0.5em;
+  margin-left: 0.35ch;
+  border-radius: 9999px;
+  background: currentColor;
+  vertical-align: -0.03em;
+  animation: streaming-caret-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes streaming-caret-pulse {
+  0%,
+  100% {
+    opacity: 0.65;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.25;
+    transform: scale(0.85);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -816,6 +846,11 @@ label:has(> select#reasoning-effort) select {
   [data-streaming="true"] {
     -webkit-mask-image: none !important;
     mask-image: none !important;
+  }
+  [data-streaming="true"] .chat-markdown > p:last-child::after,
+  [data-streaming="true"] .chat-markdown > :is(ul, ol):last-child > li:last-child::after {
+    animation: none !important;
+    opacity: 0.5;
   }
 }
 
