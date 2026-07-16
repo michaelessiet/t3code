@@ -43,6 +43,7 @@ import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityRes
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
+import { layer as AssistantStreamBusLayer } from "../AssistantStreamBus.ts";
 import { ProviderRuntimeIngestionLive } from "./ProviderRuntimeIngestion.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
@@ -234,6 +235,7 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provide(SqlitePersistenceMemory),
     );
     const layer = ProviderRuntimeIngestionLive.pipe(
+      Layer.provideMerge(AssistantStreamBusLayer),
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(SqlitePersistenceMemory),
@@ -2162,6 +2164,119 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(finalMessage?.text).toBe("hello live");
     expect(finalMessage?.streaming).toBe(false);
+  });
+
+  it("coalesces streamed assistant deltas into a single persisted delta per flush window", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-coalesced"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-coalesced"),
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" && thread.session?.activeTurnId === "turn-coalesced",
+    );
+
+    for (const [index, delta] of ["alpha ", "beta ", "gamma"].entries()) {
+      harness.emit({
+        type: "content.delta",
+        eventId: asEventId(`evt-message-delta-coalesced-${index}`),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-coalesced"),
+        itemId: asItemId("item-coalesced"),
+        payload: {
+          streamKind: "assistant_text",
+          delta,
+        },
+      });
+    }
+
+    await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-coalesced" &&
+          message.streaming &&
+          message.text === "alpha beta gamma",
+      ),
+    );
+
+    const events = await Effect.runPromise(
+      Stream.runCollect(harness.engine.readEvents(0)).pipe(
+        Effect.map((chunk) => Array.from(chunk)),
+      ),
+    );
+    const assistantEvents = events.filter(
+      (event): event is Extract<(typeof events)[number], { type: "thread.message-sent" }> =>
+        event.type === "thread.message-sent" &&
+        event.payload.messageId === "assistant:item-coalesced",
+    );
+    // All three deltas arrive within one flush window, so exactly one
+    // persisted streaming delta carries the concatenated text.
+    expect(assistantEvents).toHaveLength(1);
+    expect(assistantEvents[0]?.payload.streaming).toBe(true);
+    expect(assistantEvents[0]?.payload.text).toBe("alpha beta gamma");
+  });
+
+  it("flushes streamed deltas immediately once the coalescing size cap is exceeded", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
+    const now = "2026-01-01T00:00:00.000Z";
+    const oversizedDelta = "x".repeat(2_100);
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-coalesced-cap"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-coalesced-cap"),
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" &&
+        thread.session?.activeTurnId === "turn-coalesced-cap",
+    );
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-message-delta-coalesced-cap"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-coalesced-cap"),
+      itemId: asItemId("item-coalesced-cap"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: oversizedDelta,
+      },
+    });
+    await harness.drain();
+
+    // The oversized delta bypasses the flush window: it must be visible in the
+    // projection as soon as the worker drains, without waiting on the timer.
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.messages.some(
+          (message: ProviderRuntimeTestMessage) =>
+            message.id === "assistant:item-coalesced-cap" && message.streaming,
+        ),
+      100,
+    );
+    expect(
+      thread.messages.find(
+        (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-coalesced-cap",
+      )?.text,
+    ).toBe(oversizedDelta);
   });
 
   it("spills oversized buffered deltas and still finalizes full assistant text", async () => {

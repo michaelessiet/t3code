@@ -42,6 +42,23 @@ export const orchestrationEventsProcessedTotal = Metric.counter(
   },
 );
 
+export const orchestrationCommandQueueDepth = Metric.gauge("t3_orchestration_command_queue_depth", {
+  description: "Commands waiting in the orchestration engine's serialized command queue.",
+});
+
+export const providerIngestionQueueWait = Metric.timer("t3_provider_ingestion_queue_wait", {
+  description: "Time a provider runtime event spends queued in ingestion before processing begins.",
+});
+
+export const wsThreadEventDeliveryLag = Metric.timer("t3_ws_thread_event_delivery_lag", {
+  description:
+    "Lag from a domain event's occurredAt to it being handed to the websocket thread subscription.",
+});
+
+export const eventLoopDelay = Metric.gauge("t3_event_loop_delay_ms", {
+  description: "Sampled Node event-loop delay (p99, milliseconds).",
+});
+
 export const providerSessionsTotal = Metric.counter("t3_provider_sessions_total", {
   description: "Total provider session lifecycle operations.",
 });

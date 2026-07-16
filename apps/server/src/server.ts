@@ -45,6 +45,7 @@ import * as Keybindings from "./keybindings.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import { OrchestrationReactorLive } from "./orchestration/Layers/OrchestrationReactor.ts";
 import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus.ts";
+import { layer as AssistantStreamBusLayer } from "./orchestration/AssistantStreamBus.ts";
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion.ts";
 import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderCommandReactor.ts";
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
@@ -83,6 +84,7 @@ import * as CloudManagedEndpointRuntime from "./cloud/ManagedEndpointRuntime.ts"
 import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
 import * as CloudCliState from "./cloud/CliState.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
+import * as EventLoopDelayMonitor from "./diagnostics/EventLoopDelayMonitor.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
@@ -167,6 +169,9 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(RuntimeReceiptBusLive),
+  // Shared by ProviderRuntimeIngestion (publisher) and the websocket thread
+  // subscriptions (subscribers); provided once so both see the same PubSub.
+  Layer.provideMerge(AssistantStreamBusLayer),
 );
 
 const ProviderSessionDirectoryLayerLive = ProviderSessionDirectoryLive.pipe(
@@ -346,6 +351,7 @@ const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   // Misc.
   Layer.provideMerge(ProcessDiagnostics.layer),
   Layer.provideMerge(ProcessResourceMonitor.layer),
+  Layer.provideMerge(EventLoopDelayMonitor.layer),
   Layer.provideMerge(TraceDiagnostics.layer),
   Layer.provideMerge(AnalyticsService.layer),
   Layer.provideMerge(ExternalLauncher.layer),

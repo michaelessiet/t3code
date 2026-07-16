@@ -1134,6 +1134,24 @@ export const OrchestrationEvent = Schema.Union([
 ]);
 export type OrchestrationEvent = typeof OrchestrationEvent.Type;
 
+/**
+ * A live assistant text delta forwarded ahead of persistence. Carries no
+ * sequence: it never advances the client's resume cursor and is safe to drop —
+ * the coalesced persisted delta that follows carries the same characters.
+ * `offset` is the total assistant text length for the message before this
+ * delta, letting clients apply it only when contiguous with what they have.
+ */
+const AssistantEphemeralDeltaFields = {
+  threadId: ThreadId,
+  messageId: MessageId,
+  turnId: Schema.NullOr(TurnId),
+  delta: Schema.String,
+  offset: NonNegativeInt,
+  createdAt: IsoDateTime,
+};
+export const OrchestrationAssistantEphemeralDelta = Schema.Struct(AssistantEphemeralDeltaFields);
+export type OrchestrationAssistantEphemeralDelta = typeof OrchestrationAssistantEphemeralDelta.Type;
+
 export const OrchestrationThreadStreamItem = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("snapshot"),
@@ -1142,6 +1160,10 @@ export const OrchestrationThreadStreamItem = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("event"),
     event: OrchestrationEvent,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("ephemeral-delta"),
+    ...AssistantEphemeralDeltaFields,
   }),
 ]);
 export type OrchestrationThreadStreamItem = typeof OrchestrationThreadStreamItem.Type;

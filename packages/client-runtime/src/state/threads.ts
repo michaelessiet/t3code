@@ -66,6 +66,53 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     status: statusWithoutLiveData(cachedThread),
     error: Option.none(),
   });
+
+  // The reducer's source of truth. `state.data` renders this thread with the
+  // ephemeral overlays applied; only this un-overlaid thread may be persisted
+  // to the cache, otherwise overlay text would be replayed twice on resume.
+  let persistedThread = cachedThread;
+  type ThreadMessage = OrchestrationThread["messages"][number];
+  const overlays = new Map<
+    ThreadMessage["id"],
+    { turnId: ThreadMessage["turnId"]; createdAt: string; text: string }
+  >();
+
+  const overlaidThread = (thread: OrchestrationThread): OrchestrationThread => {
+    if (overlays.size === 0) {
+      return thread;
+    }
+    let messages = thread.messages;
+    let changed = false;
+    for (const [messageId, overlay] of overlays) {
+      if (overlay.text.length === 0) {
+        continue;
+      }
+      const existing = messages.find((entry) => entry.id === messageId);
+      if (existing) {
+        if (!existing.streaming) {
+          continue;
+        }
+        messages = messages.map((entry) =>
+          entry.id === messageId ? { ...entry, text: `${entry.text}${overlay.text}` } : entry,
+        );
+      } else {
+        messages = [
+          ...messages,
+          {
+            id: messageId,
+            role: "assistant" as const,
+            text: overlay.text,
+            turnId: overlay.turnId,
+            streaming: true,
+            createdAt: overlay.createdAt,
+            updatedAt: overlay.createdAt,
+          },
+        ];
+      }
+      changed = true;
+    }
+    return changed ? { ...thread, messages } : thread;
+  };
   // Seed the resume cursor from the cached snapshot so a warm cache can catch up
   // via `afterSequence` instead of re-downloading the full thread body.
   const lastSequence = yield* SubscriptionRef.make(
@@ -123,18 +170,31 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   const setThread = Effect.fn("EnvironmentThreadState.setThread")(function* (
     thread: OrchestrationThread,
   ) {
+    persistedThread = Option.some(thread);
     yield* SubscriptionRef.set(state, {
-      data: Option.some(thread),
+      data: Option.some(overlaidThread(thread)),
       status: "live",
       error: Option.none(),
     });
     // Persist the thread together with the sequence it reflects so the next warm
-    // cache can resume from exactly here.
+    // cache can resume from exactly here. Always the un-overlaid thread: the
+    // overlay's characters arrive again via the persisted events after the
+    // cached sequence.
     const snapshotSequence = yield* SubscriptionRef.get(lastSequence);
     yield* Queue.offer(persistence, { snapshotSequence, thread });
   });
 
+  // Re-render the current persisted thread with overlays, without touching the
+  // resume cursor, the persistence queue, or the connection status.
+  const refreshOverlaidView = SubscriptionRef.update(state, (current) =>
+    current.status === "deleted" || Option.isNone(persistedThread)
+      ? current
+      : { ...current, data: Option.some(overlaidThread(persistedThread.value)) },
+  );
+
   const setDeleted = Effect.fn("EnvironmentThreadState.setDeleted")(function* () {
+    persistedThread = Option.none();
+    overlays.clear();
     yield* SubscriptionRef.set(state, {
       data: Option.none(),
       status: "deleted",
@@ -157,8 +217,39 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     item: OrchestrationThreadStreamItem,
   ) {
     if (item.kind === "snapshot") {
+      // The snapshot may already contain any overlaid text; drop overlays
+      // rather than risk rendering them twice. The next flush self-heals.
+      overlays.clear();
       yield* SubscriptionRef.set(lastSequence, item.snapshot.snapshotSequence);
       yield* setThread(item.snapshot.thread);
+      return;
+    }
+
+    if (item.kind === "ephemeral-delta") {
+      // Best-effort live text. Never advances lastSequence and is only
+      // applied when contiguous with what we already render; anything
+      // dropped here arrives again in the coalesced persisted delta.
+      if (Option.isNone(persistedThread)) {
+        return;
+      }
+      const persistedMessage = persistedThread.value.messages.find(
+        (entry) => entry.id === item.messageId,
+      );
+      if (persistedMessage && !persistedMessage.streaming) {
+        return;
+      }
+      const persistedLength = persistedMessage?.text.length ?? 0;
+      const overlay = overlays.get(item.messageId);
+      const overlayLength = overlay?.text.length ?? 0;
+      if (item.offset !== persistedLength + overlayLength) {
+        return;
+      }
+      overlays.set(item.messageId, {
+        turnId: item.turnId,
+        createdAt: overlay?.createdAt ?? item.createdAt,
+        text: `${overlay?.text ?? ""}${item.delta}`,
+      });
+      yield* refreshOverlaidView;
       return;
     }
 
@@ -168,14 +259,32 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     }
     yield* SubscriptionRef.set(lastSequence, item.event.sequence);
 
-    const current = yield* SubscriptionRef.get(state);
-    if (Option.isNone(current.data)) {
+    // Reconcile overlays against the persisted delta that carries the same
+    // characters: trim the flushed prefix from the overlay (streaming) or
+    // drop it entirely (message finalized).
+    if (item.event.type === "thread.message-sent") {
+      const overlay = overlays.get(item.event.payload.messageId);
+      if (overlay !== undefined) {
+        if (item.event.payload.streaming) {
+          const remaining = overlay.text.slice(item.event.payload.text.length);
+          if (remaining.length === 0) {
+            overlays.delete(item.event.payload.messageId);
+          } else {
+            overlays.set(item.event.payload.messageId, { ...overlay, text: remaining });
+          }
+        } else {
+          overlays.delete(item.event.payload.messageId);
+        }
+      }
+    }
+
+    if (Option.isNone(persistedThread)) {
       if (item.event.type === "thread.deleted") {
         yield* setDeleted();
       }
       return;
     }
-    const result = applyThreadDetailEvent(current.data.value, item.event);
+    const result = applyThreadDetailEvent(persistedThread.value, item.event);
     if (result.kind === "updated") {
       yield* setThread(result.thread);
     } else if (result.kind === "deleted") {

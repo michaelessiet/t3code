@@ -469,7 +469,7 @@ export const waitForSessionLoadReplayIdle = (input: {
   readonly gateRef: Ref.Ref<Option.Option<SessionLoadGate>>;
 }): Effect.Effect<EffectAcpSchema.LoadSessionResponse, never> =>
   Effect.gen(function* () {
-    const pollInterval = Duration.millis(25);
+    const pollInterval = Duration.millis(10);
     while (true) {
       const gate = yield* Ref.get(input.gateRef);
       if (
