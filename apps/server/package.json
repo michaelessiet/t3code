@@ -33,6 +33,7 @@
     "@vscode/ripgrep": "^1.15.9",
     "effect": "catalog:",
     "node-pty": "^1.1.0",
+    "typescript": "catalog:",
     "typescript-language-server": "^4.4.0",
     "vscode-jsonrpc": "8.2.0",
     "vscode-languageserver-protocol": "3.17.5"

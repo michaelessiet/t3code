@@ -85,6 +85,26 @@ function resolveSpawn(config: LanguageServerConfig): {
   return { command: process.execPath, args: [cliPath, ...config.args] };
 }
 
+/**
+ * tsserver.js from the `typescript` package shipped with this server.
+ *
+ * typescript-language-server does NOT depend on typescript; it discovers
+ * tsserver by walking up from its own install or the workspace. That works
+ * from a source checkout (the monorepo has typescript) but not from the
+ * packaged desktop app, where nothing above `app.asar.unpacked/node_modules`
+ * exists. Shipping typescript and passing it explicitly as the *fallback*
+ * keeps packaged builds working while still preferring a workspace-local
+ * typescript version when the opened project has one.
+ */
+function resolveBundledTsserverPath(): string | undefined {
+  try {
+    const require = NodeModule.createRequire(import.meta.url);
+    return require.resolve("typescript/lib/tsserver.js");
+  } catch {
+    return undefined;
+  }
+}
+
 export class LspClient {
   private connection: MessageConnection | null = null;
   private child: NodeChildProcess.ChildProcess | null = null;
@@ -200,6 +220,12 @@ export class LspClient {
           includeAutomaticOptionalChainCompletions: true,
           includePackageJsonAutoImports: "auto",
         },
+        ...(() => {
+          const fallbackPath = this.options.config.bundled
+            ? resolveBundledTsserverPath()
+            : undefined;
+          return fallbackPath === undefined ? {} : { tsserver: { fallbackPath } };
+        })(),
       },
     };
     await withTimeout(
