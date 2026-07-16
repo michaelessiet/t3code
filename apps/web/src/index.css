@@ -41,6 +41,11 @@
      (~20% of the cycle) instead of every vsync. Keep flat holds dominant. */
   --animate-status-pulse: status-pulse 2s infinite;
   --animate-status-ping: status-ping 2s infinite;
+  /* One-shot reveal animations for chat messages/blocks: opacity + transform
+     only (compositor-only), run once with `both` so the final state holds and
+     no frames are produced after ~160ms. Disabled under prefers-reduced-motion. */
+  --animate-message-enter: message-enter 160ms ease-out both;
+  --animate-fade-in: fade-in 120ms ease-out both;
   --font-sans:
     "DM Sans Variable", "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
     sans-serif;
@@ -111,6 +116,24 @@
     100% {
       opacity: 0;
       scale: 2;
+    }
+  }
+  @keyframes message-enter {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
     }
   }
 }
@@ -765,6 +788,35 @@ label:has(> select#reasoning-effort) select {
 
 .chat-markdown .chat-markdown-shiki .shiki {
   background: transparent !important;
+}
+
+/* Gentle cross-in when a code block swaps from the plain Suspense fallback to
+   the Shiki-highlighted markup, so highlighting eases in instead of snapping.
+   Scoped to actively streaming messages: that is where the swap pops, and a
+   broader rule would replay whenever the virtualized list reinserts settled
+   rows (CSS animations restart on DOM reinsertion). */
+[data-streaming="true"] .chat-markdown-shiki {
+  animation: var(--animate-fade-in);
+}
+
+/* Soft fade on the streaming text edge: the newest ~1.5em of an actively
+   streaming assistant message materializes gently as it settles. Static,
+   GPU-composited mask (no JS, no per-frame cost); removed automatically when
+   the `data-streaming` attribute drops at turn completion. */
+[data-streaming="true"] {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 1.5em), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 1.5em), transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-message-enter,
+  [data-streaming="true"] .chat-markdown-shiki {
+    animation: none !important;
+  }
+  [data-streaming="true"] {
+    -webkit-mask-image: none !important;
+    mask-image: none !important;
+  }
 }
 
 /* Diagnostics-style tables: row separators only, uppercase headers, and a

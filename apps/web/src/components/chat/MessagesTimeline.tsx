@@ -317,6 +317,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     ],
   );
   const rows = useStableRows(rawRows);
+  // Rows that have already been revealed, so the mount-time entrance animation
+  // fires only for genuinely-new rows — never when a virtualized row scrolls
+  // back into view. Seeded once with the thread's initial rows so opening or
+  // switching a thread (this component remounts per thread) does not cascade.
+  const revealedRowIdsRef = useRef<Set<string> | null>(null);
+  if (revealedRowIdsRef.current === null) {
+    revealedRowIdsRef.current = new Set(rows.map((row) => row.id));
+  }
   const minimapItems = useMemo(() => deriveTimelineMinimapItems(rows), [rows]);
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
@@ -450,9 +458,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // from TimelineRowCtx, which propagates through LegendList's memo.
   const renderItem = useCallback(
     ({ item }: { item: MessagesTimelineRow }) => (
-      <div className="mx-auto w-full min-w-0 max-w-3xl overflow-x-clip" data-timeline-root="true">
-        <TimelineRowContent row={item} />
-      </div>
+      <TimelineRowShell row={item} revealedRowIds={revealedRowIdsRef.current!} />
     ),
     [],
   );
@@ -786,6 +792,57 @@ function TimelineMinimap({
 }
 
 // ---------------------------------------------------------------------------
+// TimelineRowShell — per-row wrapper that plays a one-shot entrance animation
+// the first time a row is revealed. The "new" decision is frozen for the
+// lifetime of this mount (via a ref) so streaming re-renders cannot cut the
+// animation short, and the row id is recorded after commit so a later remount
+// (scroll away/back) does not re-animate.
+// ---------------------------------------------------------------------------
+
+function TimelineRowShell({
+  row,
+  revealedRowIds,
+}: {
+  row: MessagesTimelineRow;
+  revealedRowIds: Set<string>;
+}) {
+  const isNewRef = useRef<boolean | null>(null);
+  if (isNewRef.current === null) {
+    isNewRef.current = !revealedRowIds.has(row.id);
+  }
+  // Drop the entrance class once it has played. LegendList reinserts row DOM
+  // nodes when the timeline restructures (e.g. a settling turn folds its work
+  // rows), and a CSS animation still applied to a node replays on reinsertion.
+  const [entered, setEntered] = useState(false);
+  const animateEnter = isNewRef.current && !entered;
+
+  useEffect(() => {
+    revealedRowIds.add(row.id);
+  }, [revealedRowIds, row.id]);
+
+  return (
+    <div
+      className={cn(
+        "mx-auto w-full min-w-0 max-w-3xl overflow-x-clip",
+        animateEnter && "animate-message-enter",
+      )}
+      data-timeline-root="true"
+      onAnimationEnd={
+        animateEnter
+          ? (event) => {
+              if (event.target === event.currentTarget) {
+                setEntered(true);
+              }
+            }
+          : undefined
+      }
+    >
+      <TimelineRowContent row={row} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // TimelineRowContent — the actual row component
 // ---------------------------------------------------------------------------
 
@@ -980,7 +1037,10 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
 
   return (
     <>
-      <div className="relative min-w-0 px-1 py-0.5">
+      <div
+        className="relative min-w-0 px-1 py-0.5"
+        data-streaming={row.message.streaming ? "true" : undefined}
+      >
         <ChatMarkdown
           text={messageText}
           cwd={ctx.markdownCwd}
