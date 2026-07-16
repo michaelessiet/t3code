@@ -31,6 +31,18 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
     if (this.latestRevision > 0) void this.persistLatest();
   }
 
+  /**
+   * Discard unsaved local changes (e.g. when the user chooses to reload the
+   * buffer from disk after a concurrent-edit conflict). Pending debounced
+   * saves are cancelled; an in-flight save settles without rescheduling.
+   */
+  reset(): void {
+    this.clearTimer();
+    this.latestContents = "";
+    this.latestRevision = 0;
+    if (!this.saving) this.options.onPendingChange(false);
+  }
+
   private schedule(delay: number): void {
     this.clearTimer();
     this.timer = setTimeout(() => {
@@ -58,6 +70,11 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
     }
 
     this.saving = false;
+    if (this.latestRevision === 0) {
+      // A reset() landed while this save was in flight; nothing left to persist.
+      this.options.onPendingChange(false);
+      return;
+    }
     if (revision === this.latestRevision) {
       if (succeeded) this.options.onPendingChange(false);
       return;

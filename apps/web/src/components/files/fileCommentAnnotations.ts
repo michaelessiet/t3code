@@ -14,6 +14,14 @@ export interface FileCommentAnnotationGroup {
 
 export type FileCommentLineAnnotation = LineAnnotation<FileCommentAnnotationGroup>;
 
+/**
+ * Stable identity for an annotation group across line moves: the first
+ * entry's id. Used to key annotation widgets and their rendered portals.
+ */
+export function fileCommentAnnotationGroupId(annotation: FileCommentLineAnnotation): string {
+  return annotation.metadata.entries[0]?.id ?? `file-comment-line-${annotation.lineNumber}`;
+}
+
 let fileCommentSequence = 0;
 
 export function nextFileCommentId(): string {

@@ -7,7 +7,7 @@ import type {
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/unstable/reactivity";
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { projectEnvironment } from "~/state/projects";
@@ -131,6 +131,44 @@ export function useProjectEntriesQuery(
     isPending: result.waiting,
     refresh,
   };
+}
+
+/**
+ * Revision of the file as last read from disk (never the optimistic local
+ * buffer, which carries no revision). `undefined` while loading or when the
+ * server predates revision support.
+ */
+export function useProjectFileDiskRevision(
+  environmentId: EnvironmentId,
+  cwd: string,
+  relativePath: string | null,
+): string | undefined {
+  const atom = getProjectFileQueryAtom(environmentId, cwd, relativePath);
+  const result = useAtomValue(atom);
+  if (relativePath === null) return undefined;
+  return Option.getOrNull(AsyncResult.value(result))?.revision;
+}
+
+/**
+ * Re-read the open file whenever the workspace watcher reports it may have
+ * changed on disk. The refreshed query result (contents + revision) drives
+ * buffer reconciliation: clean buffers re-render with the new contents, dirty
+ * buffers surface a conflict.
+ */
+export function useWorkspaceFileWatch(
+  environmentId: EnvironmentId,
+  cwd: string,
+  relativePath: string | null,
+  refresh: () => void,
+): void {
+  const watchResult = useAtomValue(
+    projectEnvironment.watchChanges({ environmentId, input: { cwd } }),
+  );
+  const event = Option.getOrNull(AsyncResult.value(watchResult));
+  useEffect(() => {
+    if (event === null || relativePath === null) return;
+    if (event._tag === "overflow" || event.paths.includes(relativePath)) refresh();
+  }, [event, relativePath, refresh]);
 }
 
 export function useProjectFileQuery(

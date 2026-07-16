@@ -127,6 +127,29 @@ describe("rightPanelStore", () => {
     });
   });
 
+  it("keeps search as a singleton surface", () => {
+    useRightPanelStore.getState().openSearch(refA);
+    useRightPanelStore.getState().openSearch(refA);
+    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
+      isOpen: true,
+      activeSurfaceId: "search",
+      surfaces: [{ id: "search", kind: "search" }],
+    });
+  });
+
+  it("removes the search surface when the workspace no longer exists", () => {
+    useRightPanelStore.getState().openSearch(refA);
+    useRightPanelStore.getState().open(refA, "plan");
+
+    useRightPanelStore.getState().reconcileFileSurfaces(refA, false);
+
+    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
+      isOpen: true,
+      activeSurfaceId: "plan",
+      surfaces: [{ id: "plan", kind: "plan" }],
+    });
+  });
+
   it("replaces the standalone explorer with peer file surfaces", () => {
     useRightPanelStore.getState().open(refA, "files");
     useRightPanelStore.getState().openFile(refA, "src/index.ts");

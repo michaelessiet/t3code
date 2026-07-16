@@ -260,6 +260,7 @@ const PreviewPanel = lazy(() =>
   import("./preview/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
 );
 const DiffPanel = lazy(() => import("./DiffPanel"));
+const SearchPanel = lazy(() => import("./SearchPanel"));
 const FilePreviewPanel = lazy(() => import("./files/FilePreviewPanel"));
 const EMPTY_PENDING_FILE_SURFACE_IDS: ReadonlySet<string> = new Set();
 const TYPE_TO_FOCUS_EDITABLE_SELECTOR = [
@@ -2778,10 +2779,14 @@ function ChatViewContent(props: ChatViewProps) {
     if (!activeThreadRef || !activeProject) return;
     useRightPanelStore.getState().open(activeThreadRef, "files");
   }, [activeProject, activeThreadRef]);
+  const addSearchSurface = useCallback(() => {
+    if (!activeThreadRef || !activeProject) return;
+    useRightPanelStore.getState().openSearch(activeThreadRef);
+  }, [activeProject, activeThreadRef]);
   const openFileSurface = useCallback(
-    (relativePath: string) => {
+    (relativePath: string, line?: number) => {
       if (!activeThreadRef || !activeProject) return;
-      useRightPanelStore.getState().openFile(activeThreadRef, relativePath);
+      useRightPanelStore.getState().openFile(activeThreadRef, relativePath, line);
     },
     [activeProject, activeThreadRef],
   );
@@ -3778,6 +3783,13 @@ function ChatViewContent(props: ChatViewProps) {
         return;
       }
 
+      if (command === "search.toggle") {
+        event.preventDefault();
+        event.stopPropagation();
+        addSearchSurface();
+        return;
+      }
+
       if (command === "modelPicker.toggle") {
         event.preventDefault();
         event.stopPropagation();
@@ -3811,6 +3823,7 @@ function ChatViewContent(props: ChatViewProps) {
     splitPanelTerminal,
     keybindings,
     onToggleDiff,
+    addSearchSurface,
     toggleRightPanel,
     toggleTerminalVisibility,
     composerRef,
@@ -4970,6 +4983,15 @@ function ChatViewContent(props: ChatViewProps) {
       <Suspense fallback={null}>
         <DiffPanel mode="embedded" composerDraftTarget={composerDraftTarget} />
       </Suspense>
+    ) : activeRightPanelSurface?.kind === "search" && activeProject && activeWorkspaceRoot ? (
+      <Suspense fallback={null}>
+        <SearchPanel
+          key={`${activeProject.environmentId}:${activeWorkspaceRoot}`}
+          environmentId={activeProject.environmentId}
+          cwd={activeWorkspaceRoot}
+          onOpenFile={openFileSurface}
+        />
+      </Suspense>
     ) : activeRightPanelSurface?.kind === "plan" ? (
       <PlanSidebar
         activePlan={activePlan}
@@ -5314,9 +5336,11 @@ function ChatViewContent(props: ChatViewProps) {
           onAddTerminal={addTerminalSurface}
           onAddDiff={addDiffSurface}
           onAddFiles={addFilesSurface}
+          onAddSearch={addSearchSurface}
           browserAvailable={isPreviewSupportedInRuntime()}
           diffAvailable={isServerThread && isGitRepo}
           filesAvailable={activeProject !== null}
+          searchAvailable={activeProject !== null}
         >
           {rightPanelContent}
         </RightPanelTabs>
@@ -5341,9 +5365,11 @@ function ChatViewContent(props: ChatViewProps) {
             onAddTerminal={addTerminalSurface}
             onAddDiff={addDiffSurface}
             onAddFiles={addFilesSurface}
+            onAddSearch={addSearchSurface}
             browserAvailable={isPreviewSupportedInRuntime()}
             diffAvailable={isServerThread && isGitRepo}
             filesAvailable={activeProject !== null}
+            searchAvailable={activeProject !== null}
           >
             {rightPanelContent}
           </RightPanelTabs>

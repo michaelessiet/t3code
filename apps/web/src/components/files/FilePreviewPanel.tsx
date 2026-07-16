@@ -4,16 +4,19 @@ import type {
   ResolvedKeybindingsConfig,
   ScopedThreadRef,
 } from "@t3tools/contracts";
-import { VirtualizedFile, type SelectedLineRange } from "@pierre/diffs";
-import { Editor } from "@pierre/diffs/editor";
-import { EditorProvider, File, type FileOptions, Virtualizer } from "@pierre/diffs/react";
+import { VirtualizedFile } from "@pierre/diffs";
+import { File, type FileOptions, Virtualizer } from "@pierre/diffs/react";
+import type { EditorView } from "@codemirror/view";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { ChevronRight, Code2, Eye, FolderTree, Globe2, LoaderCircle } from "lucide-react";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AsyncResult } from "effect/unstable/reactivity";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { isBrowserPreviewFile, openFileInPreview } from "~/browser/openFileInPreview";
 import ChatMarkdown from "~/components/ChatMarkdown";
@@ -39,26 +42,42 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
 import FileBrowserPanel from "./FileBrowserPanel";
+import { CodeMirrorFileEditor } from "./codemirror/CodeMirrorFileEditor";
+import { useLspBridge } from "./codemirror/useLspBridge";
+import {
+  type ReviewAnnotationSpec,
+  type ReviewLineRange,
+  reviewCommentsExtension,
+  setReviewAnnotations,
+  setReviewSelection,
+} from "./codemirror/reviewComments";
 import {
   type FileCommentAnnotationEntry,
-  type FileCommentAnnotationGroup,
   type FileCommentLineAnnotation,
+  fileCommentAnnotationGroupId,
   formatFileCommentRange,
   nextFileCommentId,
   normalizeFileCommentRange,
   remapFileCommentAnnotations,
 } from "./fileCommentAnnotations";
-import { installFileEditorDismissal } from "./fileEditorDismissal";
 import { LocalCommentAnnotation } from "./LocalCommentAnnotation";
 import { projectFileCacheKey } from "./fileContentRevision";
 import { fileBreadcrumbs } from "./filePath";
 import { isMarkdownPreviewFile, setMarkdownTaskChecked } from "./filePreviewMode";
+import {
+  type FileBufferConflictReason,
+  detectsExternalConflict,
+  isStaleRevisionWriteFailure,
+} from "./fileBufferConflict";
 import { FileSaveCoordinator } from "./fileSaveCoordinator";
 import {
+  clearProjectFileQueryData,
   confirmProjectFileQueryData,
   getOptimisticProjectFileQueryData,
   setProjectFileQueryData,
+  useProjectFileDiskRevision,
   useProjectFileQuery,
+  useWorkspaceFileWatch,
 } from "./projectFilesQueryState";
 
 interface FilePreviewPanelProps {
@@ -72,7 +91,7 @@ interface FilePreviewPanelProps {
   availableEditors: ReadonlyArray<EditorId>;
   revealLine: number | null;
   revealRequestId: number;
-  onOpenFile: (relativePath: string) => void;
+  onOpenFile: (relativePath: string, line?: number) => void;
   onPendingChange: (relativePath: string, pending: boolean) => void;
 }
 
@@ -247,38 +266,86 @@ interface EditableFileSurfaceProps {
   relativePath: string;
   composerDraftTarget: ScopedThreadRef | DraftId;
   contents: string;
-  resolvedTheme: "light" | "dark";
+  diskRevision: string | undefined;
+  revealLine: number | null;
   revealRequestId: number;
   wordWrap: boolean;
-  onPostRender: FilePostRender;
+  vimMode: boolean;
   onPendingChange: (relativePath: string, pending: boolean) => void;
+  onRefreshFile: () => void;
+  onOpenFile: (relativePath: string, line?: number) => void;
 }
 
 interface FileSelectionOverride {
   revealRequestId: number;
-  range: SelectedLineRange | null;
+  range: ReviewLineRange | null;
+}
+
+interface FileSaveCoordination {
+  readonly coordinator: FileSaveCoordinator;
+  /** True while local edits are unsaved or a save is in flight. */
+  readonly isDirty: () => boolean;
+  /** Base revision the buffer's edits are relative to; null when unknown. */
+  readonly baseRevision: () => string | null;
+  /** Forget the buffer's base revision (e.g. before reloading from disk). */
+  readonly resetBaseRevision: () => void;
+  /** Write unconditionally (no base-revision guard), e.g. "keep my version". */
+  readonly forcePersist: (contents: string) => Promise<boolean>;
 }
 
 function useFileSaveCoordinator({
   environmentId,
   cwd,
   relativePath,
+  diskRevision,
   onPendingChange,
-}: Pick<
-  EditableFileSurfaceProps,
-  "environmentId" | "cwd" | "relativePath" | "onPendingChange"
->): FileSaveCoordinator {
+  onStaleSave,
+}: Pick<EditableFileSurfaceProps, "environmentId" | "cwd" | "relativePath" | "onPendingChange"> & {
+  diskRevision: string | undefined;
+  onStaleSave?: () => void;
+}): FileSaveCoordination {
   const writeFile = useAtomCommand(projectEnvironment.writeFile);
+  const baseRevisionRef = useRef<string | null>(null);
+  const pendingRef = useRef(false);
+  const onStaleSaveRef = useRef(onStaleSave);
+  useEffect(() => {
+    onStaleSaveRef.current = onStaleSave;
+  }, [onStaleSave]);
+
+  // While the buffer is clean it follows the disk: whatever revision the
+  // query last read is what future edits are based on.
+  useEffect(() => {
+    if (!pendingRef.current && diskRevision !== undefined) {
+      baseRevisionRef.current = diskRevision;
+    }
+  }, [diskRevision]);
+
   const coordinator = useMemo(
     () =>
       new FileSaveCoordinator({
         debounceMs: FILE_SAVE_DEBOUNCE_MS,
-        onPendingChange: (pending) => onPendingChange(relativePath, pending),
-        persist: (nextContents) =>
-          writeFile({
+        onPendingChange: (pending) => {
+          pendingRef.current = pending;
+          onPendingChange(relativePath, pending);
+        },
+        persist: async (nextContents) => {
+          const baseRevision = baseRevisionRef.current;
+          const result = await writeFile({
             environmentId,
-            input: { cwd, relativePath, contents: nextContents },
-          }),
+            input: {
+              cwd,
+              relativePath,
+              contents: nextContents,
+              ...(baseRevision === null ? {} : { baseRevision }),
+            },
+          });
+          if (result._tag === "Success") {
+            baseRevisionRef.current = Option.getOrNull(AsyncResult.value(result))?.revision ?? null;
+          } else if (isStaleRevisionWriteFailure(result)) {
+            onStaleSaveRef.current?.();
+          }
+          return result;
+        },
         onConfirmed: (confirmedContents) => {
           confirmProjectFileQueryData(environmentId, cwd, relativePath, confirmedContents);
         },
@@ -286,8 +353,34 @@ function useFileSaveCoordinator({
     [cwd, environmentId, onPendingChange, relativePath, writeFile],
   );
 
+  const forcePersist = useCallback(
+    async (nextContents: string) => {
+      const result = await writeFile({
+        environmentId,
+        input: { cwd, relativePath, contents: nextContents },
+      });
+      if (result._tag !== "Success") return false;
+      baseRevisionRef.current = Option.getOrNull(AsyncResult.value(result))?.revision ?? null;
+      coordinator.reset();
+      confirmProjectFileQueryData(environmentId, cwd, relativePath, nextContents);
+      return true;
+    },
+    [coordinator, cwd, environmentId, relativePath, writeFile],
+  );
+
   useEffect(() => () => coordinator.dispose(), [coordinator]);
-  return coordinator;
+  return useMemo(
+    () => ({
+      coordinator,
+      isDirty: () => pendingRef.current,
+      baseRevision: () => baseRevisionRef.current,
+      resetBaseRevision: () => {
+        baseRevisionRef.current = null;
+      },
+      forcePersist,
+    }),
+    [coordinator, forcePersist],
+  );
 }
 
 function EditableFileSurface({
@@ -296,11 +389,14 @@ function EditableFileSurface({
   relativePath,
   composerDraftTarget,
   contents,
-  resolvedTheme,
+  diskRevision,
+  revealLine,
   revealRequestId,
   wordWrap,
-  onPostRender,
+  vimMode,
   onPendingChange,
+  onRefreshFile,
+  onOpenFile,
 }: EditableFileSurfaceProps) {
   const addReviewComment = useComposerDraftStore((store) => store.addReviewComment);
   const removeReviewComment = useComposerDraftStore((store) => store.removeReviewComment);
@@ -308,58 +404,127 @@ function EditableFileSurface({
   const [selectionOverride, setSelectionOverride] = useState<FileSelectionOverride | null>(null);
   const selectedRange =
     selectionOverride?.revealRequestId === revealRequestId ? selectionOverride.range : null;
-  const setSelectedRange = useCallback(
-    (range: SelectedLineRange | null) => {
-      setSelectionOverride({ revealRequestId, range });
-    },
-    [revealRequestId],
-  );
+  const revealRequestIdRef = useRef(revealRequestId);
+  useLayoutEffect(() => {
+    revealRequestIdRef.current = revealRequestId;
+  });
+  const setSelectedRange = useCallback((range: ReviewLineRange | null) => {
+    setSelectionOverride({ revealRequestId: revealRequestIdRef.current, range });
+  }, []);
   const surfaceRef = useRef<HTMLDivElement>(null);
-  const selectionFrameRef = useRef<number | null>(null);
-  const saveCoordinator = useFileSaveCoordinator({
+  const [conflict, setConflict] = useState<FileBufferConflictReason | null>(null);
+  const onStaleSave = useCallback(() => setConflict("stale-save"), []);
+  const saveCoordination = useFileSaveCoordinator({
     environmentId,
     cwd,
     relativePath,
+    diskRevision,
     onPendingChange,
+    onStaleSave,
   });
-  const editor = useMemo(
-    () =>
-      new Editor<FileCommentAnnotationGroup>({
-        onChange: (file, nextLineAnnotations) => {
-          setProjectFileQueryData(environmentId, cwd, relativePath, file.contents);
-          saveCoordinator.change(file.contents);
-          if (nextLineAnnotations) {
-            const remapped = remapFileCommentAnnotations(
-              nextLineAnnotations as FileCommentLineAnnotation[],
-            );
-            setLineAnnotations(remapped);
-            for (const annotation of remapped) {
-              for (const entry of annotation.metadata.entries) {
-                if (entry.kind !== "comment") continue;
-                addReviewComment(
-                  composerDraftTarget,
-                  buildFileReviewComment({
-                    id: entry.id,
-                    filePath: relativePath,
-                    startLine: entry.startLine,
-                    endLine: entry.endLine,
-                    text: entry.text,
-                    contents: file.contents,
-                  }),
-                );
-              }
-            }
-          }
-        },
-      }),
-    [addReviewComment, composerDraftTarget, cwd, environmentId, relativePath, saveCoordinator],
+  const saveCoordinator = saveCoordination.coordinator;
+
+  // The workspace watcher refreshed the file query underneath a dirty
+  // buffer: the disk no longer matches what these edits are based on.
+  useEffect(() => {
+    if (
+      detectsExternalConflict({
+        dirty: saveCoordination.isDirty(),
+        baseRevision: saveCoordination.baseRevision(),
+        diskRevision,
+      })
+    ) {
+      setConflict("external-change");
+    }
+  }, [diskRevision, saveCoordination]);
+
+  const resolveConflictByReloading = useCallback(() => {
+    saveCoordinator.reset();
+    saveCoordination.resetBaseRevision();
+    clearProjectFileQueryData(environmentId, cwd, relativePath);
+    setConflict(null);
+    onRefreshFile();
+  }, [cwd, environmentId, onRefreshFile, relativePath, saveCoordination, saveCoordinator]);
+
+  const resolveConflictByKeepingBuffer = useCallback(() => {
+    const bufferContents =
+      getOptimisticProjectFileQueryData(environmentId, cwd, relativePath)?.contents ?? contents;
+    void saveCoordination.forcePersist(bufferContents).then((persisted) => {
+      if (persisted) {
+        setConflict(null);
+        return;
+      }
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Unable to save file",
+          description: "Keeping your version failed; the file was not written.",
+        }),
+      );
+    });
+  }, [contents, cwd, environmentId, relativePath, saveCoordination]);
+
+  const [editorView, setEditorView] = useState<EditorView | null>(null);
+  const editorViewRef = useRef<EditorView | null>(null);
+  const handleViewReady = useCallback((view: EditorView | null) => {
+    editorViewRef.current = view;
+    setEditorView(view);
+  }, []);
+
+  const handleContentsChange = useCallback(
+    (nextContents: string) => {
+      setProjectFileQueryData(environmentId, cwd, relativePath, nextContents);
+      saveCoordinator.change(nextContents);
+    },
+    [cwd, environmentId, relativePath, saveCoordinator],
   );
 
-  useEffect(
-    () => () => {
-      editor.cleanUp();
+  // Document edits move annotation anchors inside the editor; mirror the new
+  // line numbers into React state and refresh the composer's review comments
+  // so their ranges and code excerpts track the buffer (the Pierre editor's
+  // onChange annotation remap did the same).
+  const lineAnnotationsRef = useRef(lineAnnotations);
+  useLayoutEffect(() => {
+    lineAnnotationsRef.current = lineAnnotations;
+  });
+  const composerDraftTargetRef = useRef(composerDraftTarget);
+  useLayoutEffect(() => {
+    composerDraftTargetRef.current = composerDraftTarget;
+  });
+  const handleAnnotationLinesChanged = useCallback(
+    (annotationLines: ReadonlyArray<ReviewAnnotationSpec>) => {
+      const lineByGroupId = new Map(
+        annotationLines.map((annotationLine) => [annotationLine.id, annotationLine.lineNumber]),
+      );
+      const moved = lineAnnotationsRef.current.map((annotation) => {
+        const nextLineNumber =
+          lineByGroupId.get(fileCommentAnnotationGroupId(annotation)) ?? annotation.lineNumber;
+        return nextLineNumber === annotation.lineNumber
+          ? annotation
+          : { ...annotation, lineNumber: nextLineNumber };
+      });
+      const remapped = remapFileCommentAnnotations(moved);
+      setLineAnnotations(remapped);
+      const bufferContents = editorViewRef.current?.state.doc.toString();
+      if (bufferContents === undefined) return;
+      for (const annotation of remapped) {
+        for (const entry of annotation.metadata.entries) {
+          if (entry.kind !== "comment") continue;
+          addReviewComment(
+            composerDraftTargetRef.current,
+            buildFileReviewComment({
+              id: entry.id,
+              filePath: relativePath,
+              startLine: entry.startLine,
+              endLine: entry.endLine,
+              text: entry.text,
+              contents: bufferContents,
+            }),
+          );
+        }
+      }
     },
-    [editor],
+    [addReviewComment, relativePath],
   );
 
   const removeAnnotationEntry = useCallback(
@@ -418,7 +583,7 @@ function EditableFileSurface({
     ],
   );
 
-  const beginComment = useCallback((range: SelectedLineRange) => {
+  const beginComment = useCallback((range: ReviewLineRange) => {
     const { startLine, endLine } = normalizeFileCommentRange(range);
     const draftEntry: FileCommentAnnotationEntry = {
       id: nextFileCommentId(),
@@ -457,18 +622,28 @@ function EditableFileSurface({
   const hasOpenCommentForm = lineAnnotations.some((annotation) =>
     annotation.metadata.entries.some((entry) => entry.kind === "draft"),
   );
+  const hasOpenCommentFormRef = useRef(hasOpenCommentForm);
+  useLayoutEffect(() => {
+    hasOpenCommentFormRef.current = hasOpenCommentForm;
+  });
+
+  // Clicking outside the surface dismisses the current line selection unless
+  // a draft comment form is open (matching the Pierre-based surface).
   useEffect(() => {
     const root = surfaceRef.current;
     if (!root) return;
-    return installFileEditorDismissal({
-      root,
-      editor,
-      isBlocked: () => hasOpenCommentForm,
-      onDismiss: () => setSelectedRange(null),
-    });
-  }, [editor, hasOpenCommentForm, setSelectedRange]);
+    const handlePointerDown = (event: PointerEvent) => {
+      if (hasOpenCommentFormRef.current || event.composedPath().includes(root)) return;
+      setSelectedRange(null);
+    };
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+    };
+  }, [setSelectedRange]);
+
   const handleLineSelectionEnd = useCallback(
-    (range: SelectedLineRange | null) => {
+    (range: ReviewLineRange | null) => {
       setSelectedRange(range);
       if (range) {
         beginComment(range);
@@ -477,77 +652,127 @@ function EditableFileSurface({
     [beginComment, setSelectedRange],
   );
 
-  const handlePostRender = useCallback<FilePostRender>(
-    (fileContainer, instance, phase) => {
-      onPostRender(fileContainer, instance, phase);
+  // Detached containers the annotation UI renders into via portals; the
+  // review-comments extension mounts them below their anchored lines.
+  const annotationContainersRef = useRef(new Map<string, HTMLElement>());
+  const getAnnotationContainer = useCallback((groupId: string) => {
+    const existing = annotationContainersRef.current.get(groupId);
+    if (existing) return existing;
+    const container = document.createElement("div");
+    annotationContainersRef.current.set(groupId, container);
+    return container;
+  }, []);
 
-      if (selectionFrameRef.current !== null) {
-        cancelAnimationFrame(selectionFrameRef.current);
-        selectionFrameRef.current = null;
-      }
-      if (phase === "unmount") return;
-
-      selectionFrameRef.current = requestAnimationFrame(() => {
-        selectionFrameRef.current = null;
-        if (!fileContainer.isConnected) return;
-        instance.setSelectedLines(selectedRange, { notify: false });
-      });
-    },
-    [onPostRender, selectedRange],
+  const reviewExtension = useMemo(
+    () =>
+      reviewCommentsExtension({
+        isSelectionEnabled: () => !hasOpenCommentFormRef.current,
+        onSelectionChange: setSelectedRange,
+        onSelectionEnd: handleLineSelectionEnd,
+        getAnnotationContainer,
+        onAnnotationLinesChanged: handleAnnotationLinesChanged,
+      }),
+    [
+      getAnnotationContainer,
+      handleAnnotationLinesChanged,
+      handleLineSelectionEnd,
+      setSelectedRange,
+    ],
   );
 
+  const onOpenFileAtLine = useCallback(
+    (targetRelativePath: string, line: number) => onOpenFile(targetRelativePath, line),
+    [onOpenFile],
+  );
+  const lspExtension = useLspBridge({
+    environmentId,
+    cwd,
+    relativePath,
+    view: editorView,
+    onOpenFileAtLine,
+  });
+  const editorExtensions = useMemo(
+    () => [reviewExtension, lspExtension ?? []],
+    [lspExtension, reviewExtension],
+  );
+
+  useEffect(() => {
+    if (editorView === null) return;
+    setReviewSelection(editorView, selectedRange);
+  }, [editorView, selectedRange]);
+
+  useEffect(() => {
+    if (editorView === null) return;
+    const specs = lineAnnotations.map((annotation) => ({
+      id: fileCommentAnnotationGroupId(annotation),
+      lineNumber: annotation.lineNumber,
+    }));
+    setReviewAnnotations(editorView, specs);
+    const liveGroupIds = new Set(specs.map((spec) => spec.id));
+    for (const groupId of annotationContainersRef.current.keys()) {
+      if (!liveGroupIds.has(groupId)) annotationContainersRef.current.delete(groupId);
+    }
+  }, [editorView, lineAnnotations]);
+
   return (
-    <EditorProvider editor={editor}>
-      <div ref={surfaceRef} className="flex min-h-0 flex-1">
-        <Virtualizer
-          className="file-preview-virtualizer min-h-0 flex-1 overflow-auto"
-          config={{
-            overscrollSize: 600,
-            intersectionObserverMargin: 1200,
-          }}
+    <div ref={surfaceRef} className="flex min-h-0 flex-1 flex-col">
+      {conflict !== null ? (
+        <div
+          className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-amber-500/20 bg-amber-500/8 px-3 py-1.5 text-[11px] text-amber-700 dark:text-amber-300"
+          data-file-conflict-banner
         >
-          <File<FileCommentAnnotationGroup>
-            file={{
-              name: relativePath,
-              contents,
-              cacheKey: projectFileCacheKey(cwd, relativePath, contents),
-            }}
-            options={{
-              disableFileHeader: true,
-              enableGutterUtility: !hasOpenCommentForm,
-              enableLineSelection: !hasOpenCommentForm,
-              onGutterUtilityClick: setSelectedRange,
-              onLineSelectionChange: setSelectedRange,
-              onLineSelectionEnd: handleLineSelectionEnd,
-              overflow: wordWrap ? "wrap" : "scroll",
-              theme: resolveDiffThemeName(resolvedTheme),
-              themeType: resolvedTheme,
-              unsafeCSS: FILE_LINK_REVEAL_UNSAFE_CSS,
-              onPostRender: handlePostRender,
-            }}
-            selectedLines={selectedRange}
-            lineAnnotations={lineAnnotations}
-            renderAnnotation={(annotation) => (
-              <div className="py-1">
-                {annotation.metadata.entries.map((entry) => (
-                  <LocalCommentAnnotation
-                    key={entry.id}
-                    kind={entry.kind}
-                    rangeLabel={formatFileCommentRange(entry.startLine, entry.endLine)}
-                    text={entry.text}
-                    onCancel={() => removeAnnotationEntry(entry.id)}
-                    onComment={(text) => submitAnnotationEntry(entry.id, text)}
-                    onDelete={() => removeAnnotationEntry(entry.id)}
-                  />
-                ))}
-              </div>
-            )}
-            className="min-h-full"
-            contentEditable
-          />
-        </Virtualizer>
-      </div>
-    </EditorProvider>
+          <span className="min-w-0 flex-1">
+            This file changed on disk while you were editing. Your edits are not being saved.
+          </span>
+          <button
+            type="button"
+            className="shrink-0 font-medium underline underline-offset-2 hover:opacity-80"
+            onClick={resolveConflictByReloading}
+          >
+            Reload from disk
+          </button>
+          <button
+            type="button"
+            className="shrink-0 font-medium underline underline-offset-2 hover:opacity-80"
+            onClick={resolveConflictByKeepingBuffer}
+          >
+            Keep my version
+          </button>
+        </div>
+      ) : null}
+      <CodeMirrorFileEditor
+        className="min-h-0 flex-1 overflow-hidden"
+        relativePath={relativePath}
+        contents={contents}
+        wordWrap={wordWrap}
+        vimMode={vimMode}
+        revealLine={revealLine}
+        revealRequestId={revealRequestId}
+        extensions={editorExtensions}
+        onContentsChange={handleContentsChange}
+        onViewReady={handleViewReady}
+      />
+      {lineAnnotations.map((annotation) => {
+        const groupId = fileCommentAnnotationGroupId(annotation);
+        return createPortal(
+          <div className="py-1">
+            {annotation.metadata.entries.map((entry) => (
+              <LocalCommentAnnotation
+                key={entry.id}
+                kind={entry.kind}
+                rangeLabel={formatFileCommentRange(entry.startLine, entry.endLine)}
+                text={entry.text}
+                onCancel={() => removeAnnotationEntry(entry.id)}
+                onComment={(text) => submitAnnotationEntry(entry.id, text)}
+                onDelete={() => removeAnnotationEntry(entry.id)}
+              />
+            ))}
+          </div>,
+          getAnnotationContainer(groupId),
+          groupId,
+        );
+      })}
+    </div>
   );
 }
 
@@ -556,25 +781,45 @@ function RenderedMarkdownSurface({
   cwd,
   relativePath,
   contents,
+  diskRevision,
   threadRef,
   onPendingChange,
+  onRefreshFile,
 }: Omit<
   EditableFileSurfaceProps,
-  | "resolvedTheme"
-  | "composerDraftTarget"
-  | "revealLine"
-  | "revealRequestId"
-  | "wordWrap"
-  | "onPostRender"
+  "composerDraftTarget" | "revealLine" | "revealRequestId" | "wordWrap" | "vimMode" | "onOpenFile"
 > & {
   threadRef: ScopedThreadRef;
 }) {
-  const saveCoordinator = useFileSaveCoordinator({
+  // Rendered-markdown edits are single checkbox toggles; on a concurrent-edit
+  // conflict the safest resolution is reloading the disk state and letting
+  // the user re-apply the toggle.
+  const coordinationRef = useRef<FileSaveCoordination | null>(null);
+  const onStaleSave = useCallback(() => {
+    coordinationRef.current?.coordinator.reset();
+    coordinationRef.current?.resetBaseRevision();
+    clearProjectFileQueryData(environmentId, cwd, relativePath);
+    onRefreshFile();
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: "File changed on disk",
+        description: "Reloaded the latest contents; your last change was not saved.",
+      }),
+    );
+  }, [cwd, environmentId, onRefreshFile, relativePath]);
+  const saveCoordination = useFileSaveCoordinator({
     environmentId,
     cwd,
     relativePath,
+    diskRevision,
     onPendingChange,
+    onStaleSave,
   });
+  useEffect(() => {
+    coordinationRef.current = saveCoordination;
+  }, [saveCoordination]);
+  const saveCoordinator = saveCoordination.coordinator;
 
   return (
     <ScrollArea className="min-h-0 flex-1">
@@ -622,6 +867,7 @@ export default function FilePreviewPanel({
 }: FilePreviewPanelProps) {
   const { resolvedTheme } = useTheme();
   const wordWrap = useClientSettings((settings) => settings.wordWrap);
+  const vimMode = useClientSettings((settings) => settings.vimMode);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const environmentHttpBaseUrl = useEnvironmentHttpBaseUrl(environmentId);
   const createAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
@@ -631,6 +877,8 @@ export default function FilePreviewPanel({
     reportFailure: false,
   });
   const file = useProjectFileQuery(environmentId, cwd, relativePath);
+  const diskRevision = useProjectFileDiskRevision(environmentId, cwd, relativePath);
+  useWorkspaceFileWatch(environmentId, cwd, relativePath, file.refresh);
   const [explorerOpen, setExplorerOpen] = useState(initialExplorerOpen);
   const [markdownView, setMarkdownView] = useState<{
     path: string | null;
@@ -834,7 +1082,9 @@ export default function FilePreviewPanel({
                 relativePath={relativePath}
                 threadRef={threadRef}
                 contents={file.data.contents}
+                diskRevision={diskRevision}
                 onPendingChange={onPendingChange}
+                onRefreshFile={file.refresh}
               />
             ) : file.data.truncated ? (
               <Virtualizer
@@ -864,17 +1114,20 @@ export default function FilePreviewPanel({
               </Virtualizer>
             ) : (
               <EditableFileSurface
-                key={`${relativePath}:${resolvedTheme}`}
+                key={relativePath}
                 environmentId={environmentId}
                 cwd={cwd}
                 relativePath={relativePath}
                 composerDraftTarget={composerDraftTarget}
                 contents={file.data.contents}
-                resolvedTheme={resolvedTheme}
+                diskRevision={diskRevision}
+                revealLine={revealLine}
                 revealRequestId={revealRequestId}
                 wordWrap={wordWrap}
-                onPostRender={onFilePostRender}
+                vimMode={vimMode}
                 onPendingChange={onPendingChange}
+                onRefreshFile={file.refresh}
+                onOpenFile={onOpenFile}
               />
             )
           ) : null}
