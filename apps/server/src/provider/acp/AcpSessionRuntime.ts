@@ -47,7 +47,13 @@ export interface AcpSessionEventStreamBarrier {
 export type AcpSessionRuntimeEvent = AcpParsedSessionEvent | AcpSessionEventStreamBarrier;
 
 const defaultSessionLoadTimeout = Duration.seconds(90);
-const defaultSessionLoadReplayIdleGap = Duration.seconds(2);
+// How long the replay stream must stay quiet before we treat session/load as
+// settled. Replay notifications are also dropped by their _meta.isReplay flag
+// after the gate closes, so a short gap only risks briefly re-gating live
+// events, not replay leakage. Keep this small: it is pure added latency on
+// every thread open/resume. Adapters can override via
+// AcpSessionRuntimeOptions.sessionLoadReplayIdleGap.
+const defaultSessionLoadReplayIdleGap = Duration.millis(500);
 
 export interface AcpSpawnInput {
   readonly command: string;

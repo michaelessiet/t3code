@@ -1,10 +1,12 @@
 import {
   EnvironmentId,
   EventId,
+  MessageId,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   type OrchestrationThread,
   type OrchestrationThreadDetailSnapshot,
   type OrchestrationThreadStreamItem,
@@ -233,6 +235,51 @@ const titleUpdated = (title: string, sequence = 2): OrchestrationThreadStreamIte
   },
 });
 
+const MESSAGE_ID = MessageId.make("assistant:item-1");
+const TURN_ID = TurnId.make("turn-1");
+
+const ephemeralDelta = (delta: string, offset: number): OrchestrationThreadStreamItem => ({
+  kind: "ephemeral-delta",
+  threadId: THREAD_ID,
+  messageId: MESSAGE_ID,
+  turnId: TURN_ID,
+  delta,
+  offset,
+  createdAt: "2026-04-01T01:00:00.000Z",
+});
+
+const assistantMessageSent = (
+  text: string,
+  options: { readonly sequence: number; readonly streaming?: boolean; readonly eventId?: string },
+): OrchestrationThreadStreamItem => ({
+  kind: "event",
+  event: {
+    eventId: EventId.make(options.eventId ?? `event-message-${options.sequence}`),
+    sequence: options.sequence,
+    occurredAt: "2026-04-01T01:00:00.000Z",
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    aggregateKind: "thread",
+    aggregateId: THREAD_ID,
+    type: "thread.message-sent",
+    payload: {
+      threadId: THREAD_ID,
+      messageId: MESSAGE_ID,
+      role: "assistant",
+      text,
+      turnId: TURN_ID,
+      streaming: options.streaming ?? true,
+      createdAt: "2026-04-01T01:00:00.000Z",
+      updatedAt: "2026-04-01T01:00:00.000Z",
+    },
+  },
+});
+
+const messageText = (state: EnvironmentThreadState): string | undefined =>
+  Option.getOrThrow(state.data).messages.find((message) => message.id === MESSAGE_ID)?.text;
+
 const deleted = (): OrchestrationThreadStreamItem => ({
   kind: "event",
   event: {
@@ -447,6 +494,109 @@ describe("EnvironmentThreads", () => {
       expect(Option.isNone(recovered.error)).toBe(true);
       expect(yield* Ref.get(harness.subscriptionCount)).toBe(2);
       expect(yield* Ref.get(harness.retryCount)).toBe(0);
+    }),
+  );
+
+  it.effect("overlays ephemeral deltas and reconciles them against the persisted flush", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ cached: BASE_THREAD });
+      yield* Queue.offer(harness.inputs, snapshot(BASE_THREAD));
+      yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+
+      // Ephemeral deltas render immediately, before any persisted event exists
+      // for the message.
+      yield* Queue.offer(harness.inputs, ephemeralDelta("Hello", 0));
+      yield* Queue.offer(harness.inputs, ephemeralDelta(" world", 5));
+      const overlaid = yield* awaitThreadState(
+        harness.observed,
+        (value) => Option.isSome(value.data) && messageText(value) === "Hello world",
+      );
+      expect(messageText(overlaid)).toBe("Hello world");
+
+      // The persisted coalesced flush carries the same characters; rendering
+      // must not duplicate them.
+      yield* Queue.offer(harness.inputs, assistantMessageSent("Hello world", { sequence: 2 }));
+      yield* Queue.offer(harness.inputs, ephemeralDelta("!", 11));
+      const reconciled = yield* awaitThreadState(
+        harness.observed,
+        (value) => Option.isSome(value.data) && messageText(value) === "Hello world!",
+      );
+      expect(messageText(reconciled)).toBe("Hello world!");
+
+      // The cache only ever sees persisted text — never the overlay — so a
+      // resume replay cannot double-apply the overlaid characters.
+      yield* TestClock.adjust("500 millis");
+      yield* Effect.yieldNow;
+      const savedTexts = (yield* Ref.get(harness.savedThreads)).map(
+        (saved) => saved.thread.messages.find((message) => message.id === MESSAGE_ID)?.text,
+      );
+      expect(savedTexts.at(-1)).toBe("Hello world");
+    }),
+  );
+
+  it.effect("drops non-contiguous ephemeral deltas and self-heals from the persisted flush", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ cached: BASE_THREAD });
+      yield* Queue.offer(harness.inputs, snapshot(BASE_THREAD));
+      yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+
+      // A mid-stream subscriber misses the early ephemerals: this delta is not
+      // contiguous with anything the client has, so it must be ignored.
+      yield* Queue.offer(harness.inputs, ephemeralDelta(" world", 5));
+      // The persisted flush then delivers the full prefix.
+      yield* Queue.offer(harness.inputs, assistantMessageSent("Hello world", { sequence: 2 }));
+      const healed = yield* awaitThreadState(
+        harness.observed,
+        (value) => Option.isSome(value.data) && messageText(value) === "Hello world",
+      );
+      expect(messageText(healed)).toBe("Hello world");
+
+      // Contiguity is restored after the flush, so live deltas apply again.
+      yield* Queue.offer(harness.inputs, ephemeralDelta("!", 11));
+      const resumed = yield* awaitThreadState(
+        harness.observed,
+        (value) => Option.isSome(value.data) && messageText(value) === "Hello world!",
+      );
+      expect(messageText(resumed)).toBe("Hello world!");
+    }),
+  );
+
+  it.effect("drops the overlay once the assistant message finalizes", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ cached: BASE_THREAD });
+      yield* Queue.offer(harness.inputs, snapshot(BASE_THREAD));
+      yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+
+      yield* Queue.offer(harness.inputs, ephemeralDelta("Hello", 0));
+      yield* awaitThreadState(
+        harness.observed,
+        (value) => Option.isSome(value.data) && messageText(value) === "Hello",
+      );
+
+      // Finalization (streaming: false) supersedes any overlaid text.
+      yield* Queue.offer(harness.inputs, assistantMessageSent("Hello there", { sequence: 2 }));
+      yield* Queue.offer(
+        harness.inputs,
+        assistantMessageSent("", { sequence: 3, streaming: false, eventId: "event-finalize" }),
+      );
+      const finalized = yield* awaitThreadState(
+        harness.observed,
+        (value) =>
+          Option.isSome(value.data) &&
+          Option.getOrThrow(value.data).messages.some(
+            (message) => message.id === MESSAGE_ID && !message.streaming,
+          ),
+      );
+      expect(messageText(finalized)).toBe("Hello there");
+
+      // Stale ephemerals for a finalized message are ignored.
+      yield* Queue.offer(harness.inputs, ephemeralDelta("junk", 11));
+      yield* Queue.offer(harness.inputs, titleUpdated("After finalize", 4));
+      const after = yield* awaitThreadState(
+        harness.observed,
+        (value) => Option.isSome(value.data) && value.data.value.title === "After finalize",
+      );
+      expect(messageText(after)).toBe("Hello there");
     }),
   );
 

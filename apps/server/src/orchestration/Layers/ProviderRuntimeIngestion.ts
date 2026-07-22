@@ -19,15 +19,21 @@ import {
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
+import { providerIngestionQueueWait } from "../../observability/Metrics.ts";
+
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { AssistantStreamBus } from "../AssistantStreamBus.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
@@ -54,6 +60,11 @@ const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_TTL = Duration.minutes(120);
 const BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY = 10_000;
 const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
+// In streaming mode, deltas are coalesced in the buffer and flushed at most
+// once per window (or immediately past the size cap) so a fast token stream
+// doesn't pay one SQLite transaction per token.
+const STREAMING_DELTA_FLUSH_WINDOW = Duration.millis(75);
+const STREAMING_DELTA_FLUSH_MAX_CHARS = 2_048;
 const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
 
 type TurnStartRequestedDomainEvent = Extract<
@@ -61,7 +72,7 @@ type TurnStartRequestedDomainEvent = Extract<
   { type: "thread.turn-start-requested" }
 >;
 
-type RuntimeIngestionInput =
+type RuntimeIngestionInput = (
   | {
       source: "runtime";
       event: ProviderRuntimeEvent;
@@ -69,7 +80,18 @@ type RuntimeIngestionInput =
   | {
       source: "domain";
       event: TurnStartRequestedDomainEvent;
-    };
+    }
+  | {
+      source: "assistant-delta-flush";
+      event: ProviderRuntimeEvent;
+      threadId: ThreadId;
+      messageId: MessageId;
+      turnId?: TurnId;
+      createdAt: string;
+    }
+) & {
+  receivedAtMs?: number;
+};
 
 function toTurnId(value: TurnId | string | undefined): TurnId | undefined {
   return value === undefined ? undefined : TurnId.make(String(value));
@@ -634,6 +656,7 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
+  const assistantStreamBus = yield* AssistantStreamBus;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
     crypto.randomUUIDv4.pipe(
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
@@ -664,6 +687,51 @@ const make = Effect.gen(function* () {
     capacity: BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY,
     timeToLive: BUFFERED_PROPOSED_PLAN_BY_ID_TTL,
     lookup: () => Effect.succeed({ text: "", createdAt: "" }),
+  });
+
+  const ingestionScope = yield* Effect.scope;
+  // Message ids with a coalescing flush already queued. Mutated only from the
+  // single worker fiber, so a plain Set is safe.
+  const pendingStreamingFlushes = new Set<MessageId>();
+  // Total assistant text length appended per message, used as the offset of
+  // ephemeral deltas so clients can check contiguity before overlaying.
+  const appendedCharsByMessageId = new Map<MessageId, number>();
+  // Turns whose diff checkpoint/placeholder is already tracked, letting the
+  // frequent turn.diff.updated events skip their projection + git checks.
+  const trackedDiffPlaceholderTurnKeys = new Set<string>();
+  // Only positive results are memoized: a directory can become a git repo
+  // later, but repos do not silently stop being repos mid-session.
+  const knownGitRepositoryCwds = new Set<string>();
+  const isGitRepositoryMemoized = (cwd: string): boolean => {
+    if (knownGitRepositoryCwds.has(cwd)) {
+      return true;
+    }
+    const result = isGitRepository(cwd);
+    if (result) {
+      knownGitRepositoryCwds.add(cwd);
+    }
+    return result;
+  };
+
+  // Flush timers enqueue back into the worker, which is created after the
+  // processors it wraps. Bind lazily to break the resulting type cycle; the
+  // binding is assigned right after the worker exists, before any timer runs.
+  let enqueueWorkerInput: (input: RuntimeIngestionInput) => Effect.Effect<void> = () => Effect.void;
+  const enqueueIngestionInput = (input: RuntimeIngestionInput): Effect.Effect<void> =>
+    Effect.suspend(() => enqueueWorkerInput(input));
+
+  const assistantDeliveryModeRef = yield* Ref.make<AssistantDeliveryMode | undefined>(undefined);
+  const getAssistantDeliveryMode = Effect.gen(function* () {
+    const cached = yield* Ref.get(assistantDeliveryModeRef);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const settings = yield* serverSettingsService.getSettings;
+    const mode: AssistantDeliveryMode = settings.enableAssistantStreaming
+      ? "streaming"
+      : "buffered";
+    yield* Ref.set(assistantDeliveryModeRef, mode);
+    return mode;
   });
 
   const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (threadId: ThreadId) {
@@ -799,7 +867,11 @@ const make = Effect.gen(function* () {
       });
     });
 
-  const appendBufferedAssistantText = (messageId: MessageId, delta: string) =>
+  const appendBufferedAssistantText = (
+    messageId: MessageId,
+    delta: string,
+    maxChars: number = MAX_BUFFERED_ASSISTANT_CHARS,
+  ) =>
     Cache.getOption(bufferedAssistantTextByMessageId, messageId).pipe(
       Effect.flatMap((existingText) =>
         Effect.gen(function* () {
@@ -807,7 +879,7 @@ const make = Effect.gen(function* () {
             onNone: () => delta,
             onSome: (text) => `${text}${delta}`,
           });
-          if (nextText.length <= MAX_BUFFERED_ASSISTANT_CHARS) {
+          if (nextText.length <= maxChars) {
             yield* Cache.set(bufferedAssistantTextByMessageId, messageId, nextText);
             return "";
           }
@@ -856,7 +928,9 @@ const make = Effect.gen(function* () {
     Cache.invalidate(bufferedProposedPlanById, planId);
 
   const clearAssistantMessageState = (messageId: MessageId) =>
-    clearBufferedAssistantText(messageId);
+    Effect.sync(() => appendedCharsByMessageId.delete(messageId)).pipe(
+      Effect.flatMap(() => clearBufferedAssistantText(messageId)),
+    );
 
   const flushBufferedAssistantMessage = (input: {
     event: ProviderRuntimeEvent;
@@ -1086,6 +1160,11 @@ const make = Effect.gen(function* () {
   const clearTurnStateForSession = (threadId: ThreadId) =>
     Effect.gen(function* () {
       const prefix = `${threadId}:`;
+      for (const key of trackedDiffPlaceholderTurnKeys) {
+        if (key.startsWith(prefix)) {
+          trackedDiffPlaceholderTurnKeys.delete(key);
+        }
+      }
       const proposedPlanPrefix = `plan:${threadId}:`;
       const turnKeys = Array.from(yield* Cache.keys(turnMessageIdsByTurnKey));
       const assistantSegmentKeys = Array.from(yield* Cache.keys(assistantSegmentStateByTurnKey));
@@ -1376,10 +1455,7 @@ const make = Effect.gen(function* () {
           yield* rememberAssistantMessageId(thread.id, turnId, assistantMessageId);
         }
 
-        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
-          serverSettingsService.getSettings,
-          (settings) => (settings.enableAssistantStreaming ? "streaming" : "buffered"),
-        );
+        const assistantDeliveryMode = yield* getAssistantDeliveryMode;
         if (assistantDeliveryMode === "buffered") {
           const spillChunk = yield* appendBufferedAssistantText(assistantMessageId, assistantDelta);
           if (spillChunk.length > 0) {
@@ -1394,15 +1470,51 @@ const make = Effect.gen(function* () {
             });
           }
         } else {
-          yield* orchestrationEngine.dispatch({
-            type: "thread.message.assistant.delta",
-            commandId: yield* providerCommandId(event, "assistant-delta"),
+          // Fan the delta out to live subscribers before any persistence work.
+          const offset = appendedCharsByMessageId.get(assistantMessageId) ?? 0;
+          appendedCharsByMessageId.set(assistantMessageId, offset + assistantDelta.length);
+          yield* assistantStreamBus.publish({
             threadId: thread.id,
             messageId: assistantMessageId,
+            turnId: turnId ?? null,
             delta: assistantDelta,
-            ...(turnId ? { turnId } : {}),
+            offset,
             createdAt: now,
           });
+
+          const spillChunk = yield* appendBufferedAssistantText(
+            assistantMessageId,
+            assistantDelta,
+            STREAMING_DELTA_FLUSH_MAX_CHARS,
+          );
+          if (spillChunk.length > 0) {
+            yield* orchestrationEngine.dispatch({
+              type: "thread.message.assistant.delta",
+              commandId: yield* providerCommandId(event, "assistant-delta-coalesced"),
+              threadId: thread.id,
+              messageId: assistantMessageId,
+              delta: spillChunk,
+              ...(turnId ? { turnId } : {}),
+              createdAt: now,
+            });
+          } else if (!pendingStreamingFlushes.has(assistantMessageId)) {
+            pendingStreamingFlushes.add(assistantMessageId);
+            // Enqueue the flush through the worker so it keeps its position
+            // relative to turn-boundary events instead of racing them.
+            yield* Effect.sleep(STREAMING_DELTA_FLUSH_WINDOW).pipe(
+              Effect.flatMap(() =>
+                enqueueIngestionInput({
+                  source: "assistant-delta-flush",
+                  event,
+                  threadId: thread.id,
+                  messageId: assistantMessageId,
+                  ...(turnId ? { turnId } : {}),
+                  createdAt: now,
+                }),
+              ),
+              Effect.forkIn(ingestionScope),
+            );
+          }
         }
       }
 
@@ -1412,23 +1524,18 @@ const make = Effect.gen(function* () {
           : undefined;
       if (pauseForUserTurnId) {
         const detailedThread = yield* getLoadedThreadDetail();
-        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
-          serverSettingsService.getSettings,
-          (settings) => (settings.enableAssistantStreaming ? "streaming" : "buffered"),
-        );
-        const flushedMessageIds =
-          assistantDeliveryMode === "buffered"
-            ? yield* flushBufferedAssistantMessagesForTurn({
-                event,
-                threadId: thread.id,
-                turnId: pauseForUserTurnId,
-                createdAt: now,
-                commandTag:
-                  event.type === "request.opened"
-                    ? "assistant-delta-flush-on-request-opened"
-                    : "assistant-delta-flush-on-user-input-requested",
-              })
-            : new Set<MessageId>();
+        // Both delivery modes accumulate text in the shared buffer (streaming
+        // mode coalesces), so always flush at a pause-for-user boundary.
+        const flushedMessageIds = yield* flushBufferedAssistantMessagesForTurn({
+          event,
+          threadId: thread.id,
+          turnId: pauseForUserTurnId,
+          createdAt: now,
+          commandTag:
+            event.type === "request.opened"
+              ? "assistant-delta-flush-on-request-opened"
+              : "assistant-delta-flush-on-user-input-requested",
+        });
         yield* finalizeActiveAssistantSegmentForTurn({
           event,
           threadId: thread.id,
@@ -1617,22 +1724,29 @@ const make = Effect.gen(function* () {
         });
       }
 
-      if (event.type === "turn.diff.updated") {
-        const turnId = toTurnId(event.turnId);
-        const checkpointContext = turnId
-          ? yield* projectionSnapshotQuery
-              .getThreadCheckpointContext(thread.id)
-              .pipe(Effect.map(Option.getOrUndefined))
-          : undefined;
+      // Diff updates can arrive many times per turn; once a checkpoint (or
+      // placeholder) is tracked for the turn the rest are no-ops, so skip the
+      // projection query and git check entirely for them.
+      const diffUpdatedTurnId =
+        event.type === "turn.diff.updated" ? toTurnId(event.turnId) : undefined;
+      if (
+        event.type === "turn.diff.updated" &&
+        diffUpdatedTurnId &&
+        !trackedDiffPlaceholderTurnKeys.has(providerTurnKey(thread.id, diffUpdatedTurnId))
+      ) {
+        const turnId = diffUpdatedTurnId;
+        const checkpointContext = yield* projectionSnapshotQuery
+          .getThreadCheckpointContext(thread.id)
+          .pipe(Effect.map(Option.getOrUndefined));
         const workspaceCwd =
           checkpointContext?.worktreePath ?? checkpointContext?.workspaceRoot ?? undefined;
-        if (turnId && checkpointContext && workspaceCwd && isGitRepository(workspaceCwd)) {
+        if (checkpointContext && workspaceCwd && isGitRepositoryMemoized(workspaceCwd)) {
           // Skip if a checkpoint already exists for this turn. A real
           // (non-placeholder) capture from CheckpointReactor should not
           // be clobbered, and dispatching a duplicate placeholder for the
           // same turnId would produce an unstable checkpointTurnCount.
           if (hasCheckpointForTurn(checkpointContext.checkpoints, turnId)) {
-            // Already tracked; no-op.
+            trackedDiffPlaceholderTurnKeys.add(providerTurnKey(thread.id, turnId));
           } else {
             const assistantMessageId = MessageId.make(
               `assistant:${event.itemId ?? event.turnId ?? event.eventId}`,
@@ -1650,6 +1764,7 @@ const make = Effect.gen(function* () {
               checkpointTurnCount: maxCheckpointTurnCount(checkpointContext.checkpoints) + 1,
               createdAt: now,
             });
+            trackedDiffPlaceholderTurnKeys.add(providerTurnKey(thread.id, turnId));
           }
         }
       }
@@ -1672,11 +1787,46 @@ const make = Effect.gen(function* () {
 
   const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
 
+  const processAssistantDeltaFlush = (
+    input: Extract<RuntimeIngestionInput, { source: "assistant-delta-flush" }>,
+  ) =>
+    Effect.gen(function* () {
+      pendingStreamingFlushes.delete(input.messageId);
+      // No-op when a turn-boundary event already drained this message's buffer.
+      yield* flushBufferedAssistantMessage({
+        event: input.event,
+        threadId: input.threadId,
+        messageId: input.messageId,
+        ...(input.turnId ? { turnId: input.turnId } : {}),
+        createdAt: input.createdAt,
+        commandTag: "assistant-delta-coalesced",
+      });
+    });
+
   const processInput = (input: RuntimeIngestionInput) =>
-    input.source === "runtime" ? processRuntimeEvent(input.event) : processDomainEvent(input.event);
+    input.source === "runtime"
+      ? processRuntimeEvent(input.event)
+      : input.source === "assistant-delta-flush"
+        ? processAssistantDeltaFlush(input)
+        : processDomainEvent(input.event);
+
+  const recordQueueWait = (input: RuntimeIngestionInput) => {
+    const receivedAtMs = input.receivedAtMs;
+    return receivedAtMs === undefined
+      ? Effect.void
+      : Clock.currentTimeMillis.pipe(
+          Effect.flatMap((nowMs) =>
+            Metric.update(
+              providerIngestionQueueWait,
+              Duration.millis(Math.max(0, nowMs - receivedAtMs)),
+            ),
+          ),
+        );
+  };
 
   const processInputSafely = (input: RuntimeIngestionInput) =>
-    processInput(input).pipe(
+    recordQueueWait(input).pipe(
+      Effect.flatMap(() => processInput(input)),
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
           return Effect.failCause(cause);
@@ -1691,12 +1841,25 @@ const make = Effect.gen(function* () {
     );
 
   const worker = yield* makeDrainableWorker(processInputSafely);
+  enqueueWorkerInput = worker.enqueue;
 
   const start: ProviderRuntimeIngestionShape["start"] = () =>
     Effect.gen(function* () {
       yield* Effect.forkScoped(
         Stream.runForEach(providerService.streamEvents, (event) =>
-          worker.enqueue({ source: "runtime", event }),
+          Clock.currentTimeMillis.pipe(
+            Effect.flatMap((receivedAtMs) =>
+              worker.enqueue({ source: "runtime", event, receivedAtMs }),
+            ),
+          ),
+        ),
+      );
+      yield* Effect.forkScoped(
+        Stream.runForEach(serverSettingsService.streamChanges, (settings) =>
+          Ref.set(
+            assistantDeliveryModeRef,
+            settings.enableAssistantStreaming ? "streaming" : "buffered",
+          ),
         ),
       );
       yield* Effect.forkScoped(

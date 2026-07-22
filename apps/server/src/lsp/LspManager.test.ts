@@ -9,10 +9,12 @@ import * as Stream from "effect/Stream";
 
 import * as LspManager from "./LspManager.ts";
 import { languageBindingForPath } from "./LanguageServers.ts";
+import { layerTest as serverSettingsLayerTest } from "../serverSettings.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 
 const TestLayer = LspManager.layer.pipe(
   Layer.provide(WorkspacePaths.layer),
+  Layer.provide(serverSettingsLayerTest()),
   Layer.provideMerge(NodeServices.layer),
 );
 
@@ -150,3 +152,59 @@ it.layer(TestLayer, { excludeTestServices: true })("LspManagerLive", (it) => {
     );
   });
 });
+
+// Custom servers from the `languageServers` setting: extensions are merged
+// into the effective registry and reported through serverStatus, and files
+// route to the configured command. The command is intentionally nonexistent
+// so the not_installed path is exercised deterministically on any machine.
+const CustomServerTestLayer = LspManager.layer.pipe(
+  Layer.provide(WorkspacePaths.layer),
+  Layer.provide(
+    serverSettingsLayerTest({
+      languageServers: [
+        {
+          serverId: "fake-lang",
+          displayName: "fake-language-server",
+          command: "t3code-nonexistent-language-server",
+          args: ["--stdio"],
+          extensions: [".fake"],
+          languageId: "fakelang",
+        },
+      ],
+    }),
+  ),
+  Layer.provideMerge(NodeServices.layer),
+);
+
+it.layer(CustomServerTestLayer, { excludeTestServices: true })(
+  "LspManagerLive custom servers",
+  (it) => {
+    it.effect("reports custom extensions alongside built-ins in serverStatus", () =>
+      Effect.gen(function* () {
+        const lspManager = yield* LspManager.LspManager;
+        const cwd = yield* makeTempDir;
+
+        const status = yield* lspManager.serverStatus({ cwd });
+        expect(status.supportedExtensions).toContain(".fake");
+        expect(status.supportedExtensions).toContain(".ts");
+      }),
+    );
+
+    it.effect("routes matching files to the custom server and surfaces not_installed", () =>
+      Effect.gen(function* () {
+        const lspManager = yield* LspManager.LspManager;
+        const cwd = yield* makeTempDir;
+
+        const error = yield* lspManager
+          .hover({ cwd, relativePath: "main.fake", position: { line: 0, character: 0 } })
+          .pipe(Effect.flip);
+        expect(error.failure).toBe("server_not_installed");
+        expect(error.serverId).toBe("fake-lang");
+
+        const status = yield* lspManager.serverStatus({ cwd });
+        const fake = status.servers.find((server) => server.serverId === "fake-lang");
+        expect(fake?.state).toBe("not_installed");
+      }),
+    );
+  },
+);

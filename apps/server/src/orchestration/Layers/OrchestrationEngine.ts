@@ -25,6 +25,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   metricAttributes,
   orchestrationCommandAckDuration,
+  orchestrationCommandQueueDepth,
   orchestrationCommandsTotal,
   orchestrationCommandDuration,
 } from "../../observability/Metrics.ts";
@@ -297,10 +298,150 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     );
   };
 
+  // Commands that queued up behind a slow commit are committed together in a
+  // single SQL transaction (one fsync instead of one per command), in strict
+  // arrival order, keeping the single-writer semantics of the per-command
+  // path. Any failure rolls the batch back and falls back to the per-command
+  // path, which owns all receipt/rejection semantics.
+  const MAX_COMMAND_BATCH = 16;
+
+  const processBatchFallback = (envelopes: ReadonlyArray<CommandEnvelope>) =>
+    Effect.forEach(envelopes, processEnvelope, { concurrency: 1 }).pipe(Effect.asVoid);
+
+  const processBatch = (envelopes: ReadonlyArray<CommandEnvelope>): Effect.Effect<void> => {
+    const [head] = envelopes;
+    if (envelopes.length === 1 && head !== undefined) {
+      return processEnvelope(head);
+    }
+
+    type BatchEntry = {
+      readonly envelope: CommandEnvelope;
+      readonly committedEvents: ReadonlyArray<OrchestrationEvent>;
+      readonly sequence: number;
+    };
+
+    const fastPath = Effect.gen(function* () {
+      const committed = yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            let nextReadModel = commandReadModel;
+            const entries: BatchEntry[] = [];
+
+            for (const envelope of envelopes) {
+              const existingReceipt = yield* commandReceiptRepository.getByCommandId({
+                commandId: envelope.command.commandId,
+              });
+              if (Option.isSome(existingReceipt)) {
+                if (existingReceipt.value.status === "accepted") {
+                  entries.push({
+                    envelope,
+                    committedEvents: [],
+                    sequence: existingReceipt.value.resultSequence,
+                  });
+                  continue;
+                }
+                // Rare: let the per-command path produce the canonical
+                // previously-rejected failure.
+                return yield* new OrchestrationCommandPreviouslyRejectedError({
+                  commandId: envelope.command.commandId,
+                  detail: existingReceipt.value.error ?? "Previously rejected.",
+                });
+              }
+
+              const eventBase = yield* decideOrchestrationCommand({
+                command: envelope.command,
+                readModel: nextReadModel,
+              }).pipe(Effect.provideService(Crypto.Crypto, crypto));
+              const eventBases = Array.isArray(eventBase) ? eventBase : [eventBase];
+              const committedEvents: OrchestrationEvent[] = [];
+              for (const nextEvent of eventBases) {
+                const savedEvent = yield* eventStore.append(nextEvent);
+                nextReadModel = yield* projectEvent(nextReadModel, savedEvent);
+                yield* projectionPipeline.projectEvent(savedEvent);
+                committedEvents.push(savedEvent);
+              }
+
+              const lastSavedEvent = committedEvents.at(-1);
+              if (lastSavedEvent === undefined) {
+                return yield* new OrchestrationCommandInvariantError({
+                  commandType: envelope.command.type,
+                  detail: "Command produced no events.",
+                });
+              }
+
+              yield* commandReceiptRepository.upsert({
+                commandId: envelope.command.commandId,
+                aggregateKind: lastSavedEvent.aggregateKind,
+                aggregateId: lastSavedEvent.aggregateId,
+                acceptedAt: lastSavedEvent.occurredAt,
+                resultSequence: lastSavedEvent.sequence,
+                status: "accepted",
+                error: null,
+              });
+
+              entries.push({ envelope, committedEvents, sequence: lastSavedEvent.sequence });
+            }
+
+            return { entries, nextReadModel } as const;
+          }),
+        )
+        .pipe(Effect.withSpan("orchestration.command.batch"));
+
+      commandReadModel = committed.nextReadModel;
+      for (const entry of committed.entries) {
+        const aggregateRef = commandToAggregateRef(entry.envelope.command);
+        const baseMetricAttributes = {
+          commandType: entry.envelope.command.type,
+          aggregateKind: aggregateRef.aggregateKind,
+        } as const;
+        for (const [index, event] of entry.committedEvents.entries()) {
+          yield* PubSub.publish(eventPubSub, event);
+          if (index === 0) {
+            yield* Metric.update(
+              Metric.withAttributes(
+                orchestrationCommandAckDuration,
+                metricAttributes({
+                  ...baseMetricAttributes,
+                  ackEventType: event.type,
+                }),
+              ),
+              Duration.millis(
+                Math.max(0, (yield* Clock.currentTimeMillis) - entry.envelope.startedAtMs),
+              ),
+            );
+          }
+        }
+        yield* Metric.update(
+          Metric.withAttributes(
+            orchestrationCommandsTotal,
+            metricAttributes({ ...baseMetricAttributes, outcome: "success" }),
+          ),
+          1,
+        );
+        yield* Deferred.succeed(entry.envelope.result, { sequence: entry.sequence });
+      }
+    });
+
+    // Nothing was persisted (the transaction rolled back) and no Deferred was
+    // resolved, so replaying the whole batch through the per-command path is
+    // exact: it re-decides against the unchanged read model and reports each
+    // command's own failure or success.
+    return fastPath.pipe(Effect.catch(() => processBatchFallback(envelopes)));
+  };
+
   yield* projectionPipeline.bootstrap;
   commandReadModel = yield* projectionSnapshotQuery.getCommandReadModel();
 
-  const worker = Effect.forever(Queue.take(commandQueue).pipe(Effect.flatMap(processEnvelope)));
+  const worker = Effect.forever(
+    Queue.takeBetween(commandQueue, 1, MAX_COMMAND_BATCH).pipe(
+      Effect.tap(() =>
+        Effect.flatMap(Queue.size(commandQueue), (depth) =>
+          Metric.update(orchestrationCommandQueueDepth, depth),
+        ),
+      ),
+      Effect.flatMap(processBatch),
+    ),
+  );
   yield* Effect.forkScoped(worker);
   yield* Effect.logDebug("orchestration engine started").pipe(
     Effect.annotateLogs({ sequence: commandReadModel.snapshotSequence }),
@@ -317,6 +458,9 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         result,
         startedAtMs: yield* Clock.currentTimeMillis,
       });
+      yield* Effect.flatMap(Queue.size(commandQueue), (depth) =>
+        Metric.update(orchestrationCommandQueueDepth, depth),
+      );
       return yield* Deferred.await(result);
     });
 

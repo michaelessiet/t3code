@@ -129,6 +129,80 @@ describe("ServerSettingsPatch.providerInstances", () => {
   });
 });
 
+describe("ServerSettings.languageServers", () => {
+  const rubyServer = {
+    serverId: "ruby",
+    displayName: "solargraph",
+    command: "solargraph",
+    args: ["stdio"],
+    extensions: [".rb"],
+    languageId: "ruby",
+  };
+
+  it("defaults to an empty list", () => {
+    expect(DEFAULT_SERVER_SETTINGS.languageServers).toEqual([]);
+    expect(decodeServerSettings({}).languageServers).toEqual([]);
+  });
+
+  it("decodes a valid entry and normalizes extensions to leading-dot lowercase", () => {
+    const decoded = decodeServerSettings({
+      languageServers: [{ ...rubyServer, extensions: ["RB", ".Rake"] }],
+    });
+    expect(decoded.languageServers).toHaveLength(1);
+    expect(decoded.languageServers[0]?.extensions).toEqual([".rb", ".rake"]);
+  });
+
+  it("rejects serverIds reserved for built-in servers", () => {
+    expect(() =>
+      decodeServerSettings({
+        languageServers: [{ ...rubyServer, serverId: "typescript" }],
+      }),
+    ).toThrow();
+  });
+
+  it("rejects duplicate serverIds", () => {
+    expect(() =>
+      decodeServerSettings({
+        languageServers: [rubyServer, { ...rubyServer, extensions: [".rbs"] }],
+      }),
+    ).toThrow();
+  });
+
+  it("rejects extensions handled by a built-in server", () => {
+    expect(() =>
+      decodeServerSettings({
+        languageServers: [{ ...rubyServer, serverId: "mine", extensions: [".ts"] }],
+      }),
+    ).toThrow();
+  });
+
+  it("rejects extensions claimed by more than one custom server", () => {
+    expect(() =>
+      decodeServerSettings({
+        languageServers: [
+          rubyServer,
+          { ...rubyServer, serverId: "ruby2", displayName: "ruby-lsp", command: "ruby-lsp" },
+        ],
+      }),
+    ).toThrow();
+  });
+
+  it("rejects an empty extensions list and malformed extensions", () => {
+    expect(() =>
+      decodeServerSettings({ languageServers: [{ ...rubyServer, extensions: [] }] }),
+    ).toThrow();
+    expect(() =>
+      decodeServerSettings({ languageServers: [{ ...rubyServer, extensions: [".d.ts"] }] }),
+    ).toThrow();
+  });
+
+  it("treats languageServers as an optional whole-array replacement in patches", () => {
+    expect(decodeServerSettingsPatch({}).languageServers).toBeUndefined();
+    const patch = decodeServerSettingsPatch({ languageServers: [rubyServer] });
+    expect(patch.languageServers?.[0]?.serverId).toBe("ruby");
+  });
+});
+
 describe("ServerSettingsPatch string normalization", () => {
   it("trims string settings while decoding patches", () => {
     const patch = decodeServerSettingsPatch({

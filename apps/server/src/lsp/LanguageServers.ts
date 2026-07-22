@@ -1,13 +1,15 @@
 /**
- * LanguageServers - static registry of supported language servers.
+ * LanguageServers - registry of supported language servers.
  *
- * Maps file extensions to the language server that should handle them plus
- * the LSP `languageId` sent in document-sync notifications. The TypeScript
- * server ships with the app (dependency of apps/server); other servers are
- * resolved from PATH and degrade to a `not_installed` status when absent.
+ * Built-in servers are static defaults: the TypeScript server ships with the
+ * app (dependency of apps/server); other built-ins are resolved from PATH and
+ * degrade to a `not_installed` status when absent. User-defined servers from
+ * the `languageServers` server setting are merged in via `resolveRegistry`;
+ * they are never bundled and always spawn from PATH.
  *
  * @module LanguageServers
  */
+import type { CustomLanguageServer } from "@t3tools/contracts";
 
 export interface LanguageServerConfig {
   /** Stable id used in status reporting and registry keys. */
@@ -22,8 +24,8 @@ export interface LanguageServerConfig {
 
 const TYPESCRIPT_SERVER: LanguageServerConfig = {
   serverId: "typescript",
-  displayName: "typescript-language-server",
-  command: "typescript-language-server",
+  displayName: "vtsls",
+  command: "vtsls",
   args: ["--stdio"],
   bundled: true,
 };
@@ -52,12 +54,12 @@ const GOPLS: LanguageServerConfig = {
   bundled: false,
 };
 
-interface LanguageBinding {
+export interface LanguageBinding {
   readonly server: LanguageServerConfig;
   readonly languageId: string;
 }
 
-const EXTENSION_BINDINGS: Record<string, LanguageBinding> = {
+export const BUILTIN_EXTENSION_BINDINGS: Record<string, LanguageBinding> = {
   ".ts": { server: TYPESCRIPT_SERVER, languageId: "typescript" },
   ".mts": { server: TYPESCRIPT_SERVER, languageId: "typescript" },
   ".cts": { server: TYPESCRIPT_SERVER, languageId: "typescript" },
@@ -72,17 +74,66 @@ const EXTENSION_BINDINGS: Record<string, LanguageBinding> = {
   ".go": { server: GOPLS, languageId: "go" },
 };
 
-export const KNOWN_SERVERS: ReadonlyArray<LanguageServerConfig> = [
+export const BUILTIN_SERVERS: ReadonlyArray<LanguageServerConfig> = [
   TYPESCRIPT_SERVER,
   RUST_ANALYZER,
   PYRIGHT,
   GOPLS,
 ];
 
-/** Resolve the language binding for a workspace-relative path, if any. */
-export function languageBindingForPath(relativePath: string): LanguageBinding | null {
+export const BUILTIN_EXTENSIONS: ReadonlySet<string> = new Set(
+  Object.keys(BUILTIN_EXTENSION_BINDINGS),
+);
+
+export interface ResolvedRegistry {
+  readonly servers: ReadonlyArray<LanguageServerConfig>;
+  readonly bindings: Readonly<Record<string, LanguageBinding>>;
+  readonly supportedExtensions: ReadonlyArray<string>;
+  readonly bindingForPath: (relativePath: string) => LanguageBinding | null;
+}
+
+function bindingForPathIn(
+  bindings: Readonly<Record<string, LanguageBinding>>,
+  relativePath: string,
+): LanguageBinding | null {
   const dotIndex = relativePath.lastIndexOf(".");
   if (dotIndex === -1) return null;
   const extension = relativePath.slice(dotIndex).toLowerCase();
-  return EXTENSION_BINDINGS[extension] ?? null;
+  return bindings[extension] ?? null;
+}
+
+/**
+ * Merge built-in servers with user-defined ones into an effective registry.
+ * Pure. Built-ins win on serverId/extension conflicts — settings validation
+ * already rejects collisions; this is defense-in-depth.
+ */
+export function resolveRegistry(custom: ReadonlyArray<CustomLanguageServer>): ResolvedRegistry {
+  const bindings: Record<string, LanguageBinding> = { ...BUILTIN_EXTENSION_BINDINGS };
+  const servers: LanguageServerConfig[] = [...BUILTIN_SERVERS];
+  for (const entry of custom) {
+    if (servers.some((server) => server.serverId === entry.serverId)) continue;
+    const config: LanguageServerConfig = {
+      serverId: entry.serverId,
+      displayName: entry.displayName,
+      command: entry.command,
+      args: entry.args,
+      bundled: false,
+    };
+    servers.push(config);
+    for (const extension of entry.extensions) {
+      if (extension in bindings) continue;
+      bindings[extension] = { server: config, languageId: entry.languageId };
+    }
+  }
+  return {
+    servers,
+    bindings,
+    supportedExtensions: Object.keys(bindings),
+    bindingForPath: (relativePath) => bindingForPathIn(bindings, relativePath),
+  };
+}
+
+/** Resolve the built-in language binding for a workspace-relative path, if any. */
+export function languageBindingForPath(relativePath: string): LanguageBinding | null {
+  return bindingForPathIn(BUILTIN_EXTENSION_BINDINGS, relativePath);
 }

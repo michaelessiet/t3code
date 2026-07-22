@@ -477,6 +477,99 @@ describe("OrchestrationEngine", () => {
     await system.dispose();
   });
 
+  it("commits a burst of concurrent dispatches in order with receipt dedup intact", async () => {
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+    const createdAt = now();
+
+    await system.run(
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-project-burst-create"),
+        projectId: asProjectId("project-burst"),
+        title: "Burst Project",
+        workspaceRoot: "/tmp/project-burst",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        createdAt,
+      }),
+    );
+    await system.run(
+      engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-thread-burst-create"),
+        threadId: ThreadId.make("thread-burst"),
+        projectId: asProjectId("project-burst"),
+        title: "burst",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      }),
+    );
+
+    // Fire without awaiting between dispatches so the worker sees a queue
+    // backlog and takes the batched commit path.
+    const results = await system.run(
+      Effect.all(
+        Array.from({ length: 12 }, (_, index) =>
+          engine.dispatch({
+            type: "thread.meta.update",
+            commandId: CommandId.make(`cmd-burst-update-${index}`),
+            threadId: ThreadId.make("thread-burst"),
+            title: `burst-title-${index}`,
+          }),
+        ),
+        { concurrency: "unbounded" },
+      ),
+    );
+
+    const sequences = results.map((result) => result.sequence);
+    expect(new Set(sequences).size).toBe(12);
+
+    const events = await system.run(
+      Stream.runCollect(engine.readEvents(0)).pipe(
+        Effect.map((chunk): OrchestrationEvent[] => Array.from(chunk)),
+      ),
+    );
+    const updateEvents = events.filter((event) => event.type === "thread.meta-updated");
+    expect(updateEvents).toHaveLength(12);
+    // Persisted sequences are strictly increasing in commit order.
+    const persistedSequences = updateEvents.map((event) => event.sequence);
+    expect([...persistedSequences].sort((left, right) => left - right)).toEqual(persistedSequences);
+
+    // Duplicate commandIds inside a burst dedup to the same result sequence.
+    const [first, duplicate] = await system.run(
+      Effect.all(
+        [
+          engine.dispatch({
+            type: "thread.meta.update",
+            commandId: CommandId.make("cmd-burst-dup"),
+            threadId: ThreadId.make("thread-burst"),
+            title: "burst-dup",
+          }),
+          engine.dispatch({
+            type: "thread.meta.update",
+            commandId: CommandId.make("cmd-burst-dup"),
+            threadId: ThreadId.make("thread-burst"),
+            title: "burst-dup",
+          }),
+        ],
+        { concurrency: "unbounded" },
+      ),
+    );
+    expect(first?.sequence).toBe(duplicate?.sequence);
+
+    await system.dispose();
+  });
+
   it("does not regress a generated branch to a stale temporary worktree branch", async () => {
     const system = await createOrchestrationSystem();
     const { engine } = system;

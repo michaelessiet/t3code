@@ -39,7 +39,23 @@ export function useLspBridge({
   view,
   onOpenFileAtLine,
 }: UseLspBridgeOptions): Extension | null {
-  const supported = isLspSupportedPath(relativePath);
+  // Which extensions have a language server is runtime state: user-defined
+  // servers extend the built-in set. Prefer the server-reported registry;
+  // fall back to the static built-in set until the first status result so
+  // built-in languages work instantly on cold load.
+  const serverStatusResult = useAtomValue(
+    lspEnvironment.serverStatus({ environmentId, input: { cwd } }),
+  );
+  const serverExtensions = useMemo(() => {
+    const status = Option.getOrNull(AsyncResult.value(serverStatusResult));
+    return status ? new Set(status.supportedExtensions) : null;
+  }, [serverStatusResult]);
+  const supported = useMemo(() => {
+    if (serverExtensions === null) return isLspSupportedPath(relativePath);
+    const dotIndex = relativePath.lastIndexOf(".");
+    if (dotIndex === -1) return false;
+    return serverExtensions.has(relativePath.slice(dotIndex).toLowerCase());
+  }, [relativePath, serverExtensions]);
   const didOpen = useAtomCommand(lspEnvironment.didOpen);
   const didChange = useAtomCommand(lspEnvironment.didChange);
   const didClose = useAtomCommand(lspEnvironment.didClose);

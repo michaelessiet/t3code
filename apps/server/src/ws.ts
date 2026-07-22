@@ -1,8 +1,10 @@
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Metric from "effect/Metric";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -71,6 +73,7 @@ import * as ServerConfig from "./config.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
+import { AssistantStreamBus } from "./orchestration/AssistantStreamBus.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -78,6 +81,7 @@ import {
   observeRpcStream as instrumentRpcStream,
   observeRpcStreamEffect as instrumentRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
+import { wsThreadEventDeliveryLag } from "./observability/Metrics.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -448,6 +452,7 @@ const makeWsRpcLayer = (
       const crypto = yield* Crypto.Crypto;
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+      const assistantStreamBus = yield* AssistantStreamBus;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const keybindings = yield* Keybindings.Keybindings;
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
@@ -1212,12 +1217,39 @@ const makeWsRpcLayer = (
                 event.aggregateId === input.threadId &&
                 isThreadDetailEvent(event);
 
-              const liveStream = orchestrationEngine.streamDomainEvents.pipe(
+              const persistedLiveStream = orchestrationEngine.streamDomainEvents.pipe(
                 Stream.filter(isThisThreadDetailEvent),
-                Stream.map((event) => ({
-                  kind: "event" as const,
-                  event,
-                })),
+                Stream.tap((event) =>
+                  Clock.currentTimeMillis.pipe(
+                    Effect.flatMap((nowMs) =>
+                      Metric.update(
+                        wsThreadEventDeliveryLag,
+                        Duration.millis(Math.max(0, nowMs - Date.parse(event.occurredAt))),
+                      ),
+                    ),
+                  ),
+                ),
+                Stream.map(
+                  (event): OrchestrationThreadStreamItem => ({
+                    kind: "event" as const,
+                    event,
+                  }),
+                ),
+              );
+              // Live assistant deltas bypass the persistence pipeline entirely.
+              // Clients overlay them by offset and reconcile against the
+              // coalesced persisted deltas that follow, so cross-stream
+              // ordering does not need to be exact.
+              const liveStream = Stream.merge(
+                persistedLiveStream,
+                assistantStreamBus.subscribe(input.threadId).pipe(
+                  Stream.map(
+                    (delta): OrchestrationThreadStreamItem => ({
+                      kind: "ephemeral-delta" as const,
+                      ...delta,
+                    }),
+                  ),
+                ),
               );
 
               // When the client already loaded the snapshot over HTTP it passes

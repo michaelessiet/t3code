@@ -39,6 +39,7 @@ import {
   resolveFileDiffPath,
 } from "../../lib/diffRendering";
 import ChatMarkdown from "../ChatMarkdown";
+import { useSmoothedStreamingText } from "~/hooks/useSmoothedStreamingText";
 import {
   BotIcon,
   CheckIcon,
@@ -1033,7 +1034,8 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
 
 function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
-  const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+  const smoothedText = useSmoothedStreamingText(row.message.text, Boolean(row.message.streaming));
+  const messageText = smoothedText || (row.message.streaming ? "" : "(empty response)");
 
   return (
     <>

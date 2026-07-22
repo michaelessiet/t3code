@@ -176,6 +176,20 @@ const editorChrome = EditorView.theme({
     borderTopColor: "var(--popover)",
     borderBottomColor: "var(--popover)",
   },
+  // LSP diagnostic (lint) tooltips: bound width and wrap long messages.
+  ".cm-tooltip-lint": {
+    maxWidth: "min(44rem, 80vw)",
+    maxHeight: "20rem",
+    overflow: "auto",
+  },
+  ".cm-tooltip-lint .cm-diagnostic": {
+    padding: "6px 10px 6px 10px",
+    fontFamily: "var(--font-sans)",
+    fontSize: "12px",
+    lineHeight: "1.5",
+    whiteSpace: "pre-wrap",
+    overflowWrap: "anywhere",
+  },
   // LSP hover / signature tooltips: bounded, scrollable, app typography.
   ".cm-lsp-hover, .cm-lsp-signature": {
     maxWidth: "min(44rem, 80vw)",

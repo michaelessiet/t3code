@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
@@ -218,6 +219,16 @@ export type LspServerStatus = typeof LspServerStatus.Type;
 
 export const LspServerStatusResult = Schema.Struct({
   servers: Schema.Array(LspServerStatus),
+  /**
+   * Effective set of file extensions (leading-dot, lowercase) any configured
+   * server handles — built-in and user-defined alike. Reflects the full
+   * configured registry regardless of which servers have started, so clients
+   * can gate document sync before a lazy server spawn. Defaults to [] on the
+   * wire for cross-version decoding.
+   */
+  supportedExtensions: Schema.Array(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
 });
 export type LspServerStatusResult = typeof LspServerStatusResult.Type;
 

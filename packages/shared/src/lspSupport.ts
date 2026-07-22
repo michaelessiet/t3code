@@ -1,10 +1,12 @@
 /**
- * Client-visible view of which files the server's LSP proxy can handle.
+ * Client-visible view of which files the server's *built-in* LSP servers can
+ * handle.
  *
- * Must stay in sync with the server's language-server registry
+ * Must stay in sync with the server's built-in language-server registry
  * (apps/server/src/lsp/LanguageServers.ts) — a server-side test asserts
- * parity. Clients use this to skip doc-sync and language queries for files
- * no language server will ever answer.
+ * parity. User-defined servers add extensions at runtime; clients discover
+ * those via the `supportedExtensions` field of `lsp.serverStatus` and use
+ * this static set only as the pre-load fallback.
  *
  * @module lspSupport
  */

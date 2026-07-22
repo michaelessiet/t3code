@@ -25,11 +25,13 @@ import {
   type ProviderSession,
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
@@ -227,14 +229,30 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
     );
 
-  const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
-    Effect.succeed(event).pipe(
-      Effect.tap((canonicalEvent) =>
-        canonicalEventLogger
-          ? canonicalEventLogger.write(canonicalEvent, canonicalEvent.threadId)
-          : Effect.void,
+  // Canonical logging is observability, not delivery: run the per-event
+  // schema serialization and writer lock on a background consumer so the log
+  // never delays publishing runtime events to subscribers. Sliding queue:
+  // under sustained backpressure the oldest log entries are dropped instead
+  // of stalling the publish path.
+  const canonicalLogQueue = yield* Queue.sliding<ProviderRuntimeEvent>(4096);
+  if (canonicalEventLogger) {
+    yield* Effect.forkScoped(
+      Effect.forever(
+        Queue.take(canonicalLogQueue).pipe(
+          Effect.flatMap((event) => canonicalEventLogger.write(event, event.threadId)),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("failed to write canonical provider event", {
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        ),
       ),
-      Effect.flatMap((canonicalEvent) => PubSub.publish(runtimeEventPubSub, canonicalEvent)),
+    );
+  }
+
+  const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
+    (canonicalEventLogger ? Queue.offer(canonicalLogQueue, event) : Effect.void).pipe(
+      Effect.flatMap(() => PubSub.publish(runtimeEventPubSub, event)),
       Effect.asVoid,
     );
 
