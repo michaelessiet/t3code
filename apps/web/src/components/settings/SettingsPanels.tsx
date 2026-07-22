@@ -391,6 +391,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.sidebarThreadPreviewCount !== DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount
         ? ["Visible threads"]
         : []),
+      ...(settings.vimMode !== DEFAULT_UNIFIED_SETTINGS.vimMode ? ["Vim mode"] : []),
       ...(settings.wordWrap !== DEFAULT_UNIFIED_SETTINGS.wordWrap ? ["Word wrap"] : []),
       ...(settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace
         ? ["Diff whitespace changes"]
@@ -436,6 +437,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.enableAssistantStreaming,
       settings.sidebarThreadPreviewCount,
       settings.timestampFormat,
+      settings.vimMode,
       settings.wordWrap,
       theme,
     ],
@@ -454,6 +456,7 @@ export function useSettingsRestore(onRestored?: () => void) {
     setTheme("system");
     updateSettings({
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
+      vimMode: DEFAULT_UNIFIED_SETTINGS.vimMode,
       wordWrap: DEFAULT_UNIFIED_SETTINGS.wordWrap,
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
       sidebarThreadPreviewCount: DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount,
@@ -588,6 +591,30 @@ export function GeneralSettingsPanel() {
                 </SelectItem>
               </SelectPopup>
             </Select>
+          }
+        />
+
+        <SettingsRow
+          title="Vim mode"
+          description="Use Vim keybindings in the code editor."
+          resetAction={
+            settings.vimMode !== DEFAULT_UNIFIED_SETTINGS.vimMode ? (
+              <SettingResetButton
+                label="Vim mode"
+                onClick={() =>
+                  updateSettings({
+                    vimMode: DEFAULT_UNIFIED_SETTINGS.vimMode,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.vimMode}
+              onCheckedChange={(checked) => updateSettings({ vimMode: Boolean(checked) })}
+              aria-label="Use Vim keybindings in the code editor"
+            />
           }
         />
 

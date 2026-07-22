@@ -50,6 +50,8 @@ export type EnvironmentSubscriptionRpcTag =
   | typeof WS_METHODS.subscribeDiscoveredLocalServers
   | typeof WS_METHODS.previewAutomationConnect
   | typeof WS_METHODS.subscribeVcsStatus
+  | typeof WS_METHODS.subscribeWorkspaceChanges
+  | typeof WS_METHODS.subscribeLspDiagnostics
   | typeof WS_METHODS.terminalAttach;
 
 export type EnvironmentStreamCommandRpcTag =

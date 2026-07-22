@@ -2,6 +2,7 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeCrypto from "node:crypto";
+import { fileContentRevision } from "@t3tools/shared/fileRevision";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import {
@@ -95,7 +96,10 @@ import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
+import * as LspManager from "./lsp/LspManager.ts";
+import * as WorkspaceContentSearch from "./workspace/WorkspaceContentSearch.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
+import * as WorkspaceWatcher from "./workspace/WorkspaceWatcher.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriver from "./vcs/VcsDriver.ts";
@@ -496,6 +500,9 @@ const buildAppUnderTest = (options?: {
         Layer.provide(WorkspacePaths.layer),
         Layer.provide(workspaceEntriesLayer),
       ),
+      WorkspaceWatcher.layer.pipe(Layer.provide(WorkspacePaths.layer)),
+      WorkspaceContentSearch.layer.pipe(Layer.provide(WorkspacePaths.layer)),
+      LspManager.layer.pipe(Layer.provide(WorkspacePaths.layer)),
       ProjectFaviconResolver.layer.pipe(Layer.provide(WorkspacePaths.layer)),
     );
     const gitWorkflowLayer = GitWorkflowService.layer.pipe(
@@ -4440,6 +4447,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         contents: "export const answer = 42;\n",
         byteLength: 26,
         truncated: false,
+        revision: fileContentRevision("export const answer = 42;\n"),
       });
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );

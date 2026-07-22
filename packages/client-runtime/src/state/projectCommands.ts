@@ -7,6 +7,7 @@ import {
   createEnvironmentCommand,
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
+  createEnvironmentRpcSubscriptionAtomFamily,
 } from "./runtime.ts";
 import {
   type CreateProjectInput,
@@ -60,6 +61,12 @@ export function createProjectEnvironmentAtoms<R, E>(
       tag: WS_METHODS.projectsSearchEntries,
       staleTimeMs: 15_000,
     }),
+    searchContent: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:projects:search-content",
+      tag: WS_METHODS.projectsSearchContent,
+      staleTimeMs: 10_000,
+      idleTtlMs: 60_000,
+    }),
     listEntries: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:projects:list-entries",
       tag: WS_METHODS.projectsListEntries,
@@ -74,6 +81,16 @@ export function createProjectEnvironmentAtoms<R, E>(
     }),
     optimisticFile: (target: OptimisticProjectFileTarget) =>
       optimisticFileFamily(optimisticProjectFileKey(target)),
+    /**
+     * Coalesced workspace change events for a workspace root. Events are
+     * advisory ("these paths may have changed"); consumers re-read affected
+     * files and compare content revisions.
+     */
+    watchChanges: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:projects:watch-changes",
+      tag: WS_METHODS.subscribeWorkspaceChanges,
+      idleTtlMs: 30_000,
+    }),
     create: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:project:create",
       execute: (input: CreateProjectInput) => createProject(input),

@@ -41,7 +41,10 @@ import {
   type ProjectFileOperation,
   ProjectListEntriesError,
   ProjectReadFileError,
+  ProjectSearchContentError,
+  type ProjectSearchContentFailure,
   ProjectSearchEntriesError,
+  ProjectWatchError,
   ProjectWriteFileError,
   RelayClientInstallFailedError,
   type RelayClientInstallProgressEvent,
@@ -85,8 +88,11 @@ import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
+import * as LspManager from "./lsp/LspManager.ts";
+import * as WorkspaceContentSearch from "./workspace/WorkspaceContentSearch.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
+import * as WorkspaceWatcher from "./workspace/WorkspaceWatcher.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
@@ -203,6 +209,27 @@ function filesystemBrowseFailureContext(error: WorkspaceEntries.WorkspaceEntries
   }
 }
 
+type WorkspaceRootError =
+  | WorkspacePaths.WorkspaceRootNotExistsError
+  | WorkspacePaths.WorkspaceRootCreateFailedError
+  | WorkspacePaths.WorkspaceRootStatFailedError
+  | WorkspacePaths.WorkspaceRootNotDirectoryError;
+
+function projectSearchContentFailure(
+  error: WorkspaceContentSearch.WorkspaceContentSearchError | WorkspaceRootError,
+): ProjectSearchContentFailure {
+  switch (error._tag) {
+    case "WorkspaceContentSearchInvalidPatternError":
+      return "invalid_pattern";
+    case "WorkspaceContentSearchSpawnError":
+      return "search_spawn_failed";
+    case "WorkspaceContentSearchFailedError":
+      return "search_failed";
+    default:
+      return "workspace_root_not_found";
+  }
+}
+
 function projectFileFailureContext(
   error:
     | WorkspaceFileSystem.WorkspaceFileSystemError
@@ -213,6 +240,8 @@ function projectFileFailureContext(
   readonly resolvedWorkspaceRoot?: string;
   readonly operation?: ProjectFileOperation;
   readonly operationPath?: string;
+  readonly expectedRevision?: string;
+  readonly actualRevision?: string;
 } {
   switch (error._tag) {
     case "WorkspacePathOutsideRootError":
@@ -234,6 +263,13 @@ function projectFileFailureContext(
       return { failure: "path_not_file", resolvedPath: error.resolvedPath };
     case "WorkspaceBinaryFileError":
       return { failure: "binary_file", resolvedPath: error.resolvedPath };
+    case "WorkspaceFileStaleRevisionError":
+      return {
+        failure: "stale_revision",
+        resolvedPath: error.resolvedPath,
+        expectedRevision: error.expectedRevision,
+        ...(error.actualRevision !== undefined ? { actualRevision: error.actualRevision } : {}),
+      };
     default:
       return unexpectedCompatibilityError(error);
   }
@@ -305,6 +341,21 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.projectsReadFile, AuthOrchestrationReadScope],
   [WS_METHODS.projectsSearchEntries, AuthOrchestrationReadScope],
   [WS_METHODS.projectsWriteFile, AuthOrchestrationOperateScope],
+  [WS_METHODS.projectsSearchContent, AuthOrchestrationReadScope],
+  [WS_METHODS.subscribeWorkspaceChanges, AuthOrchestrationReadScope],
+  [WS_METHODS.lspDidOpen, AuthOrchestrationReadScope],
+  [WS_METHODS.lspDidChange, AuthOrchestrationReadScope],
+  [WS_METHODS.lspDidClose, AuthOrchestrationReadScope],
+  [WS_METHODS.lspCompletion, AuthOrchestrationReadScope],
+  [WS_METHODS.lspResolveCompletion, AuthOrchestrationReadScope],
+  [WS_METHODS.lspSignatureHelp, AuthOrchestrationReadScope],
+  [WS_METHODS.lspHover, AuthOrchestrationReadScope],
+  [WS_METHODS.lspDefinition, AuthOrchestrationReadScope],
+  [WS_METHODS.lspReferences, AuthOrchestrationReadScope],
+  [WS_METHODS.lspRename, AuthOrchestrationReadScope],
+  [WS_METHODS.lspFormat, AuthOrchestrationReadScope],
+  [WS_METHODS.lspServerStatus, AuthOrchestrationReadScope],
+  [WS_METHODS.subscribeLspDiagnostics, AuthOrchestrationReadScope],
   [WS_METHODS.shellOpenInEditor, AuthOrchestrationOperateScope],
   [WS_METHODS.filesystemBrowse, AuthOrchestrationReadScope],
   [WS_METHODS.assetsCreateUrl, AuthOrchestrationReadScope],
@@ -415,6 +466,9 @@ const makeWsRpcLayer = (
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+      const workspaceWatcher = yield* WorkspaceWatcher.WorkspaceWatcher;
+      const workspaceContentSearch = yield* WorkspaceContentSearch.WorkspaceContentSearch;
+      const lspManager = yield* LspManager.LspManager;
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
       const repositoryIdentityResolver =
         yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
@@ -1448,6 +1502,95 @@ const makeWsRpcLayer = (
                     cwd: input.cwd,
                     relativePath: input.relativePath,
                     ...projectFileFailureContext(cause),
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsSearchContent]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsSearchContent,
+            workspaceContentSearch.search(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectSearchContentError({
+                    cwd: input.cwd,
+                    failure: projectSearchContentFailure(cause),
+                    detail: cause.message,
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.lspDidOpen]: (input) =>
+          observeRpcEffect(WS_METHODS.lspDidOpen, lspManager.didOpen(input), {
+            "rpc.aggregate": "lsp",
+          }),
+        [WS_METHODS.lspDidChange]: (input) =>
+          observeRpcEffect(WS_METHODS.lspDidChange, lspManager.didChange(input), {
+            "rpc.aggregate": "lsp",
+          }),
+        [WS_METHODS.lspDidClose]: (input) =>
+          observeRpcEffect(WS_METHODS.lspDidClose, lspManager.didClose(input), {
+            "rpc.aggregate": "lsp",
+          }),
+        [WS_METHODS.lspCompletion]: (input) =>
+          observeRpcEffect(WS_METHODS.lspCompletion, lspManager.completion(input), {
+            "rpc.aggregate": "lsp",
+          }),
+        [WS_METHODS.lspResolveCompletion]: (input) =>
+          observeRpcEffect(WS_METHODS.lspResolveCompletion, lspManager.resolveCompletion(input), {
+            "rpc.aggregate": "lsp",
+          }),
+        [WS_METHODS.lspSignatureHelp]: (input) =>
+          observeRpcEffect(WS_METHODS.lspSignatureHelp, lspManager.signatureHelp(input), {
+            "rpc.aggregate": "lsp",
+          }),
+        [WS_METHODS.lspHover]: (input) =>
+          observeRpcEffect(WS_METHODS.lspHover, lspManager.hover(input), {
+            "rpc.aggregate": "lsp",
+          }),
+        [WS_METHODS.lspDefinition]: (input) =>
+          observeRpcEffect(WS_METHODS.lspDefinition, lspManager.definition(input), {
+            "rpc.aggregate": "lsp",
+          }),
+        [WS_METHODS.lspReferences]: (input) =>
+          observeRpcEffect(WS_METHODS.lspReferences, lspManager.references(input), {
+            "rpc.aggregate": "lsp",
+          }),
+        [WS_METHODS.lspRename]: (input) =>
+          observeRpcEffect(WS_METHODS.lspRename, lspManager.rename(input), {
+            "rpc.aggregate": "lsp",
+          }),
+        [WS_METHODS.lspFormat]: (input) =>
+          observeRpcEffect(WS_METHODS.lspFormat, lspManager.format(input), {
+            "rpc.aggregate": "lsp",
+          }),
+        [WS_METHODS.lspServerStatus]: (input) =>
+          observeRpcEffect(WS_METHODS.lspServerStatus, lspManager.serverStatus(input), {
+            "rpc.aggregate": "lsp",
+          }),
+        [WS_METHODS.subscribeLspDiagnostics]: (input) =>
+          observeRpcStream(
+            WS_METHODS.subscribeLspDiagnostics,
+            lspManager.subscribeDiagnostics(input),
+            { "rpc.aggregate": "lsp" },
+          ),
+        [WS_METHODS.subscribeWorkspaceChanges]: (input) =>
+          observeRpcStream(
+            WS_METHODS.subscribeWorkspaceChanges,
+            workspaceWatcher.subscribe(input).pipe(
+              Stream.mapError(
+                (cause) =>
+                  new ProjectWatchError({
+                    cwd: input.cwd,
+                    failure:
+                      cause._tag === "WorkspaceRootNotExistsError" ||
+                      cause._tag === "WorkspaceRootNotDirectoryError"
+                        ? "workspace_root_not_found"
+                        : "watch_failed",
                     cause,
                   }),
               ),

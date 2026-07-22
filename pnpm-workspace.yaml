@@ -9,6 +9,7 @@ packages:
 # true = allowed to run build scripts; false mirrors the pnpm 10 behavior
 # where anything outside onlyBuiltDependencies was silently not built.
 allowBuilds:
+  "@vscode/ripgrep": true
   browser-tabs-lock: false
   bufferutil: false
   core-js: false
@@ -58,6 +59,7 @@ minimumReleaseAgeExclude:
   - "@clerk/expo@3.7.2"
   - "@clerk/react@6.12.1"
   - "@clerk/shared@4.25.1"
+  - "@codemirror/lang-markdown@6.5.1"
 
 overrides:
   "@clerk/backend": "catalog:"

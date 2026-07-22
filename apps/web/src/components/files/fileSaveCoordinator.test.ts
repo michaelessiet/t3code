@@ -73,6 +73,53 @@ describe("FileSaveCoordinator", () => {
     expect(onPendingChange.mock.calls.at(-1)).toEqual([false]);
   });
 
+  it("reset discards pending edits and clears the pending flag", async () => {
+    vi.useFakeTimers();
+    const persist = vi
+      .fn<(contents: string) => Promise<AtomCommandResult<void, never>>>()
+      .mockResolvedValue(AsyncResult.success(undefined));
+    const onPendingChange = vi.fn();
+    const coordinator = new FileSaveCoordinator({
+      debounceMs: 500,
+      persist,
+      onPendingChange,
+      onConfirmed: vi.fn(),
+    });
+
+    coordinator.change("discard me");
+    coordinator.reset();
+    await vi.runAllTimersAsync();
+
+    expect(persist).not.toHaveBeenCalled();
+    expect(onPendingChange.mock.calls.at(-1)).toEqual([false]);
+  });
+
+  it("reset during an in-flight write settles without rescheduling", async () => {
+    vi.useFakeTimers();
+    const write = deferred();
+    const persist = vi
+      .fn<(contents: string) => Promise<AtomCommandResult<void, never>>>()
+      .mockReturnValue(write.promise);
+    const onPendingChange = vi.fn();
+    const coordinator = new FileSaveCoordinator({
+      debounceMs: 500,
+      persist,
+      onPendingChange,
+      onConfirmed: vi.fn(),
+    });
+
+    coordinator.change("in flight");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(persist).toHaveBeenCalledTimes(1);
+
+    coordinator.reset();
+    write.resolve(AsyncResult.success(undefined));
+    await vi.runAllTimersAsync();
+
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(onPendingChange.mock.calls.at(-1)).toEqual([false]);
+  });
+
   it("leaves the file pending when the latest write fails", async () => {
     vi.useFakeTimers();
     const onPendingChange = vi.fn();

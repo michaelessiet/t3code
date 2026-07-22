@@ -15,6 +15,7 @@ import type {
   ProjectWriteFileInput,
   ProjectWriteFileResult,
 } from "@t3tools/contracts";
+import { fileContentRevision } from "@t3tools/shared/fileRevision";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -92,11 +93,30 @@ export class WorkspaceBinaryFileError extends Schema.TaggedErrorClass<WorkspaceB
   }
 }
 
+export class WorkspaceFileStaleRevisionError extends Schema.TaggedErrorClass<WorkspaceFileStaleRevisionError>()(
+  "WorkspaceFileStaleRevisionError",
+  {
+    workspaceRoot: Schema.String,
+    relativePath: Schema.String,
+    resolvedPath: Schema.String,
+    expectedRevision: Schema.String,
+    /** Revision currently on disk; `undefined` when the file no longer exists. */
+    actualRevision: Schema.optional(Schema.String),
+  },
+) {
+  override get message(): string {
+    return this.actualRevision === undefined
+      ? `Workspace file '${this.relativePath}' in '${this.workspaceRoot}' no longer exists on disk (expected revision '${this.expectedRevision}').`
+      : `Workspace file '${this.relativePath}' in '${this.workspaceRoot}' changed on disk: expected revision '${this.expectedRevision}', found '${this.actualRevision}'.`;
+  }
+}
+
 export const WorkspaceFileSystemError = Schema.Union([
   WorkspaceFileSystemOperationError,
   WorkspaceFilePathEscapeError,
   WorkspacePathNotFileError,
   WorkspaceBinaryFileError,
+  WorkspaceFileStaleRevisionError,
 ]);
 export type WorkspaceFileSystemError = typeof WorkspaceFileSystemError.Type;
 
@@ -236,11 +256,13 @@ export const make = Effect.gen(function* () {
             });
           }
 
+          const contents = new TextDecoder("utf-8").decode(fileBytes);
           return {
             relativePath: target.relativePath,
-            contents: new TextDecoder("utf-8").decode(fileBytes),
+            contents,
             byteLength: stat.size,
             truncated: stat.size > PROJECT_READ_FILE_MAX_BYTES,
+            revision: fileContentRevision(contents),
           };
         }),
       (handle) =>
@@ -259,6 +281,55 @@ export const make = Effect.gen(function* () {
     );
   });
 
+  /**
+   * Optimistic-concurrency guard: fails when the disk contents no longer
+   * match the revision the client based its edits on.
+   *
+   * The check-then-write is not atomic — a concurrent writer can still slip
+   * in between — but it reliably catches the practical hazard (an agent or
+   * terminal command rewrote the file while the user held a stale buffer).
+   */
+  const ensureBaseRevision = Effect.fn("WorkspaceFileSystem.ensureBaseRevision")(function* (
+    input: ProjectWriteFileInput & { readonly baseRevision: string },
+    absolutePath: string,
+  ) {
+    const diskBytes = yield* Effect.tryPromise({
+      try: () => NodeFSP.readFile(absolutePath),
+      catch: (cause) =>
+        typeof cause === "object" && cause !== null && "code" in cause && cause.code === "ENOENT"
+          ? new WorkspaceFileStaleRevisionError({
+              workspaceRoot: input.cwd,
+              relativePath: input.relativePath,
+              resolvedPath: absolutePath,
+              expectedRevision: input.baseRevision,
+            })
+          : new WorkspaceFileSystemOperationError({
+              workspaceRoot: input.cwd,
+              relativePath: input.relativePath,
+              resolvedPath: absolutePath,
+              operationPath: absolutePath,
+              operation: "read",
+              cause,
+            }),
+    });
+    // Mirror readFile's revision semantics: hash at most the first
+    // PROJECT_READ_FILE_MAX_BYTES of decoded text so revisions from
+    // readFile results compare correctly.
+    const diskContents = new TextDecoder("utf-8").decode(
+      diskBytes.subarray(0, PROJECT_READ_FILE_MAX_BYTES),
+    );
+    const actualRevision = fileContentRevision(diskContents);
+    if (actualRevision !== input.baseRevision) {
+      return yield* new WorkspaceFileStaleRevisionError({
+        workspaceRoot: input.cwd,
+        relativePath: input.relativePath,
+        resolvedPath: absolutePath,
+        expectedRevision: input.baseRevision,
+        actualRevision,
+      });
+    }
+  });
+
   const writeFile: WorkspaceFileSystem["Service"]["writeFile"] = Effect.fn(
     "WorkspaceFileSystem.writeFile",
   )(function* (input) {
@@ -266,6 +337,13 @@ export const make = Effect.gen(function* () {
       workspaceRoot: input.cwd,
       relativePath: input.relativePath,
     });
+
+    if (input.baseRevision !== undefined) {
+      yield* ensureBaseRevision(
+        { ...input, baseRevision: input.baseRevision },
+        target.absolutePath,
+      );
+    }
 
     yield* fileSystem.makeDirectory(path.dirname(target.absolutePath), { recursive: true }).pipe(
       Effect.mapError(
@@ -294,7 +372,7 @@ export const make = Effect.gen(function* () {
       ),
     );
     yield* workspaceEntries.refresh(input.cwd);
-    return { relativePath: target.relativePath };
+    return { relativePath: target.relativePath, revision: fileContentRevision(input.contents) };
   });
 
   return WorkspaceFileSystem.of({ readFile, writeFile });

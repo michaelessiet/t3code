@@ -1,6 +1,15 @@
 import type { ContextMenuItem, PreviewSessionSnapshot } from "@t3tools/contracts";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
-import { ClipboardList, FileDiff, Files, Globe2, Plus, TerminalSquare, X } from "lucide-react";
+import {
+  ClipboardList,
+  FileDiff,
+  Files,
+  Globe2,
+  Plus,
+  TerminalSquare,
+  TextSearch,
+  X,
+} from "lucide-react";
 import {
   type MouseEvent as ReactMouseEvent,
   type ReactElement,
@@ -44,9 +53,11 @@ interface RightPanelTabsProps {
   onAddTerminal: () => void;
   onAddDiff: () => void;
   onAddFiles: () => void;
+  onAddSearch: () => void;
   browserAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
+  searchAvailable: boolean;
   children: ReactNode;
 }
 
@@ -54,6 +65,7 @@ const SURFACE_DISABLED_REASONS = {
   browser: "Browser previews are only available in the T3 Code desktop app.",
   files: "Files are only available when a project is open.",
   diff: "Diff is only available for server threads in Git repositories.",
+  search: "Search is only available when a project is open.",
 } as const;
 
 type TabContextMenuAction = "copy-path" | "close" | "close-others" | "close-to-right" | "close-all";
@@ -91,9 +103,11 @@ function RightPanelEmptyState(props: {
   onAddTerminal: () => void;
   onAddDiff: () => void;
   onAddFiles: () => void;
+  onAddSearch: () => void;
   browserAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
+  searchAvailable: boolean;
 }) {
   const actions = [
     {
@@ -119,6 +133,14 @@ function RightPanelEmptyState(props: {
       available: props.filesAvailable,
       disabledReason: SURFACE_DISABLED_REASONS.files,
       onClick: props.onAddFiles,
+    },
+    {
+      label: "Search",
+      description: "Find and replace across files.",
+      icon: TextSearch,
+      available: props.searchAvailable,
+      disabledReason: SURFACE_DISABLED_REASONS.search,
+      onClick: props.onAddSearch,
     },
     {
       label: "Diff",
@@ -196,6 +218,8 @@ function surfaceTitle(
       return "Diff";
     case "files":
       return "Files";
+    case "search":
+      return "Search";
     case "file":
       return surface.relativePath.slice(surface.relativePath.lastIndexOf("/") + 1);
     case "terminal":
@@ -253,6 +277,8 @@ function SurfaceIcon({
       return <FileDiff className="size-3.5 shrink-0" />;
     case "files":
       return <Files className="size-3.5 shrink-0" />;
+    case "search":
+      return <TextSearch className="size-3.5 shrink-0" />;
     case "file":
       return (
         <PierreEntryIcon
@@ -463,6 +489,14 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                     Files
                   </SurfaceMenuItem>
                   <SurfaceMenuItem
+                    available={props.searchAvailable}
+                    disabledReason={SURFACE_DISABLED_REASONS.search}
+                    onClick={props.onAddSearch}
+                  >
+                    <TextSearch />
+                    Search
+                  </SurfaceMenuItem>
+                  <SurfaceMenuItem
                     available={props.diffAvailable}
                     disabledReason={SURFACE_DISABLED_REASONS.diff}
                     onClick={props.onAddDiff}
@@ -484,9 +518,11 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddTerminal={props.onAddTerminal}
             onAddDiff={props.onAddDiff}
             onAddFiles={props.onAddFiles}
+            onAddSearch={props.onAddSearch}
             browserAvailable={props.browserAvailable}
             diffAvailable={props.diffAvailable}
             filesAvailable={props.filesAvailable}
+            searchAvailable={props.searchAvailable}
           />
         ) : (
           props.children
