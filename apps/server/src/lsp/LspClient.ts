@@ -79,30 +79,43 @@ function resolveSpawn(config: LanguageServerConfig): {
 } {
   if (!config.bundled) return { command: config.command, args: config.args };
   // Bundled servers resolve from the app's node_modules and run under the
-  // current Node executable so they work regardless of the user's PATH.
+  // current Node executable so they work regardless of the user's PATH. vtsls
+  // bundles its own TypeScript, so unlike a bare typescript-language-server it
+  // needs no separately-shipped tsserver to drive.
   const require = NodeModule.createRequire(import.meta.url);
-  const cliPath = require.resolve("typescript-language-server/lib/cli.mjs");
+  const cliPath = require.resolve("@vtsls/language-server/bin/vtsls.js");
   return { command: process.execPath, args: [cliPath, ...config.args] };
 }
 
 /**
- * tsserver.js from the `typescript` package shipped with this server.
+ * VS Code-style workspace settings handed to vtsls.
  *
- * typescript-language-server does NOT depend on typescript; it discovers
- * tsserver by walking up from its own install or the workspace. That works
- * from a source checkout (the monorepo has typescript) but not from the
- * packaged desktop app, where nothing above `app.asar.unpacked/node_modules`
- * exists. Shipping typescript and passing it explicitly as the *fallback*
- * keeps packaged builds working while still preferring a workspace-local
- * typescript version when the opened project has one.
+ * typescript-language-server read tsserver user preferences straight from
+ * `initializationOptions.preferences`; vtsls instead only takes configuration
+ * through `workspace/configuration` (and `didChangeConfiguration`), keyed by
+ * the same `typescript.*` / `javascript.*` sections VS Code uses. We surface
+ * only the auto-import knobs; everything else falls back to vtsls' bundled
+ * defaults, which already match VS Code.
  */
-function resolveBundledTsserverPath(): string | undefined {
-  try {
-    const require = NodeModule.createRequire(import.meta.url);
-    return require.resolve("typescript/lib/tsserver.js");
-  } catch {
-    return undefined;
-  }
+const VTSLS_WORKSPACE_CONFIGURATION = {
+  typescript: {
+    suggest: { autoImports: true },
+    preferences: { includePackageJsonAutoImports: "auto" },
+  },
+  javascript: {
+    suggest: { autoImports: true },
+    preferences: { includePackageJsonAutoImports: "auto" },
+  },
+} as const;
+
+/**
+ * Answer one `workspace/configuration` item. vtsls requests the whole tree
+ * (empty section); non-TypeScript servers request their own sections, for
+ * which we return null so they fall back to their defaults.
+ */
+function configurationForSection(section: string | undefined): unknown {
+  if (section === undefined || section === "") return VTSLS_WORKSPACE_CONFIGURATION;
+  return (VTSLS_WORKSPACE_CONFIGURATION as Record<string, unknown>)[section] ?? null;
 }
 
 export class LspClient {
@@ -168,7 +181,11 @@ export class LspClient {
       },
     );
     // Some servers (tsserver) send requests we don't need; answer politely.
-    connection.onRequest("workspace/configuration", () => [null]);
+    connection.onRequest(
+      "workspace/configuration",
+      (params: { readonly items: ReadonlyArray<{ readonly section?: string }> }) =>
+        params.items.map((item) => configurationForSection(item.section)),
+    );
     connection.onRequest("window/workDoneProgress/create", () => null);
     connection.onError(() => {});
     connection.listen();
@@ -207,25 +224,9 @@ export class LspClient {
           rename: {},
           formatting: {},
         },
-        workspace: { workspaceFolders: true, configuration: false },
-      },
-      // typescript-language-server reads tsserver user preferences from
-      // initializationOptions; auto-import and module-specifier completions
-      // hinge on these. Other servers ignore unknown options.
-      initializationOptions: {
-        preferences: {
-          includeCompletionsForModuleExports: true,
-          includeCompletionsForImportStatements: true,
-          includeCompletionsWithInsertText: true,
-          includeAutomaticOptionalChainCompletions: true,
-          includePackageJsonAutoImports: "auto",
-        },
-        ...(() => {
-          const fallbackPath = this.options.config.bundled
-            ? resolveBundledTsserverPath()
-            : undefined;
-          return fallbackPath === undefined ? {} : { tsserver: { fallbackPath } };
-        })(),
+        // vtsls pulls settings via workspace/configuration during init; the
+        // request handler above returns VTSLS_WORKSPACE_CONFIGURATION.
+        workspace: { workspaceFolders: true, configuration: true },
       },
     };
     await withTimeout(

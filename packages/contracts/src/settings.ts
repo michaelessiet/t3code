@@ -356,6 +356,137 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
 );
 export type OpenCodeSettings = typeof OpenCodeSettings.Type;
 
+// ── Language server settings ──────────────────────────────────
+
+/**
+ * Built-in server ids and extensions, inlined as literals because contracts
+ * cannot import @t3tools/shared (shared depends on contracts). Parity with
+ * the server registry is asserted by apps/server/src/lsp/LanguageServers.test.ts.
+ */
+export const BUILTIN_LANGUAGE_SERVER_IDS: ReadonlyArray<string> = [
+  "typescript",
+  "rust",
+  "python",
+  "go",
+];
+export const BUILTIN_LANGUAGE_SERVER_EXTENSIONS: ReadonlyArray<string> = [
+  ".ts",
+  ".mts",
+  ".cts",
+  ".tsx",
+  ".js",
+  ".mjs",
+  ".cjs",
+  ".jsx",
+  ".rs",
+  ".py",
+  ".pyi",
+  ".go",
+];
+
+const LANGUAGE_SERVER_ID_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
+
+const LanguageServerId = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(64),
+  Schema.isPattern(LANGUAGE_SERVER_ID_PATTERN),
+);
+
+// Normalized to leading-dot lowercase ("TS" | ".TS" -> ".ts"). Inner dots are
+// rejected: extension binding matches on the substring after the last dot, so
+// a ".d.ts"-style extension could never bind.
+const LanguageServerFileExtension = TrimmedNonEmptyString.pipe(
+  Schema.decodeTo(
+    Schema.String,
+    SchemaTransformation.transformOrFail({
+      decode: (value) => {
+        const lower = value.toLowerCase();
+        return Effect.succeed(lower.startsWith(".") ? lower : `.${lower}`);
+      },
+      encode: (value) => Effect.succeed(value),
+    }),
+  ),
+).check(Schema.isPattern(/^\.[a-z0-9+_-]+$/));
+
+export const CustomLanguageServer = makeProviderSettingsSchema(
+  {
+    serverId: LanguageServerId.pipe(
+      Schema.annotateKey({
+        title: "Server ID",
+        description: "Unique identifier (letters, digits, dash, underscore).",
+        providerSettingsForm: { placeholder: "ruby" },
+      }),
+    ),
+    displayName: TrimmedNonEmptyString.pipe(
+      Schema.annotateKey({
+        title: "Display name",
+        providerSettingsForm: { placeholder: "solargraph" },
+      }),
+    ),
+    command: TrimmedNonEmptyString.pipe(
+      Schema.annotateKey({
+        title: "Command",
+        description: "Executable resolved from PATH, or an absolute path.",
+        providerSettingsForm: { placeholder: "solargraph" },
+      }),
+    ),
+    args: Schema.Array(TrimmedNonEmptyString).pipe(
+      Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.annotateKey({
+        title: "Arguments",
+        description: "Command-line arguments passed on spawn.",
+        providerSettingsForm: { placeholder: "stdio" },
+      }),
+    ),
+    extensions: Schema.Array(LanguageServerFileExtension)
+      .check(Schema.isMinLength(1))
+      .pipe(
+        Schema.annotateKey({
+          title: "File extensions",
+          description: "Extensions this server handles, e.g. .rb, .rake.",
+        }),
+      ),
+    languageId: TrimmedNonEmptyString.pipe(
+      Schema.annotateKey({
+        title: "Language ID",
+        description: "LSP languageId sent on document open, e.g. 'ruby'.",
+        providerSettingsForm: { placeholder: "ruby" },
+      }),
+    ),
+  },
+  {
+    order: ["serverId", "displayName", "command", "args", "extensions", "languageId"],
+  },
+);
+export type CustomLanguageServer = typeof CustomLanguageServer.Type;
+
+const validateLanguageServers = Schema.makeFilter(
+  (servers: ReadonlyArray<CustomLanguageServer>) => {
+    const builtinIds = new Set(BUILTIN_LANGUAGE_SERVER_IDS);
+    const builtinExtensions = new Set(BUILTIN_LANGUAGE_SERVER_EXTENSIONS);
+    const ids = new Set<string>();
+    const extensions = new Set<string>();
+    for (const server of servers) {
+      if (builtinIds.has(server.serverId)) {
+        return `serverId '${server.serverId}' is reserved for a built-in server`;
+      }
+      if (ids.has(server.serverId)) {
+        return `duplicate serverId '${server.serverId}'`;
+      }
+      ids.add(server.serverId);
+      for (const extension of server.extensions) {
+        if (builtinExtensions.has(extension)) {
+          return `extension '${extension}' is handled by a built-in server`;
+        }
+        if (extensions.has(extension)) {
+          return `extension '${extension}' is claimed by more than one language server`;
+        }
+        extensions.add(extension);
+      }
+    }
+    return true;
+  },
+);
+
 export const ObservabilitySettings = Schema.Struct({
   otlpTracesUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   otlpMetricsUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
@@ -410,6 +541,12 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  // User-defined language servers merged into the built-in LSP registry on
+  // the server (apps/server/src/lsp/LanguageServers.ts). Whole-array replaced
+  // on patch, like providerInstances.
+  languageServers: Schema.Array(CustomLanguageServer)
+    .check(validateLanguageServers)
+    .pipe(Schema.withDecodingDefault(Effect.succeed([]))),
 });
 export type ServerSettings = typeof ServerSettings.Type;
 
@@ -531,6 +668,9 @@ export const ServerSettingsPatch = Schema.Struct({
   // patches risk leaving driver-specific config in a half-merged state.
   // The web UI sends a fully-formed map every time it edits this field.
   providerInstances: Schema.optionalKey(Schema.Record(ProviderInstanceId, ProviderInstanceConfig)),
+  // Whole-array replacement, matching providerInstances: the UI sends the
+  // fully-formed list every time it edits this field.
+  languageServers: Schema.optionalKey(Schema.Array(CustomLanguageServer)),
 });
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 
