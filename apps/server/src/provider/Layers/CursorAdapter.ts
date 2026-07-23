@@ -40,6 +40,11 @@ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawne
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
+import {
+  decodeAttachmentText,
+  formatInlineAttachmentText,
+  formatUnreadableAttachmentNote,
+} from "../../attachmentContent.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
@@ -987,11 +992,27 @@ export function makeCursorAdapter(
                     }),
                 ),
               );
-              promptParts.push({
-                type: "image",
-                data: Buffer.from(bytes).toString("base64"),
-                mimeType: attachment.mimeType,
-              });
+              if (attachment.type === "image") {
+                promptParts.push({
+                  type: "image",
+                  data: Buffer.from(bytes).toString("base64"),
+                  mimeType: attachment.mimeType,
+                });
+              } else {
+                // Non-image files are forwarded as inline text when readable.
+                const text = decodeAttachmentText(bytes);
+                promptParts.push({
+                  type: "text",
+                  text:
+                    text !== null
+                      ? formatInlineAttachmentText({
+                          name: attachment.name,
+                          mimeType: attachment.mimeType,
+                          text,
+                        })
+                      : formatUnreadableAttachmentNote(attachment),
+                });
+              }
             }
           }
 

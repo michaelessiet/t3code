@@ -32,6 +32,11 @@ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawne
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
+import {
+  decodeAttachmentText,
+  formatInlineAttachmentText,
+  formatUnreadableAttachmentNote,
+} from "../../attachmentContent.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
@@ -950,7 +955,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
               });
 
               const text = input.input?.trim();
-              const imagePromptParts = yield* Effect.forEach(
+              const attachmentPromptParts = yield* Effect.forEach(
                 input.attachments ?? [],
                 (attachment) =>
                   Effect.gen(function* () {
@@ -976,6 +981,21 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                           }),
                       ),
                     );
+                    if (attachment.type !== "image") {
+                      // Non-image files are forwarded as inline text when readable.
+                      const attachmentText = decodeAttachmentText(bytes);
+                      return {
+                        type: "text",
+                        text:
+                          attachmentText !== null
+                            ? formatInlineAttachmentText({
+                                name: attachment.name,
+                                mimeType: attachment.mimeType,
+                                text: attachmentText,
+                              })
+                            : formatUnreadableAttachmentNote(attachment),
+                      } satisfies EffectAcpSchema.ContentBlock;
+                    }
                     return {
                       type: "image",
                       data: Buffer.from(bytes).toString("base64"),
@@ -985,7 +1005,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
               );
               const promptParts: Array<EffectAcpSchema.ContentBlock> = [
                 ...(text ? [{ type: "text" as const, text }] : []),
-                ...imagePromptParts,
+                ...attachmentPromptParts,
               ];
 
               if (promptParts.length === 0) {

@@ -8,7 +8,11 @@ import {
   normalizeAttachmentRelativePath,
   resolveAttachmentRelativePath,
 } from "./attachmentPaths.ts";
-import { inferImageExtension, SAFE_IMAGE_FILE_EXTENSIONS } from "./imageMime.ts";
+import {
+  inferAttachmentFileExtension,
+  inferImageExtension,
+  SAFE_IMAGE_FILE_EXTENSIONS,
+} from "./imageMime.ts";
 
 const ATTACHMENT_FILENAME_EXTENSIONS = [...SAFE_IMAGE_FILE_EXTENSIONS, ".bin"];
 const ATTACHMENT_ID_THREAD_SEGMENT_MAX_CHARS = 80;
@@ -63,6 +67,13 @@ export function attachmentRelativePath(attachment: ChatAttachment): string {
       });
       return `${attachment.id}${extension}`;
     }
+    case "file": {
+      const extension = inferAttachmentFileExtension({
+        mimeType: attachment.mimeType,
+        fileName: attachment.name,
+      });
+      return `${attachment.id}${extension}`;
+    }
   }
 }
 
@@ -88,6 +99,30 @@ export function resolveAttachmentPathById(input: {
     const maybePath = resolveAttachmentRelativePath({
       attachmentsDir: input.attachmentsDir,
       relativePath: `${normalizedId}${extension}`,
+    });
+    if (maybePath && NodeFS.existsSync(maybePath)) {
+      return maybePath;
+    }
+  }
+  // Non-image ("file") attachments keep their original extension, which can
+  // be anything — fall back to scanning the flat attachments directory.
+  let entries: Array<string>;
+  try {
+    entries = NodeFS.readdirSync(input.attachmentsDir);
+  } catch {
+    return null;
+  }
+  const idPrefix = `${normalizedId}.`;
+  for (const entry of entries) {
+    if (!entry.startsWith(idPrefix)) {
+      continue;
+    }
+    if (!/^\.[a-z0-9]{1,10}$/i.test(entry.slice(normalizedId.length))) {
+      continue;
+    }
+    const maybePath = resolveAttachmentRelativePath({
+      attachmentsDir: input.attachmentsDir,
+      relativePath: entry,
     });
     if (maybePath && NodeFS.existsSync(maybePath)) {
       return maybePath;

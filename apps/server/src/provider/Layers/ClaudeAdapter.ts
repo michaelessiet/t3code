@@ -26,6 +26,7 @@ import {
   type CanonicalItemType,
   type CanonicalRequestType,
   type ClaudeSettings,
+  DEFAULT_SERVER_SETTINGS,
   EventId,
   type ProviderApprovalDecision,
   ProviderDriverKind,
@@ -67,8 +68,14 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
+import {
+  decodeAttachmentText,
+  formatInlineAttachmentText,
+  formatUnreadableAttachmentNote,
+} from "../../attachmentContent.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import {
@@ -935,6 +942,47 @@ function buildClaudeImageContentBlock(input: {
   };
 }
 
+function buildClaudePdfContentBlock(input: {
+  readonly name: string;
+  readonly bytes: Uint8Array;
+}): Record<string, unknown> {
+  return {
+    type: "document",
+    source: {
+      type: "base64",
+      media_type: "application/pdf",
+      data: Buffer.from(input.bytes).toString("base64"),
+    },
+    title: input.name,
+  };
+}
+
+function buildClaudeFileContentBlock(input: {
+  readonly name: string;
+  readonly mimeType: string;
+  readonly sizeBytes: number;
+  readonly bytes: Uint8Array;
+}): Record<string, unknown> {
+  if (input.mimeType.toLowerCase() === "application/pdf") {
+    return buildClaudePdfContentBlock(input);
+  }
+  const text = decodeAttachmentText(input.bytes);
+  if (text !== null) {
+    return {
+      type: "text",
+      text: formatInlineAttachmentText({
+        name: input.name,
+        mimeType: input.mimeType,
+        text,
+      }),
+    };
+  }
+  return {
+    type: "text",
+    text: formatUnreadableAttachmentNote(input),
+  };
+}
+
 const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
   input: ProviderSendTurnInput,
   dependencies: {
@@ -951,11 +999,10 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
   }
 
   for (const attachment of input.attachments ?? []) {
-    if (attachment.type !== "image") {
-      continue;
-    }
-
-    if (!SUPPORTED_CLAUDE_IMAGE_MIME_TYPES.has(attachment.mimeType)) {
+    if (
+      attachment.type === "image" &&
+      !SUPPORTED_CLAUDE_IMAGE_MIME_TYPES.has(attachment.mimeType)
+    ) {
       return yield* new ProviderAdapterRequestError({
         provider: PROVIDER,
         method: "turn/start",
@@ -988,10 +1035,17 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
     );
 
     sdkContent.push(
-      buildClaudeImageContentBlock({
-        mimeType: attachment.mimeType,
-        bytes,
-      }),
+      attachment.type === "image"
+        ? buildClaudeImageContentBlock({
+            mimeType: attachment.mimeType,
+            bytes,
+          })
+        : buildClaudeFileContentBlock({
+            name: attachment.name,
+            mimeType: attachment.mimeType,
+            sizeBytes: attachment.sizeBytes,
+            bytes,
+          }),
     );
   }
 
@@ -1343,6 +1397,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig;
+  const serverSettingsService = yield* ServerSettingsService;
   const crypto = yield* Crypto.Crypto;
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, options?.environment).pipe(
     Effect.provideService(Path.Path, path),
@@ -3434,10 +3489,27 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "full-access": "bypassPermissions",
       };
       const permissionMode = runtimeModeToPermission[input.runtimeMode];
+      // Read auto-compact settings at session start; a settings read failure
+      // falls back to defaults rather than failing the session.
+      const autoCompact = yield* serverSettingsService.getSettings.pipe(
+        Effect.map((serverSettings) => ({
+          enabled: serverSettings.autoCompactEnabled,
+          window: serverSettings.autoCompactThresholdTokens,
+        })),
+        Effect.orElseSucceed(() => ({
+          enabled: DEFAULT_SERVER_SETTINGS.autoCompactEnabled,
+          window: DEFAULT_SERVER_SETTINGS.autoCompactThresholdTokens,
+        })),
+      );
+      // `autoCompactEnabled` is always set explicitly so behavior is
+      // deterministic regardless of the user's own ~/.claude settings
+      // (settingSources includes user-level sources).
       const settings = {
         ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
         ...(fastMode ? { fastMode: true } : {}),
         ...(ultracode ? { ultracode: true } : {}),
+        autoCompactEnabled: autoCompact.enabled,
+        ...(autoCompact.enabled ? { autoCompactWindow: autoCompact.window } : {}),
       };
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
       const queryOptions: ClaudeQueryOptions = {
@@ -3457,7 +3529,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(permissionMode === "bypassPermissions"
           ? { allowDangerouslySkipPermissions: true }
           : {}),
-        ...(Object.keys(settings).length > 0 ? { settings } : {}),
+        settings,
         ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
         ...(newSessionId ? { sessionId: newSessionId } : {}),
         includePartialMessages: true,

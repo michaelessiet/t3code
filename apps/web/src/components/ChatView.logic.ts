@@ -10,7 +10,7 @@ import {
   type TurnId,
 } from "@t3tools/contracts";
 import { type ChatMessage, type SessionPhase, type Thread } from "../types";
-import { type ComposerImageAttachment, type DraftThreadState } from "../composerDraftStore";
+import { type ComposerAttachment, type DraftThreadState } from "../composerDraftStore";
 import * as Schema from "effect/Schema";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentThreadDetails } from "../state/threads";
@@ -144,13 +144,13 @@ export function revokeUserMessagePreviewUrls(message: ChatMessage): void {
     return;
   }
   for (const attachment of message.attachments) {
-    if (attachment.type !== "image") {
-      continue;
-    }
     revokeBlobPreviewUrl(attachment.previewUrl);
   }
 }
 
+// Image-only by design: the preview handoff overlays these blob URLs onto the
+// server message's image attachments and preloads their replacements with
+// `Image()`, which non-image attachments cannot participate in.
 export function collectUserMessageBlobPreviewUrls(message: ChatMessage): string[] {
   if (message.role !== "user" || !message.attachments) {
     return [];
@@ -169,6 +169,61 @@ export interface PullRequestDialogState {
   key: number;
 }
 
+// Browsers report unreliable MIME types for source files (`.ts` becomes
+// `video/mp2t`, many extensions come back empty), so prefer a map keyed on
+// the filename extension for well-known text formats.
+const MIME_TYPE_BY_FILE_EXTENSION: Record<string, string> = {
+  c: "text/x-c",
+  cjs: "text/javascript",
+  cpp: "text/x-c++",
+  cs: "text/x-csharp",
+  css: "text/css",
+  csv: "text/csv",
+  go: "text/x-go",
+  h: "text/x-c",
+  hpp: "text/x-c++",
+  html: "text/html",
+  java: "text/x-java",
+  js: "text/javascript",
+  json: "application/json",
+  jsx: "text/jsx",
+  kt: "text/x-kotlin",
+  log: "text/plain",
+  md: "text/markdown",
+  markdown: "text/markdown",
+  mjs: "text/javascript",
+  php: "text/x-php",
+  py: "text/x-python",
+  rb: "text/x-ruby",
+  rs: "text/x-rust",
+  sh: "text/x-shellscript",
+  sql: "application/sql",
+  svelte: "text/plain",
+  swift: "text/x-swift",
+  toml: "application/toml",
+  ts: "application/typescript",
+  tsx: "application/typescript",
+  txt: "text/plain",
+  vue: "text/plain",
+  xml: "application/xml",
+  yaml: "application/yaml",
+  yml: "application/yaml",
+};
+
+const GENERIC_REPORTED_MIME_TYPES = new Set(["application/octet-stream", "video/mp2t"]);
+
+export function inferAttachmentMimeType(file: File): string {
+  const reported = file.type.trim().toLowerCase();
+  const extensionMatch = /\.([a-z0-9]{1,10})$/i.exec(file.name.trim());
+  const fromExtension = extensionMatch
+    ? MIME_TYPE_BY_FILE_EXTENSION[extensionMatch[1]!.toLowerCase()]
+    : undefined;
+  if (fromExtension && (!reported || GENERIC_REPORTED_MIME_TYPES.has(reported))) {
+    return fromExtension;
+  }
+  return reported || fromExtension || "application/octet-stream";
+}
+
 export function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -177,10 +232,10 @@ export function readFileAsDataUrl(file: File): Promise<string> {
         resolve(reader.result);
         return;
       }
-      reject(new Error("Could not read image data."));
+      reject(new Error("Could not read attachment data."));
     });
     reader.addEventListener("error", () => {
-      reject(reader.error ?? new Error("Failed to read image."));
+      reject(reader.error ?? new Error("Failed to read attachment."));
     });
     reader.readAsDataURL(file);
   });
@@ -193,9 +248,7 @@ export function resolveSendEnvMode(input: {
   return input.isGitRepo ? input.requestedEnvMode : "local";
 }
 
-export function cloneComposerImageForRetry(
-  image: ComposerImageAttachment,
-): ComposerImageAttachment {
+export function cloneComposerImageForRetry(image: ComposerAttachment): ComposerAttachment {
   if (typeof URL === "undefined" || !image.previewUrl.startsWith("blob:")) {
     return image;
   }

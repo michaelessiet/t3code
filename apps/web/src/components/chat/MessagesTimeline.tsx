@@ -47,6 +47,7 @@ import {
   ChevronRightIcon,
   CircleAlertIcon,
   EyeIcon,
+  FileTextIcon,
   GlobeIcon,
   HammerIcon,
   MessageCircleIcon,
@@ -902,7 +903,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
     ...elementContextState.contexts,
   ];
   const previewImages = userImages.filter((image) => image.name.startsWith("preview-annotation-"));
-  const regularImages = userImages.filter((image) => !image.name.startsWith("preview-annotation-"));
+  const regularAttachments = userImages.filter(
+    (image) => !image.name.startsWith("preview-annotation-"),
+  );
+  const regularImages = regularAttachments.filter((attachment) => attachment.type === "image");
+  const fileAttachments = regularAttachments.filter((attachment) => attachment.type === "file");
   const canRevertAgentWork = typeof row.revertTurnCount === "number";
 
   return (
@@ -939,6 +944,35 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
                 )}
               </div>
             ))}
+          </div>
+        )}
+        {fileAttachments.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {fileAttachments.map((attachment) => {
+              const chipBody = (
+                <>
+                  <FileTextIcon className="size-3.5 shrink-0 text-muted-foreground/70" />
+                  <span className="max-w-[220px] truncate">{attachment.name}</span>
+                </>
+              );
+              const chipClassName =
+                "inline-flex items-center gap-1.5 rounded-lg border border-border/80 bg-background/70 px-2 py-1 text-[11px] text-muted-foreground";
+              return attachment.previewUrl ? (
+                <a
+                  key={attachment.id}
+                  href={attachment.previewUrl}
+                  download={attachment.name}
+                  className={`${chipClassName} hover:bg-background`}
+                  title={attachment.name}
+                >
+                  {chipBody}
+                </a>
+              ) : (
+                <div key={attachment.id} className={chipClassName} title={attachment.name}>
+                  {chipBody}
+                </div>
+              );
+            })}
           </div>
         )}
         {previewAnnotations.map((annotation, index) => (
