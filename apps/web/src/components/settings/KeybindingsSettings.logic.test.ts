@@ -42,7 +42,9 @@ describe("KeybindingsSettings.logic", () => {
         command: "terminal.toggle",
         key: "mod+j",
         when: "!terminalFocus",
-        defaultKey: "mod+j",
+        // mod+j now belongs to rightPanel.toggle; the command's first
+        // default binding (ctrl+`) is surfaced as the reset target.
+        defaultKey: "ctrl+`",
         defaultWhen: "",
         source: "Custom",
       }),
@@ -173,8 +175,9 @@ describe("KeybindingsSettings.logic", () => {
             shiftKey: false,
           },
           whenAst: {
-            type: "not",
-            node: { type: "identifier", name: "terminalFocus" },
+            type: "and",
+            left: { type: "not", node: { type: "identifier", name: "terminalFocus" } },
+            right: { type: "not", node: { type: "identifier", name: "fileTreeFocus" } },
           },
         },
         {

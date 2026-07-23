@@ -99,6 +99,31 @@ describe("ServerSettings worktree defaults", () => {
   });
 });
 
+describe("ServerSettings auto-compact", () => {
+  it("defaults to enabled at 200k tokens for legacy configs", () => {
+    const decoded = decodeServerSettings({});
+    expect(decoded.autoCompactEnabled).toBe(true);
+    expect(decoded.autoCompactThresholdTokens).toBe(200_000);
+  });
+
+  it("accepts patches for both fields", () => {
+    const patch = decodeServerSettingsPatch({
+      autoCompactEnabled: false,
+      autoCompactThresholdTokens: 150_000,
+    });
+    expect(patch.autoCompactEnabled).toBe(false);
+    expect(patch.autoCompactThresholdTokens).toBe(150_000);
+  });
+
+  it("rejects thresholds outside the SDK's accepted 100k-1M range", () => {
+    // The Claude Agent SDK silently drops out-of-range autoCompactWindow
+    // values, so the contract must reject them up front.
+    expect(() => decodeServerSettingsPatch({ autoCompactThresholdTokens: 50_000 })).toThrow();
+    expect(() => decodeServerSettingsPatch({ autoCompactThresholdTokens: 2_000_000 })).toThrow();
+    expect(() => decodeServerSettingsPatch({ autoCompactThresholdTokens: 200_000.5 })).toThrow();
+  });
+});
+
 describe("ServerSettingsPatch.providerInstances", () => {
   it("treats providerInstances as an optional whole-map replacement", () => {
     const patch = decodeServerSettingsPatch({});

@@ -1432,6 +1432,86 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       assert.equal(shellSnapshot.threads.length, 0);
     }),
   );
+
+  it.effect("searches message text across active threads with literal LIKE matching", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_thread_messages`;
+
+      const insertThread = (threadId: string, title: string, archivedAt: string | null) => sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode,
+          interaction_mode, branch, worktree_path, latest_turn_id,
+          latest_user_message_at, pending_approval_count, pending_user_input_count,
+          has_actionable_proposed_plan, created_at, updated_at, archived_at, deleted_at
+        )
+        VALUES (
+          ${threadId}, 'project-1', ${title}, '{"provider":"codex","model":"gpt-5-codex"}',
+          'full-access', 'default', NULL, NULL, NULL, NULL, 0, 0, 0,
+          '2026-02-24T00:00:00.000Z', '2026-02-24T00:00:01.000Z', ${archivedAt}, NULL
+        )
+      `;
+      const insertMessage = (
+        messageId: string,
+        threadId: string,
+        text: string,
+        updatedAt: string,
+      ) => sql`
+        INSERT INTO projection_thread_messages (
+          message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at
+        )
+        VALUES (${messageId}, ${threadId}, NULL, 'assistant', ${text}, 0, ${updatedAt}, ${updatedAt})
+      `;
+
+      yield* insertThread("thread-active", "Active thread", null);
+      yield* insertThread("thread-archived", "Archived thread", "2026-02-24T00:00:02.000Z");
+      yield* insertMessage(
+        "msg-1",
+        "thread-active",
+        "we should refactor the login flow",
+        "2026-02-24T00:00:05.000Z",
+      );
+      yield* insertMessage(
+        "msg-2",
+        "thread-active",
+        "unrelated message",
+        "2026-02-24T00:00:06.000Z",
+      );
+      yield* insertMessage(
+        "msg-3",
+        "thread-archived",
+        "archived refactor discussion",
+        "2026-02-24T00:00:07.000Z",
+      );
+      yield* insertMessage(
+        "msg-4",
+        "thread-active",
+        "match 100% of literal wildcards",
+        "2026-02-24T00:00:08.000Z",
+      );
+
+      const result = yield* snapshotQuery.searchThreadMessages({ query: "refactor", limit: 10 });
+      assert.equal(result.matches.length, 1);
+      assert.equal(result.matches[0]?.messageId, asMessageId("msg-1"));
+      assert.equal(result.matches[0]?.threadTitle, "Active thread");
+      assert.isTrue(result.matches[0]?.snippet.includes("refactor the login flow"));
+      assert.isFalse(result.truncated);
+
+      // LIKE wildcards in the query match literally, not as patterns.
+      const literal = yield* snapshotQuery.searchThreadMessages({ query: "100%", limit: 10 });
+      assert.equal(literal.matches.length, 1);
+      assert.equal(literal.matches[0]?.messageId, asMessageId("msg-4"));
+      const noMatch = yield* snapshotQuery.searchThreadMessages({ query: "100_", limit: 10 });
+      assert.equal(noMatch.matches.length, 0);
+
+      const limited = yield* snapshotQuery.searchThreadMessages({ query: "e", limit: 1 });
+      assert.equal(limited.matches.length, 1);
+      assert.isTrue(limited.truncated);
+    }),
+  );
 });
 
 it.effect(

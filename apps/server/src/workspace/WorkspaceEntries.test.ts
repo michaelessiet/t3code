@@ -200,7 +200,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceEntries", (it) => {
       }),
     );
 
-    it.effect("excludes gitignored paths for git repositories", () =>
+    it.effect("surfaces gitignored paths flagged as ignored for git repositories", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTempDir({ prefix: "t3code-workspace-gitignore-", git: true });
         yield* writeTextFile(cwd, ".gitignore", ".convex/\nconvex/\nignored.txt\n");
@@ -210,13 +210,20 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         yield* writeTextFile(cwd, "convex/UOoS-l/convex_local_storage/modules/data.json", "{}");
 
         const result = yield* searchWorkspaceEntries({ cwd, query: "", limit: 100 });
-        const paths = result.entries.map((entry) => entry.path);
+        const entryByPath = new Map(result.entries.map((entry) => [entry.path, entry]));
+        const paths = [...entryByPath.keys()];
 
-        expect(paths).toContain("src");
-        expect(paths).toContain("src/keep.ts");
-        expect(paths).not.toContain("ignored.txt");
+        expect(entryByPath.get("src")).toMatchObject({ kind: "directory" });
+        expect(entryByPath.get("src/keep.ts")).toMatchObject({ kind: "file" });
+        expect(entryByPath.get("src/keep.ts")?.ignored).toBeUndefined();
+        // Gitignored entries come from the supplement, flagged as ignored.
+        expect(entryByPath.get("ignored.txt")).toMatchObject({ kind: "file", ignored: true });
+        expect(
+          entryByPath.get("convex/UOoS-l/convex_local_storage/modules/data.json"),
+        ).toMatchObject({ kind: "file", ignored: true });
+        // .convex is a local-storage cache: listed collapsed, never expanded.
+        expect(entryByPath.get(".convex")).toMatchObject({ kind: "directory", ignored: true });
         expect(paths.some((entryPath) => entryPath.startsWith(".convex/"))).toBe(false);
-        expect(paths.some((entryPath) => entryPath.startsWith("convex/"))).toBe(false);
       }),
     );
 

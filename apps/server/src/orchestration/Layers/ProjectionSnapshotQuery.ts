@@ -13,6 +13,7 @@ import {
   ProjectScript,
   TurnId,
   type OrchestrationCheckpointSummary,
+  OrchestrationMessageRole,
   type OrchestrationLatestTurn,
   type OrchestrationMessage,
   type OrchestrationProjectShell,
@@ -108,6 +109,31 @@ const ProjectionCountsRowSchema = Schema.Struct({
   projectCount: Schema.Number,
   threadCount: Schema.Number,
 });
+const ThreadMessageSearchRowSchema = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+  role: OrchestrationMessageRole,
+  text: Schema.String,
+  threadTitle: Schema.String,
+  updatedAt: IsoDateTime,
+});
+
+/** Escape LIKE wildcards so the user query matches literally (ESCAPE '\'). */
+function escapeSqlLikePattern(query: string): string {
+  return query.replace(/[\\%_]/g, (character) => `\\${character}`);
+}
+
+const THREAD_MESSAGE_SNIPPET_RADIUS = 80;
+
+/** Whitespace-collapsed excerpt of `text` centered on the first `query` hit. */
+function threadMessageSnippet(text: string, query: string): string {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  const index = collapsed.toLowerCase().indexOf(query.toLowerCase());
+  if (index === -1) return collapsed.slice(0, THREAD_MESSAGE_SNIPPET_RADIUS * 2);
+  const start = Math.max(0, index - THREAD_MESSAGE_SNIPPET_RADIUS);
+  const end = Math.min(collapsed.length, index + query.length + THREAD_MESSAGE_SNIPPET_RADIUS);
+  return `${start > 0 ? "…" : ""}${collapsed.slice(start, end)}${end < collapsed.length ? "…" : ""}`;
+}
 const WorkspaceRootLookupInput = Schema.Struct({
   workspaceRoot: Schema.String,
 });
@@ -2063,6 +2089,54 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ),
       );
 
+  const searchThreadMessageRows = SqlSchema.findAll({
+    Request: Schema.Struct({ pattern: Schema.String, limit: Schema.Number }),
+    Result: ThreadMessageSearchRowSchema,
+    execute: ({ pattern, limit }) =>
+      sql`
+        SELECT
+          m.thread_id AS "threadId",
+          m.message_id AS "messageId",
+          m.role,
+          m.text,
+          t.title AS "threadTitle",
+          m.updated_at AS "updatedAt"
+        FROM projection_thread_messages m
+        JOIN projection_threads t ON t.thread_id = m.thread_id
+        WHERE t.deleted_at IS NULL
+          AND t.archived_at IS NULL
+          AND m.is_streaming = 0
+          AND m.text LIKE ${pattern} ESCAPE '\\'
+        ORDER BY m.updated_at DESC, m.message_id DESC
+        LIMIT ${limit}
+      `,
+  });
+
+  const searchThreadMessages: ProjectionSnapshotQueryShape["searchThreadMessages"] = (input) =>
+    searchThreadMessageRows({
+      pattern: `%${escapeSqlLikePattern(input.query)}%`,
+      // One extra row detects truncation without a second count query.
+      limit: input.limit + 1,
+    }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.searchThreadMessages:query",
+          "ProjectionSnapshotQuery.searchThreadMessages:decodeRow",
+        ),
+      ),
+      Effect.map((rows) => ({
+        matches: rows.slice(0, input.limit).map((row) => ({
+          threadId: row.threadId,
+          messageId: row.messageId,
+          role: row.role,
+          threadTitle: row.threadTitle,
+          snippet: threadMessageSnippet(row.text, input.query),
+          updatedAt: row.updatedAt,
+        })),
+        truncated: rows.length > input.limit,
+      })),
+    );
+
   return {
     getCommandReadModel,
     getSnapshot,
@@ -2078,6 +2152,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getThreadShellById,
     getThreadDetailById,
     getThreadDetailSnapshot,
+    searchThreadMessages,
   } satisfies ProjectionSnapshotQueryShape;
 });
 

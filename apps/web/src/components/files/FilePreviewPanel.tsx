@@ -6,6 +6,7 @@ import type {
 } from "@t3tools/contracts";
 import { VirtualizedFile } from "@pierre/diffs";
 import { File, type FileOptions, Virtualizer } from "@pierre/diffs/react";
+import { startCompletion } from "@codemirror/autocomplete";
 import type { EditorView } from "@codemirror/view";
 import {
   isAtomCommandInterrupted,
@@ -19,6 +20,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createPortal } from "react-dom";
 
 import { isBrowserPreviewFile, openFileInPreview } from "~/browser/openFileInPreview";
+import { resolveShortcutCommand } from "~/keybindings";
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { OpenInPicker } from "~/components/chat/OpenInPicker";
 import { useClientSettings } from "~/hooks/useSettings";
@@ -42,7 +44,9 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
 import FileBrowserPanel from "./FileBrowserPanel";
+import { consumeEditorFocusRequest } from "./editorFocusRequest";
 import { CodeMirrorFileEditor } from "./codemirror/CodeMirrorFileEditor";
+import { documentSaveExtension } from "./codemirror/documentSave";
 import { useLspBridge } from "./codemirror/useLspBridge";
 import {
   type ReviewAnnotationSpec,
@@ -271,6 +275,7 @@ interface EditableFileSurfaceProps {
   revealRequestId: number;
   wordWrap: boolean;
   vimMode: boolean;
+  keybindings: ResolvedKeybindingsConfig;
   onPendingChange: (relativePath: string, pending: boolean) => void;
   onRefreshFile: () => void;
   onOpenFile: (relativePath: string, line?: number) => void;
@@ -394,6 +399,7 @@ function EditableFileSurface({
   revealRequestId,
   wordWrap,
   vimMode,
+  keybindings,
   onPendingChange,
   onRefreshFile,
   onOpenFile,
@@ -413,6 +419,9 @@ function EditableFileSurface({
   }, []);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const [conflict, setConflict] = useState<FileBufferConflictReason | null>(null);
+  // Users can silence the banner; conflict detection and save coordination
+  // still run so "keep my version"-style resolution state stays intact.
+  const showFileConflictWarning = useClientSettings((settings) => settings.showFileConflictWarning);
   const onStaleSave = useCallback(() => setConflict("stale-save"), []);
   const saveCoordination = useFileSaveCoordinator({
     environmentId,
@@ -470,6 +479,35 @@ function EditableFileSurface({
     editorViewRef.current = view;
     setEditorView(view);
   }, []);
+
+  // Openers that intend a focus handoff (quick search, content search, panel
+  // commands, LSP go-to-definition) arm a one-shot intent; consume it when
+  // the view exists or the file is re-revealed so keyboard focus lands in
+  // the editor.
+  useEffect(() => {
+    if (editorView === null) return;
+    if (consumeEditorFocusRequest()) {
+      editorView.focus();
+    }
+  }, [editorView, revealRequestId]);
+
+  // editor.showCompletions is dispatched here (not in ChatView's global
+  // handler) because only this component holds the live EditorView.
+  useEffect(() => {
+    if (!editorView) return;
+    const handler = (event: globalThis.KeyboardEvent) => {
+      if (!editorView.hasFocus) return;
+      const command = resolveShortcutCommand(event, keybindings, {
+        context: { editorFocus: true },
+      });
+      if (command !== "editor.showCompletions") return;
+      event.preventDefault();
+      event.stopPropagation();
+      startCompletion(editorView);
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [editorView, keybindings]);
 
   const handleContentsChange = useCallback(
     (nextContents: string) => {
@@ -691,9 +729,13 @@ function EditableFileSurface({
     view: editorView,
     onOpenFileAtLine,
   });
+  const saveExtension = useMemo(
+    () => documentSaveExtension(() => saveCoordinator.flush()),
+    [saveCoordinator],
+  );
   const editorExtensions = useMemo(
-    () => [reviewExtension, lspExtension ?? []],
-    [lspExtension, reviewExtension],
+    () => [reviewExtension, saveExtension, lspExtension ?? []],
+    [lspExtension, reviewExtension, saveExtension],
   );
 
   useEffect(() => {
@@ -716,7 +758,7 @@ function EditableFileSurface({
 
   return (
     <div ref={surfaceRef} className="flex min-h-0 flex-1 flex-col">
-      {conflict !== null ? (
+      {conflict !== null && showFileConflictWarning ? (
         <div
           className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-amber-500/20 bg-amber-500/8 px-3 py-1.5 text-[11px] text-amber-700 dark:text-amber-300"
           data-file-conflict-banner
@@ -787,7 +829,13 @@ function RenderedMarkdownSurface({
   onRefreshFile,
 }: Omit<
   EditableFileSurfaceProps,
-  "composerDraftTarget" | "revealLine" | "revealRequestId" | "wordWrap" | "vimMode" | "onOpenFile"
+  | "composerDraftTarget"
+  | "revealLine"
+  | "revealRequestId"
+  | "wordWrap"
+  | "vimMode"
+  | "keybindings"
+  | "onOpenFile"
 > & {
   threadRef: ScopedThreadRef;
 }) {
@@ -1125,6 +1173,7 @@ export default function FilePreviewPanel({
                 revealRequestId={revealRequestId}
                 wordWrap={wordWrap}
                 vimMode={vimMode}
+                keybindings={keybindings}
                 onPendingChange={onPendingChange}
                 onRefreshFile={file.refresh}
                 onOpenFile={onOpenFile}
@@ -1146,6 +1195,7 @@ export default function FilePreviewPanel({
               environmentId={environmentId}
               cwd={cwd}
               projectName={projectName}
+              threadRef={threadRef}
               onOpenFile={onOpenFile}
             />
           </aside>

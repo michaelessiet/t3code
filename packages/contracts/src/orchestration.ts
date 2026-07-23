@@ -14,6 +14,7 @@ import {
   IsoDateTime,
   MessageId,
   NonNegativeInt,
+  PositiveInt,
   ProjectId,
   ProviderItemId,
   ThreadId,
@@ -27,6 +28,7 @@ export const ORCHESTRATION_WS_METHODS = {
   getTurnDiff: "orchestration.getTurnDiff",
   getFullThreadDiff: "orchestration.getFullThreadDiff",
   replayEvents: "orchestration.replayEvents",
+  searchMessages: "orchestration.searchMessages",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   subscribeShell: "orchestration.subscribeShell",
   subscribeThread: "orchestration.subscribeThread",
@@ -1283,6 +1285,29 @@ export const OrchestrationReplayEventsInput = Schema.Struct({
 });
 export type OrchestrationReplayEventsInput = typeof OrchestrationReplayEventsInput.Type;
 
+export const OrchestrationSearchMessagesInput = Schema.Struct({
+  query: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  limit: PositiveInt.check(Schema.isLessThanOrEqualTo(100)),
+});
+export type OrchestrationSearchMessagesInput = typeof OrchestrationSearchMessagesInput.Type;
+
+export const OrchestrationMessageSearchMatch = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+  role: OrchestrationMessageRole,
+  threadTitle: Schema.String,
+  /** Short excerpt of the message text centered on the first match. */
+  snippet: Schema.String,
+  updatedAt: IsoDateTime,
+});
+export type OrchestrationMessageSearchMatch = typeof OrchestrationMessageSearchMatch.Type;
+
+export const OrchestrationSearchMessagesResult = Schema.Struct({
+  matches: Schema.Array(OrchestrationMessageSearchMatch),
+  truncated: Schema.Boolean,
+});
+export type OrchestrationSearchMessagesResult = typeof OrchestrationSearchMessagesResult.Type;
+
 const OrchestrationReplayEventsResult = Schema.Array(OrchestrationEvent);
 export type OrchestrationReplayEventsResult = typeof OrchestrationReplayEventsResult.Type;
 
@@ -1302,6 +1327,10 @@ export const OrchestrationRpcSchemas = {
   replayEvents: {
     input: OrchestrationReplayEventsInput,
     output: OrchestrationReplayEventsResult,
+  },
+  searchMessages: {
+    input: OrchestrationSearchMessagesInput,
+    output: OrchestrationSearchMessagesResult,
   },
   getArchivedShellSnapshot: {
     input: Schema.Struct({}),
@@ -1343,6 +1372,14 @@ export class OrchestrationGetTurnDiffError extends Schema.TaggedErrorClass<Orche
 
 export class OrchestrationGetFullThreadDiffError extends Schema.TaggedErrorClass<OrchestrationGetFullThreadDiffError>()(
   "OrchestrationGetFullThreadDiffError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+export class OrchestrationSearchMessagesError extends Schema.TaggedErrorClass<OrchestrationSearchMessagesError>()(
+  "OrchestrationSearchMessagesError",
   {
     message: TrimmedNonEmptyString,
     cause: Schema.optional(Schema.Defect()),

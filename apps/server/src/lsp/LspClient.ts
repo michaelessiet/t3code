@@ -88,6 +88,22 @@ function resolveSpawn(config: LanguageServerConfig): {
 }
 
 /**
+ * Environment for spawned language servers. Node's watch mode (`node --watch`,
+ * the dev runner) injects WATCH_REPORT_DEPENDENCIES=1 into our environment;
+ * a language server that forks a Node child over IPC (vtsls forking tsserver)
+ * would inherit it, making Node's watch reporter emit `{"watch:require": ...}`
+ * IPC messages the server can't parse — vtsls throws "Unknown message type
+ * undefined received" and exits 1 within seconds of starting.
+ */
+export function languageServerEnv(
+  base: NodeJS.ProcessEnv = process.env,
+): Record<string, string | undefined> {
+  const env = { ...base };
+  delete env.WATCH_REPORT_DEPENDENCIES;
+  return env;
+}
+
+/**
  * VS Code-style workspace settings handed to vtsls.
  *
  * typescript-language-server read tsserver user preferences straight from
@@ -139,7 +155,7 @@ export class LspClient {
     const child = NodeChildProcess.spawn(command, [...args], {
       cwd: this.options.workspaceRoot,
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env,
+      env: languageServerEnv(),
     });
     this.child = child;
 

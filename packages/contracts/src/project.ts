@@ -17,6 +17,8 @@ const ProjectEntryKind = Schema.Literals(["file", "directory"]);
 export const ProjectEntry = Schema.Struct({
   path: TrimmedNonEmptyString,
   kind: ProjectEntryKind,
+  /** Present and true for entries that are gitignored in their workspace. */
+  ignored: Schema.optional(Schema.Boolean),
 });
 export type ProjectEntry = typeof ProjectEntry.Type;
 
@@ -143,6 +145,8 @@ export const ProjectFileFailure = Schema.Literals([
   "binary_file",
   "operation_failed",
   "stale_revision",
+  "path_exists",
+  "path_not_found",
 ]);
 export type ProjectFileFailure = typeof ProjectFileFailure.Type;
 
@@ -155,6 +159,10 @@ export const ProjectFileOperation = Schema.Literals([
   "close",
   "make-directory",
   "write-file",
+  "exists",
+  "rename",
+  "remove",
+  "copy",
 ]);
 export type ProjectFileOperation = typeof ProjectFileOperation.Type;
 
@@ -272,6 +280,129 @@ export class ProjectWatchError extends Schema.TaggedErrorClass<ProjectWatchError
       ...props,
       message:
         decodedProjectErrorMessage(props) ?? `Failed to watch workspace changes in '${props.cwd}'.`,
+    } as any);
+  }
+}
+
+const ProjectMutateEntryPath = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH),
+);
+
+/**
+ * Structural workspace-entry mutations driven by the file browser. Content
+ * writes stay on `projects.writeFile`; this covers create/rename/delete of
+ * files and directories.
+ */
+export const ProjectMutateEntryInput = Schema.Union([
+  Schema.TaggedStruct("create", {
+    cwd: TrimmedNonEmptyString,
+    relativePath: ProjectMutateEntryPath,
+    kind: ProjectEntryKind,
+  }),
+  Schema.TaggedStruct("rename", {
+    cwd: TrimmedNonEmptyString,
+    fromRelativePath: ProjectMutateEntryPath,
+    toRelativePath: ProjectMutateEntryPath,
+  }),
+  Schema.TaggedStruct("delete", {
+    cwd: TrimmedNonEmptyString,
+    relativePath: ProjectMutateEntryPath,
+  }),
+]);
+export type ProjectMutateEntryInput = typeof ProjectMutateEntryInput.Type;
+
+export const ProjectMutateEntryResult = Schema.Struct({
+  /** Normalized resulting path: the created/renamed-to/deleted entry. */
+  relativePath: TrimmedNonEmptyString,
+});
+export type ProjectMutateEntryResult = typeof ProjectMutateEntryResult.Type;
+
+export class ProjectMutateEntryError extends Schema.TaggedErrorClass<ProjectMutateEntryError>()(
+  "ProjectMutateEntryError",
+  {
+    cwd: Schema.optional(TrimmedNonEmptyString),
+    relativePath: Schema.optional(TrimmedNonEmptyString),
+    toRelativePath: Schema.optional(TrimmedNonEmptyString),
+    failure: Schema.optional(ProjectFileFailure),
+    resolvedPath: Schema.optional(TrimmedNonEmptyString),
+    resolvedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
+    operation: Schema.optional(ProjectFileOperation),
+    operationPath: Schema.optional(TrimmedNonEmptyString),
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  // @effect-diagnostics-next-line overriddenSchemaConstructor:off
+  constructor(
+    props: Omit<ProjectFileFailureContext, "expectedRevision" | "actualRevision"> & {
+      readonly toRelativePath?: string;
+    },
+  ) {
+    super({
+      ...props,
+      message:
+        decodedProjectErrorMessage(props) ??
+        `Failed to modify workspace entry '${props.relativePath}' in '${props.cwd}'.`,
+    } as any);
+  }
+}
+
+/**
+ * Copy a file or directory from one workspace root to another. Both roots are
+ * reachable on a single environment connection; cross-environment copies are
+ * orchestrated on the client as read + write. `from`/`to` may share a `cwd`
+ * (duplicate within a workspace) or point at different worktrees/projects.
+ */
+export const ProjectCopyEntryInput = Schema.Struct({
+  fromCwd: TrimmedNonEmptyString,
+  fromRelativePath: ProjectMutateEntryPath,
+  toCwd: TrimmedNonEmptyString,
+  toRelativePath: ProjectMutateEntryPath,
+  /** When true, replace an existing destination; otherwise a conflict fails. */
+  overwrite: Schema.optional(Schema.Boolean),
+});
+export type ProjectCopyEntryInput = typeof ProjectCopyEntryInput.Type;
+
+export const ProjectCopyEntryResult = Schema.Struct({
+  /** Normalized destination path within `toCwd`. */
+  relativePath: TrimmedNonEmptyString,
+});
+export type ProjectCopyEntryResult = typeof ProjectCopyEntryResult.Type;
+
+export class ProjectCopyEntryError extends Schema.TaggedErrorClass<ProjectCopyEntryError>()(
+  "ProjectCopyEntryError",
+  {
+    fromCwd: Schema.optional(TrimmedNonEmptyString),
+    fromRelativePath: Schema.optional(TrimmedNonEmptyString),
+    toCwd: Schema.optional(TrimmedNonEmptyString),
+    toRelativePath: Schema.optional(TrimmedNonEmptyString),
+    failure: Schema.optional(ProjectFileFailure),
+    resolvedPath: Schema.optional(TrimmedNonEmptyString),
+    resolvedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
+    operation: Schema.optional(ProjectFileOperation),
+    operationPath: Schema.optional(TrimmedNonEmptyString),
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  // @effect-diagnostics-next-line overriddenSchemaConstructor:off
+  constructor(props: {
+    readonly fromCwd: string;
+    readonly fromRelativePath: string;
+    readonly toCwd: string;
+    readonly toRelativePath: string;
+    readonly failure: ProjectFileFailure;
+    readonly resolvedPath?: string;
+    readonly resolvedWorkspaceRoot?: string;
+    readonly operation?: ProjectFileOperation;
+    readonly operationPath?: string;
+    readonly cause?: unknown;
+  }) {
+    super({
+      ...props,
+      message:
+        decodedProjectErrorMessage(props) ??
+        `Failed to copy workspace entry '${props.fromRelativePath}' from '${props.fromCwd}' to '${props.toRelativePath}' in '${props.toCwd}'.`,
     } as any);
   }
 }

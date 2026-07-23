@@ -23,7 +23,7 @@ import {
   type CompletionResult,
 } from "@codemirror/autocomplete";
 import { setDiagnostics, type Diagnostic } from "@codemirror/lint";
-import { StateEffect, StateField, type Extension, type Text } from "@codemirror/state";
+import { Facet, StateEffect, StateField, type Extension, type Text } from "@codemirror/state";
 import { EditorView, hoverTooltip, keymap, showTooltip, type Tooltip } from "@codemirror/view";
 import type {
   LspCompletionItem,
@@ -174,13 +174,43 @@ function applyResolvedEdits(
   });
 }
 
+/**
+ * IntelliSense panel for the highlighted completion: type signature plus
+ * documentation, matching what hover shows. Servers typically omit these
+ * from the initial list and only provide them via `completionItem/resolve`,
+ * so the panel resolves lazily when an option is highlighted.
+ */
+function completionInfoDom(detail: string | undefined, documentation: string | undefined) {
+  if (detail === undefined && documentation === undefined) return null;
+  const dom = document.createElement("div");
+  dom.className = "cm-lsp-hover cm-lsp-completion-info";
+  if (detail !== undefined && detail.length > 0) {
+    const signature = document.createElement("div");
+    signature.className = "cm-lsp-completion-info-detail";
+    appendHighlightedCode(signature, detail, -1, -1);
+    dom.appendChild(signature);
+  }
+  if (documentation !== undefined && documentation.length > 0) {
+    dom.appendChild(renderTooltipMarkdown(documentation));
+  }
+  return dom.childNodes.length > 0 ? dom : null;
+}
+
 function toCompletion(host: LspBridgeHost, doc: Text, item: LspCompletionItem): Completion {
   const insert = item.insertText ?? item.label;
   const type = completionKindToType(item.kind);
   return {
     label: item.label,
     ...(item.detail !== undefined ? { detail: item.detail } : {}),
-    ...(item.documentation !== undefined ? { info: item.documentation } : {}),
+    info: async () => {
+      let { detail, documentation } = item;
+      if ((documentation === undefined || detail === undefined) && item.resolveData !== undefined) {
+        const resolved = await host.resolveCompletion(item.resolveData).catch(() => null);
+        detail = resolved?.detail ?? detail;
+        documentation = resolved?.documentation ?? documentation;
+      }
+      return completionInfoDom(detail, documentation);
+    },
     ...(type !== undefined ? { type } : {}),
     apply: (view, _completion, from, to) => {
       const range = item.range !== undefined ? lspRangeToOffsets(view.state.doc, item.range) : null;
@@ -370,7 +400,96 @@ export function lspHoverExtension(host: LspBridgeHost): Extension {
   });
 }
 
-async function goToDefinition(view: EditorView, host: LspBridgeHost): Promise<boolean> {
+// ── Keyboard-triggered hover at the cursor (vim `gh`) ───────────
+
+const setCursorHoverTooltip = StateEffect.define<Tooltip | null>();
+
+const cursorHoverTooltipField = StateField.define<Tooltip | null>({
+  create: () => null,
+  update(value, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(setCursorHoverTooltip)) return effect.value;
+    }
+    // Any edit or cursor movement dismisses the tooltip.
+    if (value !== null && (tr.docChanged || tr.selection !== undefined)) return null;
+    return value;
+  },
+  provide: (field) => showTooltip.from(field),
+});
+
+const cursorHoverHandler = Facet.define<(view: EditorView) => void>();
+
+/**
+ * Show LSP hover info at the primary cursor. Returns false when the view has
+ * no LSP bridge (non-code documents), so callers can fall through.
+ */
+export function showLspHoverAtCursor(view: EditorView): boolean {
+  const handler = view.state.facet(cursorHoverHandler).at(0);
+  if (handler === undefined) return false;
+  handler(view);
+  return true;
+}
+
+function lspCursorHoverExtension(host: LspBridgeHost, sync: DocSyncController): Extension {
+  const query = async (view: EditorView) => {
+    await sync.flush();
+    const pos = view.state.selection.main.head;
+    const result = await host.hover(offsetToLspPosition(view.state.doc, pos));
+    if (view.state.selection.main.head !== pos) return;
+    const offsets =
+      result?.range !== undefined
+        ? lspRangeToOffsets(view.state.doc, result.range)
+        : { from: pos, to: pos };
+    view.dispatch({
+      effects: setCursorHoverTooltip.of(
+        result === null
+          ? null
+          : {
+              pos: offsets.from,
+              end: offsets.to,
+              above: true,
+              create: () => ({ dom: hoverDom(result.contents) }),
+            },
+      ),
+    });
+  };
+
+  return [
+    cursorHoverTooltipField,
+    cursorHoverHandler.of((view) => void query(view)),
+    keymap.of([
+      {
+        key: "Escape",
+        run: (view) => {
+          if (view.state.field(cursorHoverTooltipField) === null) return false;
+          view.dispatch({ effects: setCursorHoverTooltip.of(null) });
+          return true;
+        },
+      },
+    ]),
+  ];
+}
+
+const definitionHandler = Facet.define<(view: EditorView) => void>();
+
+/**
+ * Jump to the definition of the symbol at the primary cursor. Returns false
+ * when the view has no LSP bridge (non-code documents), so callers can fall
+ * through.
+ */
+export function goToLspDefinitionAtCursor(view: EditorView): boolean {
+  const handler = view.state.facet(definitionHandler).at(0);
+  if (handler === undefined) return false;
+  handler(view);
+  return true;
+}
+
+async function goToDefinition(
+  view: EditorView,
+  host: LspBridgeHost,
+  sync: DocSyncController,
+): Promise<boolean> {
+  await sync.flush();
   const position = offsetToLspPosition(view.state.doc, view.state.selection.main.head);
   const result = await host.definition(position);
   const location = result?.locations[0];
@@ -379,14 +498,16 @@ async function goToDefinition(view: EditorView, host: LspBridgeHost): Promise<bo
   return true;
 }
 
-/** F12 / Cmd+click go-to-definition. */
-export function lspDefinitionExtension(host: LspBridgeHost): Extension {
+/** F12 / Cmd+click / vim `gd` go-to-definition. */
+export function lspDefinitionExtension(host: LspBridgeHost, sync: DocSyncController): Extension {
+  const jump = (view: EditorView) => void goToDefinition(view, host, sync);
   return [
+    definitionHandler.of(jump),
     keymap.of([
       {
         key: "F12",
         run: (view) => {
-          void goToDefinition(view, host);
+          jump(view);
           return true;
         },
       },
@@ -397,7 +518,7 @@ export function lspDefinitionExtension(host: LspBridgeHost): Extension {
         const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
         if (pos === null) return false;
         view.dispatch({ selection: { anchor: pos } });
-        void goToDefinition(view, host);
+        jump(view);
         return true;
       },
     }),
@@ -450,6 +571,7 @@ export function lspExtensions(host: LspBridgeHost): Extension {
     autocompletion({ override: [lspCompletionSource(host, sync)] }),
     lspSignatureHelpExtension(host, sync),
     lspHoverExtension(host),
-    lspDefinitionExtension(host),
+    lspCursorHoverExtension(host, sync),
+    lspDefinitionExtension(host, sync),
   ];
 }

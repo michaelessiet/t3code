@@ -3,13 +3,17 @@ import { useAtomValue } from "@effect/atom-react";
 import { useEffect } from "react";
 
 import { isCommandPaletteOpen } from "../commandPaletteContext";
+import { QuickSearch } from "../components/QuickSearch";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import {
   startNewLocalThreadFromContext,
   startNewThreadFromContext,
 } from "../lib/chatThreadActions";
+import { isEditorFocused } from "../lib/editorFocus";
+import { isFileTreeFocused } from "../lib/fileTreeFocus";
 import { isPreviewFocused } from "../lib/previewFocus";
+import { isRightPanelFocused } from "../lib/rightPanelFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { resolveShortcutCommand } from "../keybindings";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
@@ -47,6 +51,9 @@ function ChatRouteGlobalShortcuts() {
           terminalOpen,
           previewFocus: isPreviewFocused(),
           previewOpen,
+          editorFocus: isEditorFocused(),
+          fileTreeFocus: isFileTreeFocused(),
+          rightPanelFocus: isRightPanelFocused(),
         },
       });
 
@@ -152,6 +159,7 @@ function ChatRouteLayout() {
   return (
     <>
       <ChatRouteGlobalShortcuts />
+      <QuickSearch />
       <Outlet />
     </>
   );

@@ -38,6 +38,7 @@ import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
+import { requestEditorFocus } from "./files/editorFocusRequest";
 import { isStaleRevisionWriteFailure } from "./files/fileBufferConflict";
 import { getProjectFileQueryAtom } from "./files/projectFilesQueryState";
 import {
@@ -145,7 +146,10 @@ function SearchResultGroup(props: {
                 key={`${match.line}:${match.matchStart}`}
                 type="button"
                 className="flex w-full items-center gap-2 rounded-md py-0.5 pl-5 pr-2 text-left hover:bg-accent/60"
-                onClick={() => props.onOpenMatch(group.path, match.line)}
+                onClick={() => {
+                  requestEditorFocus("content-search");
+                  props.onOpenMatch(group.path, match.line);
+                }}
               >
                 <span className="w-8 shrink-0 text-right font-mono text-[10px] leading-4 text-muted-foreground">
                   {match.line}

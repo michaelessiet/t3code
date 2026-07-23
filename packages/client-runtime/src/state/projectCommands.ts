@@ -119,5 +119,41 @@ export function createProjectEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.cwd, input.relativePath]),
       },
     }),
+    // Structural mutations serialize per workspace root: create/rename/delete
+    // reshape the tree, so per-path keys could reorder dependent operations.
+    mutateEntry: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:mutate-entry",
+      tag: WS_METHODS.projectsMutateEntry,
+      scheduler: fileScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.cwd]),
+      },
+    }),
+    // Same-environment copy (source + destination roots reachable on one
+    // connection). Serializes per destination root, which is the tree the copy
+    // reshapes; the source is only read.
+    copyEntry: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:copy-entry",
+      tag: WS_METHODS.projectsCopyEntry,
+      scheduler: fileScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.toCwd]),
+      },
+    }),
+    // Imperative one-shot read used to orchestrate cross-environment copies
+    // (read on the source environment, write on the destination). Distinct from
+    // the cached `readFile` query family so it never populates the file cache.
+    readFileOnce: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:read-file-once",
+      tag: WS_METHODS.projectsReadFile,
+      scheduler: fileScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.cwd, input.relativePath]),
+      },
+    }),
   };
 }

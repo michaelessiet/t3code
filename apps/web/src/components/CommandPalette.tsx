@@ -11,6 +11,7 @@ import {
   type DesktopWslState,
   type EnvironmentId,
   type FilesystemBrowseResult,
+  type KeybindingCommand,
   type ProjectId,
   ProviderInstanceId,
   type SourceControlDiscoveryResult,
@@ -25,12 +26,17 @@ import {
   ArrowLeftIcon,
   ArrowUpIcon,
   CornerLeftUpIcon,
+  FilePlus2Icon,
   FolderIcon,
   FolderPlusIcon,
+  FolderTreeIcon,
   LinkIcon,
   MessageSquareIcon,
+  PanelRightIcon,
+  SearchIcon,
   SettingsIcon,
   SquarePenIcon,
+  SquareTerminalIcon,
 } from "lucide-react";
 import {
   useCallback,
@@ -46,6 +52,7 @@ import {
 } from "react";
 import { useAtomValue } from "@effect/atom-react";
 import { OpenAddProjectCommandPaletteProvider } from "../commandPaletteContext";
+import { dispatchAppCommand } from "./appCommandBus";
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
@@ -1043,6 +1050,81 @@ function OpenCommandPaletteDialog(props: {
         startAddProjectBrowse(wslAddProjectEnvironmentOption.environmentId);
       },
     });
+  }
+
+  if (activeThreadId !== undefined) {
+    // Workspace commands: dispatched over the app-command bus and executed by
+    // the same handlers the keyboard shortcuts use.
+    const workspaceActions: Array<{
+      value: string;
+      command: KeybindingCommand;
+      title: string;
+      searchTerms: string[];
+      icon: ReactNode;
+    }> = [
+      {
+        value: "action:quick-open",
+        command: "quickSearch.open",
+        title: "Quick open chat or file",
+        searchTerms: ["quick open", "go to file", "jump", "find file", "open file", "chat"],
+        icon: <SearchIcon className={ITEM_ICON_CLASS} />,
+      },
+      {
+        value: "action:quick-search-content",
+        command: "quickSearch.content",
+        title: "Search chats and files",
+        searchTerms: ["search", "content", "grep", "find in files", "chats", "messages"],
+        icon: <SearchIcon className={ITEM_ICON_CLASS} />,
+      },
+      {
+        value: "action:toggle-right-panel",
+        command: "rightPanel.toggle",
+        title: "Toggle right panel",
+        searchTerms: ["right panel", "dock", "sidebar", "toggle", "editor panel"],
+        icon: <PanelRightIcon className={ITEM_ICON_CLASS} />,
+      },
+      {
+        value: "action:toggle-terminal",
+        command: "terminal.toggle",
+        title: "Toggle terminal",
+        searchTerms: ["terminal", "shell", "console", "toggle", "drawer"],
+        icon: <SquareTerminalIcon className={ITEM_ICON_CLASS} />,
+      },
+      {
+        value: "action:focus-file-tree",
+        command: "fileTree.toggleFocus",
+        title: "Focus file tree",
+        searchTerms: ["file tree", "explorer", "files", "focus", "project panel"],
+        icon: <FolderTreeIcon className={ITEM_ICON_CLASS} />,
+      },
+      {
+        value: "action:new-file",
+        command: "fileTree.newFile",
+        title: "New file",
+        searchTerms: ["new file", "create file", "file tree", "explorer"],
+        icon: <FilePlus2Icon className={ITEM_ICON_CLASS} />,
+      },
+      {
+        value: "action:new-folder",
+        command: "fileTree.newDirectory",
+        title: "New folder",
+        searchTerms: ["new folder", "new directory", "create folder", "file tree", "explorer"],
+        icon: <FolderPlusIcon className={ITEM_ICON_CLASS} />,
+      },
+    ];
+    for (const action of workspaceActions) {
+      actionItems.push({
+        kind: "action",
+        value: action.value,
+        searchTerms: action.searchTerms,
+        title: action.title,
+        icon: action.icon,
+        shortcutCommand: action.command,
+        run: async () => {
+          dispatchAppCommand(action.command);
+        },
+      });
+    }
   }
 
   actionItems.push({

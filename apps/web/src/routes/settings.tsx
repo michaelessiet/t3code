@@ -10,6 +10,7 @@ import {
 import { useCallback, useEffect, useState } from "react";
 
 import { useSettingsRestore } from "../components/settings/SettingsPanels";
+import { SettingsSearch } from "../components/settings/SettingsSearch";
 import { Button } from "../components/ui/button";
 import { SidebarInset } from "../components/ui/sidebar";
 import { isElectron } from "../env";
@@ -74,11 +75,10 @@ function SettingsContentLayout() {
           >
             <div className="flex min-h-7 items-center gap-2 sm:min-h-6">
               <span className="text-sm font-medium text-foreground">Settings</span>
-              {showRestoreDefaults ? (
-                <div className="ms-auto flex items-center gap-2">
-                  <RestoreDefaultsButton onRestored={handleRestored} />
-                </div>
-              ) : null}
+              <div className="ms-auto flex items-center gap-2">
+                <SettingsSearch />
+                {showRestoreDefaults ? <RestoreDefaultsButton onRestored={handleRestored} /> : null}
+              </div>
             </div>
           </header>
         )}
@@ -93,11 +93,10 @@ function SettingsContentLayout() {
             <span className="text-xs font-medium tracking-wide text-muted-foreground/70">
               Settings
             </span>
-            {showRestoreDefaults ? (
-              <div className="ms-auto flex items-center gap-2">
-                <RestoreDefaultsButton onRestored={handleRestored} />
-              </div>
-            ) : null}
+            <div className="ms-auto flex items-center gap-2">
+              <SettingsSearch />
+              {showRestoreDefaults ? <RestoreDefaultsButton onRestored={handleRestored} /> : null}
+            </div>
           </div>
         )}
 

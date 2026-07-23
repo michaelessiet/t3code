@@ -16,6 +16,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { lspEnvironment } from "~/state/lsp";
 import { useAtomCommand } from "~/state/use-atom-command";
 
+import { requestEditorFocus } from "../editorFocusRequest";
 import { applyLspDiagnostics, lspExtensions, type LspBridgeHost } from "./lspBridge";
 import { lspPositionToOffset } from "./lspPositions";
 
@@ -145,6 +146,10 @@ export function useLspBridge({
           currentView.focus();
           return;
         }
+        // Cross-file jump: this editor unmounts holding focus, so hand focus
+        // to the target file's editor once it mounts — otherwise keystrokes
+        // fall through to the chat composer.
+        requestEditorFocus("editor-navigation");
         onOpenFileAtLineRef.current(location.relativePath, location.range.start.line + 1);
       },
     };

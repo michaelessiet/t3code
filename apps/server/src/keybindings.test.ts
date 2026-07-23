@@ -193,13 +193,30 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
         Keybindings.DEFAULT_KEYBINDINGS.map((binding) => [binding.command, binding.key] as const),
       );
 
-      assert.equal(defaultsByCommand.get("thread.previous"), "mod+shift+[");
-      assert.equal(defaultsByCommand.get("thread.next"), "mod+shift+]");
+      // Ctrl+tab cycles chat threads outside the right panel; mod+shift+[ / ]
+      // and ctrl+tab cycle right-panel tabs while it is focused.
+      assert.equal(defaultsByCommand.get("thread.previous"), "ctrl+shift+tab");
+      assert.equal(defaultsByCommand.get("thread.next"), "ctrl+tab");
+      assert.equal(defaultsByCommand.get("rightPanel.previousSurface"), "ctrl+shift+tab");
+      assert.equal(defaultsByCommand.get("rightPanel.nextSurface"), "ctrl+tab");
       assert.equal(defaultsByCommand.get("thread.jump.1"), "mod+1");
       assert.equal(defaultsByCommand.get("thread.jump.9"), "mod+9");
       assert.equal(defaultsByCommand.get("modelPicker.toggle"), "mod+shift+m");
       assert.equal(defaultsByCommand.get("sidebar.toggle"), "mod+b");
-      assert.equal(defaultsByCommand.get("rightPanel.toggle"), "mod+alt+b");
+      // Later bindings win in this map: mod+j and mod+r are the primary
+      // rightPanel.toggle / terminal.toggle bindings (Zed-style docks).
+      assert.equal(defaultsByCommand.get("rightPanel.toggle"), "mod+j");
+      assert.equal(defaultsByCommand.get("terminal.toggle"), "mod+r");
+      assert.equal(defaultsByCommand.get("editor.showCompletions"), "mod+i");
+      assert.equal(defaultsByCommand.get("fileTree.toggleFocus"), "mod+shift+e");
+      assert.equal(defaultsByCommand.get("fileTree.newFile"), "mod+n");
+      assert.equal(defaultsByCommand.get("fileTree.newDirectory"), "mod+shift+n");
+      assert.equal(defaultsByCommand.get("fileTree.rename"), "f2");
+      assert.equal(defaultsByCommand.get("quickSearch.open"), "mod+p");
+      assert.equal(defaultsByCommand.get("quickSearch.content"), "mod+shift+f");
+      assert.equal(defaultsByCommand.get("commandPalette.toggle"), "mod+shift+p");
+      assert.equal(defaultsByCommand.get("rightPanel.closeSurface"), "mod+w");
+      assert.equal(defaultsByCommand.get("terminal.new"), "mod+t");
       assert.equal(defaultsByCommand.get("terminal.splitVertical"), "mod+shift+d");
       assert.equal(defaultsByCommand.get("modelPicker.jump.1"), "mod+1");
       assert.equal(defaultsByCommand.get("modelPicker.jump.9"), "mod+9");
@@ -319,8 +336,19 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
       });
 
       const persisted = yield* readKeybindingsConfig(keybindingsConfigPath);
-      assert.isFalse(persisted.some((entry) => entry.command === "terminal.toggle"));
+      // The default rightPanel.toggle mod+j rule conflicts with the user's
+      // binding and is skipped; the command still syncs via its other key.
+      assert.isFalse(
+        persisted.some(
+          (entry) => entry.key === "mod+j" && entry.command !== "script.custom-action.run",
+        ),
+      );
       assert.isTrue(persisted.some((entry) => entry.command === "script.custom-action.run"));
+      assert.isTrue(
+        persisted.some(
+          (entry) => entry.command === "rightPanel.toggle" && entry.key === "mod+alt+b",
+        ),
+      );
 
       assert.isTrue(
         messages.some((message) =>

@@ -204,6 +204,22 @@ const editorChrome = EditorView.theme({
   ".cm-lsp-signature": {
     maxHeight: "12rem",
   },
+  // The completion docs panel reuses hover styling; clear CM's own padding
+  // so the shared class controls spacing.
+  ".cm-tooltip.cm-completionInfo": {
+    padding: "0",
+  },
+  ".cm-lsp-completion-info": {
+    maxWidth: "min(32rem, 60vw)",
+    maxHeight: "16rem",
+  },
+  ".cm-lsp-completion-info-detail": {
+    fontFamily: "var(--font-mono)",
+    fontSize: "12px",
+    whiteSpace: "pre-wrap",
+    overflowWrap: "anywhere",
+    marginBottom: "4px",
+  },
   ".cm-lsp-markdown .cm-lsp-md-paragraph": {
     margin: "4px 0",
     overflowWrap: "anywhere",

@@ -41,7 +41,9 @@ import {
   type ProjectEntriesFailure,
   type ProjectFileFailure,
   type ProjectFileOperation,
+  ProjectCopyEntryError,
   ProjectListEntriesError,
+  ProjectMutateEntryError,
   ProjectReadFileError,
   ProjectSearchContentError,
   type ProjectSearchContentFailure,
@@ -51,6 +53,7 @@ import {
   RelayClientInstallFailedError,
   type RelayClientInstallProgressEvent,
   OrchestrationReplayEventsError,
+  OrchestrationSearchMessagesError,
   type FilesystemBrowseFailure,
   FilesystemBrowseError,
   AssetWorkspaceContextNotFoundError,
@@ -274,6 +277,10 @@ function projectFileFailureContext(
         expectedRevision: error.expectedRevision,
         ...(error.actualRevision !== undefined ? { actualRevision: error.actualRevision } : {}),
       };
+    case "WorkspaceEntryExistsError":
+      return { failure: "path_exists", resolvedPath: error.resolvedPath };
+    case "WorkspaceEntryNotFoundError":
+      return { failure: "path_not_found", resolvedPath: error.resolvedPath };
     default:
       return unexpectedCompatibilityError(error);
   }
@@ -321,6 +328,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [ORCHESTRATION_WS_METHODS.getTurnDiff, AuthOrchestrationReadScope],
   [ORCHESTRATION_WS_METHODS.getFullThreadDiff, AuthOrchestrationReadScope],
   [ORCHESTRATION_WS_METHODS.replayEvents, AuthOrchestrationReadScope],
+  [ORCHESTRATION_WS_METHODS.searchMessages, AuthOrchestrationReadScope],
   [ORCHESTRATION_WS_METHODS.subscribeShell, AuthOrchestrationReadScope],
   [ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot, AuthOrchestrationReadScope],
   [ORCHESTRATION_WS_METHODS.subscribeThread, AuthOrchestrationReadScope],
@@ -345,6 +353,8 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.projectsReadFile, AuthOrchestrationReadScope],
   [WS_METHODS.projectsSearchEntries, AuthOrchestrationReadScope],
   [WS_METHODS.projectsWriteFile, AuthOrchestrationOperateScope],
+  [WS_METHODS.projectsMutateEntry, AuthOrchestrationOperateScope],
+  [WS_METHODS.projectsCopyEntry, AuthOrchestrationOperateScope],
   [WS_METHODS.projectsSearchContent, AuthOrchestrationReadScope],
   [WS_METHODS.subscribeWorkspaceChanges, AuthOrchestrationReadScope],
   [WS_METHODS.lspDidOpen, AuthOrchestrationReadScope],
@@ -1191,6 +1201,20 @@ const makeWsRpcLayer = (
             }),
             { "rpc.aggregate": "orchestration" },
           ),
+        [ORCHESTRATION_WS_METHODS.searchMessages]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.searchMessages,
+            projectionSnapshotQuery.searchThreadMessages(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationSearchMessagesError({
+                    message: "Failed to search thread messages",
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "orchestration" },
+          ),
         [ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot]: (_input) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot,
@@ -1533,6 +1557,42 @@ const makeWsRpcLayer = (
                   new ProjectWriteFileError({
                     cwd: input.cwd,
                     relativePath: input.relativePath,
+                    ...projectFileFailureContext(cause),
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsMutateEntry]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsMutateEntry,
+            workspaceFileSystem.mutateEntry(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectMutateEntryError({
+                    cwd: input.cwd,
+                    relativePath:
+                      input._tag === "rename" ? input.fromRelativePath : input.relativePath,
+                    ...(input._tag === "rename" ? { toRelativePath: input.toRelativePath } : {}),
+                    ...projectFileFailureContext(cause),
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsCopyEntry]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsCopyEntry,
+            workspaceFileSystem.copyEntry(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectCopyEntryError({
+                    fromCwd: input.fromCwd,
+                    fromRelativePath: input.fromRelativePath,
+                    toCwd: input.toCwd,
+                    toRelativePath: input.toRelativePath,
                     ...projectFileFailureContext(cause),
                     cause,
                   }),
