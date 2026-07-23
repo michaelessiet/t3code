@@ -52,6 +52,12 @@ export class ElectronMenu extends Context.Service<
     readonly setApplicationMenu: (
       template: readonly Electron.MenuItemConstructorOptions[],
     ) => Effect.Effect<void>;
+    /**
+     * Toggles the enabled state of an application-menu item by id. A disabled
+     * item does not fire its accelerator, letting the keystroke fall through to
+     * the focused web contents. No-op when the item is not present.
+     */
+    readonly setMenuItemEnabled: (id: string, enabled: boolean) => Effect.Effect<void>;
     readonly showContextMenu: (
       input: ElectronMenuContextInput,
     ) => Effect.Effect<Option.Option<string>>;
@@ -164,6 +170,13 @@ export const make = Effect.gen(function* () {
   };
 
   return ElectronMenu.of({
+    setMenuItemEnabled: (id, enabled) =>
+      Effect.sync(() => {
+        const item = Electron.Menu.getApplicationMenu()?.getMenuItemById(id);
+        if (item) {
+          item.enabled = enabled;
+        }
+      }),
     setApplicationMenu: (template) =>
       Effect.try({
         try: () => {

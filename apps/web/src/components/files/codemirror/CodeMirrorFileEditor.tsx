@@ -18,7 +18,10 @@ import {
 import { vim } from "@replit/codemirror-vim";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
+import { syncCodeEditorFocusToDesktop } from "../../../lib/desktopEditorZoom";
+
 import { computeDocReplacement } from "./docReplacement";
+import { editorFontSize } from "./fontSize";
 import { languageExtensionForPath } from "./languages";
 import { revealEditorLine, revealLineExtension } from "./revealLine";
 import { editorTheme } from "./theme";
@@ -67,6 +70,8 @@ const baseExtensions: Extension = [
   highlightActiveLine(),
   highlightSelectionMatches(),
   search({ top: true }),
+  // Precedes the default keymap so Cmd/Ctrl +/- adjust font size while focused.
+  editorFontSize,
   keymap.of([
     ...closeBracketsKeymap,
     ...defaultKeymap,
@@ -76,6 +81,18 @@ const baseExtensions: Extension = [
   ]),
   editorTheme,
   revealLineExtension,
+  // Report focus to the desktop shell so it yields Cmd/Ctrl +/-/0 to the
+  // editor's font-size shortcuts while focused (see desktopEditorZoom.ts).
+  EditorView.domEventHandlers({
+    focus: () => {
+      syncCodeEditorFocusToDesktop();
+      return false;
+    },
+    blur: () => {
+      syncCodeEditorFocusToDesktop();
+      return false;
+    },
+  }),
 ];
 
 function readOnlyExtension(readOnly: boolean): Extension {
@@ -171,6 +188,9 @@ export function CodeMirrorFileEditor({
       onViewReadyRef.current?.(null);
       setEditor(null);
       editorView.destroy();
+      // Destroying a focused editor won't emit a blur; re-sync so the desktop
+      // shell restores window zoom.
+      syncCodeEditorFocusToDesktop();
     };
   }, [relativePath]);
 

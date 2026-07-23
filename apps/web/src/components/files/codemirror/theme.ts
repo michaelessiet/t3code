@@ -38,7 +38,8 @@ const editorChrome = EditorView.theme({
     height: "100%",
     backgroundColor: "var(--background)",
     color: "var(--foreground)",
-    fontSize: "12px",
+    // Driven by the fontSize extension (Cmd/Ctrl +/-); see fontSize.ts.
+    fontSize: "var(--cm-font-size, 12px)",
   },
   "&.cm-focused": {
     outline: "none",
