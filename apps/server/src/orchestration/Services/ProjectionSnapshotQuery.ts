@@ -12,6 +12,8 @@ import type {
   OrchestrationProject,
   OrchestrationProjectShell,
   OrchestrationReadModel,
+  OrchestrationSearchMessagesInput,
+  OrchestrationSearchMessagesResult,
   OrchestrationShellSnapshot,
   OrchestrationThread,
   OrchestrationThreadDetailSnapshot,
@@ -107,6 +109,16 @@ export interface ProjectionSnapshotQueryShape {
    * Read aggregate projection counts without hydrating the full read model.
    */
   readonly getCounts: () => Effect.Effect<ProjectionSnapshotCounts, ProjectionRepositoryError>;
+
+  /**
+   * Search projected message text across active (non-archived) threads.
+   *
+   * Case-insensitive substring match, newest first; each match carries a
+   * snippet centered on the first occurrence.
+   */
+  readonly searchThreadMessages: (
+    input: OrchestrationSearchMessagesInput,
+  ) => Effect.Effect<OrchestrationSearchMessagesResult, ProjectionRepositoryError>;
 
   /**
    * Read the active project for an exact workspace root match.

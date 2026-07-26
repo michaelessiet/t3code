@@ -31,8 +31,12 @@ function clampLineNumber(view: EditorView, line: number): number {
 }
 
 /**
- * Scroll `line` into the vertical center of the viewport and highlight it,
- * replacing any previous reveal highlight. `null` clears the highlight.
+ * Scroll `line` into the vertical center of the viewport, highlight it, and
+ * place the cursor on it, replacing any previous reveal highlight. `null`
+ * clears the highlight. Moving the selection keeps keyboard navigation
+ * anchored to the revealed line — a reveal always comes from an explicit
+ * jump (search match, go-to-definition, file link), where typing or vim
+ * motions should continue from the target, not from line 1.
  */
 export function revealEditorLine(view: EditorView, line: number | null): void {
   if (line === null) {
@@ -40,10 +44,12 @@ export function revealEditorLine(view: EditorView, line: number | null): void {
     return;
   }
   const clampedLine = clampLineNumber(view, line);
+  const lineStart = view.state.doc.line(clampedLine).from;
   view.dispatch({
+    selection: { anchor: lineStart },
     effects: [
       setRevealedLineEffect.of(clampedLine),
-      EditorView.scrollIntoView(view.state.doc.line(clampedLine).from, { y: "center" }),
+      EditorView.scrollIntoView(lineStart, { y: "center" }),
     ],
   });
 }

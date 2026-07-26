@@ -195,6 +195,46 @@ it.effect("clones a looked-up repository into the requested destination", () =>
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect("nests the clone in a repo-named subdirectory when the destination is not empty", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const destinationPath = yield* fs.makeTempDirectoryScoped({
+      prefix: "t3-source-control-clone-nonempty-",
+    });
+    // Make the chosen destination non-empty so the CLI-style nesting kicks in.
+    yield* fs.writeFileString(`${destinationPath}/existing.txt`, "keep me");
+    const cloneCalls: Array<{ cwd: string; args: ReadonlyArray<string> }> = [];
+
+    yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      const result = yield* service.cloneRepository({
+        remoteUrl: "https://github.com/octocat/t3code.git",
+        destinationPath,
+      });
+
+      assert.strictEqual(result.cwd, `${destinationPath}/t3code`);
+      assert.deepStrictEqual(cloneCalls, [
+        {
+          cwd: destinationPath,
+          args: ["clone", "https://github.com/octocat/t3code.git", "t3code"],
+        },
+      ]);
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          git: {
+            execute: (input) =>
+              Effect.sync(() => {
+                cloneCalls.push({ cwd: input.cwd, args: input.args });
+                return processOutput();
+              }),
+          },
+        }),
+      ),
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.effect("preserves destination probe failures instead of treating them as missing paths", () => {
   const fileSystemCause = PlatformError.systemError({
     _tag: "PermissionDenied",

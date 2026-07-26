@@ -50,6 +50,11 @@ import {
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
+import {
+  decodeAttachmentText,
+  formatInlineAttachmentText,
+  formatUnreadableAttachmentNote,
+} from "../../attachmentContent.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import {
@@ -1513,18 +1518,49 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           }),
       ),
     );
+    if (attachment.type !== "image") {
+      // Codex turns only accept image attachments; forward other files by
+      // inlining readable text into the turn input.
+      const text = decodeAttachmentText(bytes);
+      return {
+        kind: "text" as const,
+        text:
+          text !== null
+            ? formatInlineAttachmentText({
+                name: attachment.name,
+                mimeType: attachment.mimeType,
+                text,
+              })
+            : formatUnreadableAttachmentNote(attachment),
+      };
+    }
     return {
-      type: "image" as const,
-      url: `data:${attachment.mimeType};base64,${Buffer.from(bytes).toString("base64")}`,
+      kind: "image" as const,
+      item: {
+        type: "image" as const,
+        url: `data:${attachment.mimeType};base64,${Buffer.from(bytes).toString("base64")}`,
+      },
     };
   });
 
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
-    const codexAttachments = yield* Effect.forEach(
+    const resolvedAttachments = yield* Effect.forEach(
       input.attachments ?? [],
       (attachment) => resolveAttachment(input, attachment),
       { concurrency: 1 },
     );
+    const codexAttachments = resolvedAttachments.flatMap((resolved) =>
+      resolved.kind === "image" ? [resolved.item] : [],
+    );
+    const inlineAttachmentTexts = resolvedAttachments.flatMap((resolved) =>
+      resolved.kind === "text" ? [resolved.text] : [],
+    );
+    const turnInput =
+      inlineAttachmentTexts.length > 0
+        ? [...(input.input !== undefined ? [input.input] : []), ...inlineAttachmentTexts].join(
+            "\n\n",
+          )
+        : input.input;
 
     const session = yield* requireSession(input.threadId);
     const reasoningEffort =
@@ -1537,7 +1573,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         : undefined;
     return yield* session.runtime
       .sendTurn({
-        ...(input.input !== undefined ? { input: input.input } : {}),
+        ...(turnInput !== undefined ? { input: turnInput } : {}),
         ...(input.modelSelection?.instanceId === boundInstanceId
           ? { model: input.modelSelection.model }
           : {}),

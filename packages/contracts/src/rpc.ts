@@ -55,6 +55,7 @@ import {
   OrchestrationGetTurnDiffError,
   OrchestrationGetTurnDiffInput,
   OrchestrationReplayEventsError,
+  OrchestrationSearchMessagesError,
   OrchestrationReplayEventsInput,
   OrchestrationRpcSchemas,
 } from "./orchestration.ts";
@@ -77,6 +78,12 @@ import {
   ProjectWatchError,
   ProjectWatchInput,
   ProjectWatchStreamEvent,
+  ProjectMutateEntryError,
+  ProjectMutateEntryInput,
+  ProjectMutateEntryResult,
+  ProjectCopyEntryError,
+  ProjectCopyEntryInput,
+  ProjectCopyEntryResult,
   ProjectWriteFileError,
   ProjectWriteFileInput,
   ProjectWriteFileResult,
@@ -181,6 +188,8 @@ export const WS_METHODS = {
   projectsReadFile: "projects.readFile",
   projectsSearchEntries: "projects.searchEntries",
   projectsWriteFile: "projects.writeFile",
+  projectsMutateEntry: "projects.mutateEntry",
+  projectsCopyEntry: "projects.copyEntry",
   projectsSearchContent: "projects.searchContent",
 
   // Language-intelligence methods
@@ -421,6 +430,18 @@ export const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
   payload: ProjectWriteFileInput,
   success: ProjectWriteFileResult,
   error: Schema.Union([ProjectWriteFileError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectsMutateEntryRpc = Rpc.make(WS_METHODS.projectsMutateEntry, {
+  payload: ProjectMutateEntryInput,
+  success: ProjectMutateEntryResult,
+  error: Schema.Union([ProjectMutateEntryError, EnvironmentAuthorizationError]),
+});
+
+export const WsProjectsCopyEntryRpc = Rpc.make(WS_METHODS.projectsCopyEntry, {
+  payload: ProjectCopyEntryInput,
+  success: ProjectCopyEntryResult,
+  error: Schema.Union([ProjectCopyEntryError, EnvironmentAuthorizationError]),
 });
 
 export const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
@@ -754,6 +775,12 @@ export const WsOrchestrationReplayEventsRpc = Rpc.make(ORCHESTRATION_WS_METHODS.
   error: Schema.Union([OrchestrationReplayEventsError, EnvironmentAuthorizationError]),
 });
 
+export const WsOrchestrationSearchMessagesRpc = Rpc.make(ORCHESTRATION_WS_METHODS.searchMessages, {
+  payload: OrchestrationRpcSchemas.searchMessages.input,
+  success: OrchestrationRpcSchemas.searchMessages.output,
+  error: Schema.Union([OrchestrationSearchMessagesError, EnvironmentAuthorizationError]),
+});
+
 export const WsOrchestrationGetArchivedShellSnapshotRpc = Rpc.make(
   ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot,
   {
@@ -837,6 +864,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsReadFileRpc,
   WsProjectsSearchEntriesRpc,
   WsProjectsWriteFileRpc,
+  WsProjectsMutateEntryRpc,
+  WsProjectsCopyEntryRpc,
   WsProjectsSearchContentRpc,
   WsSubscribeWorkspaceChangesRpc,
   WsLspDidOpenRpc,
@@ -896,6 +925,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationGetTurnDiffRpc,
   WsOrchestrationGetFullThreadDiffRpc,
   WsOrchestrationReplayEventsRpc,
+  WsOrchestrationSearchMessagesRpc,
   WsOrchestrationGetArchivedShellSnapshotRpc,
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,

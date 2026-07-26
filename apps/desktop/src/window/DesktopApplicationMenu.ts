@@ -14,6 +14,21 @@ import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
 
+// Ids for the View-menu window-zoom items. The renderer disables these while
+// the code editor is focused so their Cmd/Ctrl +/-/0 accelerators fall through
+// to the editor's font-size shortcuts (see apps/web `desktopEditorZoom.ts`).
+export const WINDOW_ZOOM_RESET_MENU_ITEM_ID = "window-zoom-reset";
+export const WINDOW_ZOOM_IN_MENU_ITEM_ID = "window-zoom-in";
+export const WINDOW_ZOOM_IN_PLUS_MENU_ITEM_ID = "window-zoom-in-plus";
+export const WINDOW_ZOOM_OUT_MENU_ITEM_ID = "window-zoom-out";
+
+export const WINDOW_ZOOM_MENU_ITEM_IDS = [
+  WINDOW_ZOOM_RESET_MENU_ITEM_ID,
+  WINDOW_ZOOM_IN_MENU_ITEM_ID,
+  WINDOW_ZOOM_IN_PLUS_MENU_ITEM_ID,
+  WINDOW_ZOOM_OUT_MENU_ITEM_ID,
+] as const;
+
 export class DesktopApplicationMenuActionError extends Schema.TaggedErrorClass<DesktopApplicationMenuActionError>()(
   "DesktopApplicationMenuActionError",
   {
@@ -181,10 +196,15 @@ export const make = Effect.gen(function* () {
           { role: "forceReload" },
           { role: "toggleDevTools" },
           { type: "separator" },
-          { role: "resetZoom" },
-          { role: "zoomIn", accelerator: "CmdOrCtrl+=" },
-          { role: "zoomIn", accelerator: "CmdOrCtrl+Plus", visible: false },
-          { role: "zoomOut" },
+          { id: WINDOW_ZOOM_RESET_MENU_ITEM_ID, role: "resetZoom" },
+          { id: WINDOW_ZOOM_IN_MENU_ITEM_ID, role: "zoomIn", accelerator: "CmdOrCtrl+=" },
+          {
+            id: WINDOW_ZOOM_IN_PLUS_MENU_ITEM_ID,
+            role: "zoomIn",
+            accelerator: "CmdOrCtrl+Plus",
+            visible: false,
+          },
+          { id: WINDOW_ZOOM_OUT_MENU_ITEM_ID, role: "zoomOut" },
           { type: "separator" },
           { role: "togglefullscreen" },
         ],

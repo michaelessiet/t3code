@@ -6,6 +6,7 @@ import {
   type KeybindingWhenNode,
   type ResolvedKeybindingsConfig,
 } from "@t3tools/contracts";
+import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import {
   formatShortcutLabel,
   isChatNewShortcut,
@@ -773,6 +774,245 @@ describe("plus key parsing", () => {
     assert.isTrue(
       isTerminalToggleShortcut(event({ key: "+", ctrlKey: true }), plusBindings, {
         platform: "Linux",
+      }),
+    );
+  });
+});
+
+describe("IDE default keybindings (Zed-style docks)", () => {
+  it("resolves mod+j to rightPanel.toggle and keeps mod+alt+b working", () => {
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "j", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+      }),
+      "rightPanel.toggle",
+    );
+    assert.strictEqual(
+      resolveShortcutCommand(
+        event({ key: "b", metaKey: true, altKey: true }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "MacIntel" },
+      ),
+      "rightPanel.toggle",
+    );
+  });
+
+  it("resolves mod+r to terminal.toggle except while the preview is focused", () => {
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "r", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+      }),
+      "terminal.toggle",
+    );
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "r", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+        context: { previewFocus: true },
+      }),
+      "preview.refresh",
+    );
+  });
+
+  it("resolves ctrl+` to terminal.toggle", () => {
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "`", ctrlKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+      }),
+      "terminal.toggle",
+    );
+  });
+
+  it("resolves mod+i to editor.showCompletions only while the editor is focused", () => {
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "i", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+        context: { editorFocus: true },
+      }),
+      "editor.showCompletions",
+    );
+    assert.isNull(
+      resolveShortcutCommand(event({ key: "i", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+      }),
+    );
+  });
+
+  it("resolves mod+shift+e to fileTree.toggleFocus", () => {
+    assert.strictEqual(
+      resolveShortcutCommand(
+        event({ key: "e", metaKey: true, shiftKey: true }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "MacIntel" },
+      ),
+      "fileTree.toggleFocus",
+    );
+  });
+
+  it("routes mod+shift+n to the file tree or a new chat by focus", () => {
+    assert.strictEqual(
+      resolveShortcutCommand(
+        event({ key: "n", metaKey: true, shiftKey: true }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "MacIntel", context: { fileTreeFocus: true } },
+      ),
+      "fileTree.newDirectory",
+    );
+    assert.strictEqual(
+      resolveShortcutCommand(
+        event({ key: "n", metaKey: true, shiftKey: true }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "MacIntel" },
+      ),
+      "chat.newLocal",
+    );
+  });
+
+  it("resolves f2 to fileTree.rename only while the tree is focused", () => {
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "F2" }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+        context: { fileTreeFocus: true },
+      }),
+      "fileTree.rename",
+    );
+    assert.isNull(
+      resolveShortcutCommand(event({ key: "F2" }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+      }),
+    );
+  });
+
+  it("resolves mod+w to close terminal or right-panel surface by focus", () => {
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "w", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+        context: { terminalFocus: true },
+      }),
+      "terminal.close",
+    );
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "w", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+      }),
+      "rightPanel.closeSurface",
+    );
+  });
+
+  it("resolves mod+p and mod+shift+f to quick search outside the terminal", () => {
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "p", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+      }),
+      "quickSearch.open",
+    );
+    assert.strictEqual(
+      resolveShortcutCommand(
+        event({ key: "f", metaKey: true, shiftKey: true }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "MacIntel" },
+      ),
+      "quickSearch.content",
+    );
+    assert.isNull(
+      resolveShortcutCommand(event({ key: "p", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+        context: { terminalFocus: true },
+      }),
+    );
+  });
+
+  it("routes mod+n to new tree file, new chat, or new terminal by focus", () => {
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "n", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+        context: { fileTreeFocus: true },
+      }),
+      "fileTree.newFile",
+    );
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "n", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+      }),
+      "chat.new",
+    );
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "n", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+        context: { terminalFocus: true },
+      }),
+      "terminal.new",
+    );
+  });
+
+  it("routes tab traversal between right-panel surfaces and chat threads by focus", () => {
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "Tab", ctrlKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+        context: { rightPanelFocus: true },
+      }),
+      "rightPanel.nextSurface",
+    );
+    assert.strictEqual(
+      resolveShortcutCommand(
+        event({ key: "Tab", ctrlKey: true, shiftKey: true }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "MacIntel", context: { rightPanelFocus: true } },
+      ),
+      "rightPanel.previousSurface",
+    );
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "Tab", ctrlKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+      }),
+      "thread.next",
+    );
+    assert.strictEqual(
+      resolveShortcutCommand(
+        event({ key: "Tab", ctrlKey: true, shiftKey: true }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "MacIntel" },
+      ),
+      "thread.previous",
+    );
+  });
+
+  it("scopes mod+shift+bracket traversal to the right panel only", () => {
+    assert.strictEqual(
+      resolveShortcutCommand(
+        event({ key: "[", metaKey: true, shiftKey: true, code: "BracketLeft" }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "MacIntel", context: { rightPanelFocus: true } },
+      ),
+      "rightPanel.previousSurface",
+    );
+    assert.strictEqual(
+      resolveShortcutCommand(
+        event({ key: "]", metaKey: true, shiftKey: true, code: "BracketRight" }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "MacIntel", context: { rightPanelFocus: true } },
+      ),
+      "rightPanel.nextSurface",
+    );
+    assert.isNull(
+      resolveShortcutCommand(
+        event({ key: "[", metaKey: true, shiftKey: true, code: "BracketLeft" }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "MacIntel" },
+      ),
+    );
+  });
+
+  it("resolves mod+t to terminal.new while the terminal is focused", () => {
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "t", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+        context: { terminalFocus: true },
+      }),
+      "terminal.new",
+    );
+    assert.isNull(
+      resolveShortcutCommand(event({ key: "t", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
       }),
     );
   });

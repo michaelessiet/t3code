@@ -93,6 +93,8 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   vimMode: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   wordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /** Show the editor banner when the open file changed on disk under edits. */
+  showFileConflictWarning: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
 });
 export type ClientSettings = typeof ClientSettingsSchema.Type;
 
@@ -495,9 +497,27 @@ export type ObservabilitySettings = typeof ObservabilitySettings.Type;
 
 export const DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL = Duration.seconds(30);
 
+// The Claude Agent SDK validates `autoCompactWindow` with
+// `.int().min(1e5).max(1e6).catch(undefined)` — out-of-range values are
+// silently dropped, so the contract must enforce the same bounds.
+export const MIN_AUTO_COMPACT_THRESHOLD_TOKENS = 100_000;
+export const MAX_AUTO_COMPACT_THRESHOLD_TOKENS = 1_000_000;
+export const AutoCompactThresholdTokens = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_AUTO_COMPACT_THRESHOLD_TOKENS,
+    maximum: MAX_AUTO_COMPACT_THRESHOLD_TOKENS,
+  }),
+);
+export type AutoCompactThresholdTokens = typeof AutoCompactThresholdTokens.Type;
+export const DEFAULT_AUTO_COMPACT_THRESHOLD_TOKENS: AutoCompactThresholdTokens = 200_000;
+
 export const ServerSettings = Schema.Struct({
   enableAssistantStreaming: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  autoCompactEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  autoCompactThresholdTokens: AutoCompactThresholdTokens.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AUTO_COMPACT_THRESHOLD_TOKENS)),
+  ),
   automaticGitFetchInterval: Schema.DurationFromMillis.pipe(
     Schema.withDecodingDefault(
       Effect.succeed(Duration.toMillis(DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL)),
@@ -643,6 +663,8 @@ export const ServerSettingsPatch = Schema.Struct({
   // Server settings
   enableAssistantStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
+  autoCompactEnabled: Schema.optionalKey(Schema.Boolean),
+  autoCompactThresholdTokens: Schema.optionalKey(AutoCompactThresholdTokens),
   automaticGitFetchInterval: Schema.optionalKey(Schema.DurationFromMillis),
   defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
   newWorktreesStartFromOrigin: Schema.optionalKey(Schema.Boolean),
@@ -710,5 +732,6 @@ export const ClientSettingsPatch = Schema.Struct({
   timestampFormat: Schema.optionalKey(TimestampFormat),
   vimMode: Schema.optionalKey(Schema.Boolean),
   wordWrap: Schema.optionalKey(Schema.Boolean),
+  showFileConflictWarning: Schema.optionalKey(Schema.Boolean),
 });
 export type ClientSettingsPatch = typeof ClientSettingsPatch.Type;

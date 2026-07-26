@@ -18,7 +18,11 @@ import {
   settlePromise,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
+import {
+  DEFAULT_UNIFIED_SETTINGS,
+  MAX_AUTO_COMPACT_THRESHOLD_TOKENS,
+  MIN_AUTO_COMPACT_THRESHOLD_TOKENS,
+} from "@t3tools/contracts/settings";
 import { createModelSelection } from "@t3tools/shared/model";
 import * as Arr from "effect/Array";
 import * as Duration from "effect/Duration";
@@ -61,6 +65,13 @@ import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
 import { formatRelativeTime, formatRelativeTimeLabel } from "../../timestampFormat";
 import { Button } from "../ui/button";
 import { DraftInput } from "../ui/draft-input";
+import {
+  NumberField,
+  NumberFieldDecrement,
+  NumberFieldGroup,
+  NumberFieldIncrement,
+  NumberFieldInput,
+} from "../ui/number-field";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -111,6 +122,18 @@ const TIMESTAMP_FORMAT_LABELS = {
 } as const;
 
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
+
+const AUTO_COMPACT_THRESHOLD_STEP_TOKENS = 10_000;
+
+function normalizeAutoCompactThresholdTokens(value: number | null): number {
+  if (value === null || !Number.isFinite(value)) {
+    return DEFAULT_UNIFIED_SETTINGS.autoCompactThresholdTokens;
+  }
+  return Math.min(
+    MAX_AUTO_COMPACT_THRESHOLD_TOKENS,
+    Math.max(MIN_AUTO_COMPACT_THRESHOLD_TOKENS, Math.round(value)),
+  );
+}
 
 function withoutProviderInstanceKey<V>(
   record: Readonly<Record<ProviderInstanceId, V>> | undefined,
@@ -393,6 +416,9 @@ export function useSettingsRestore(onRestored?: () => void) {
         : []),
       ...(settings.vimMode !== DEFAULT_UNIFIED_SETTINGS.vimMode ? ["Vim mode"] : []),
       ...(settings.wordWrap !== DEFAULT_UNIFIED_SETTINGS.wordWrap ? ["Word wrap"] : []),
+      ...(settings.showFileConflictWarning !== DEFAULT_UNIFIED_SETTINGS.showFileConflictWarning
+        ? ["File conflict warning"]
+        : []),
       ...(settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace
         ? ["Diff whitespace changes"]
         : []),
@@ -401,6 +427,13 @@ export function useSettingsRestore(onRestored?: () => void) {
         : []),
       ...(settings.enableAssistantStreaming !== DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming
         ? ["Assistant output"]
+        : []),
+      ...(settings.autoCompactEnabled !== DEFAULT_UNIFIED_SETTINGS.autoCompactEnabled
+        ? ["Auto-compact context"]
+        : []),
+      ...(settings.autoCompactThresholdTokens !==
+      DEFAULT_UNIFIED_SETTINGS.autoCompactThresholdTokens
+        ? ["Auto-compact threshold"]
         : []),
       ...(Duration.toMillis(settings.automaticGitFetchInterval) !==
       Duration.toMillis(DEFAULT_UNIFIED_SETTINGS.automaticGitFetchInterval)
@@ -434,9 +467,12 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.newWorktreesStartFromOrigin,
       settings.diffIgnoreWhitespace,
       settings.automaticGitFetchInterval,
+      settings.autoCompactEnabled,
+      settings.autoCompactThresholdTokens,
       settings.enableAssistantStreaming,
       settings.sidebarThreadPreviewCount,
       settings.timestampFormat,
+      settings.showFileConflictWarning,
       settings.vimMode,
       settings.wordWrap,
       theme,
@@ -458,10 +494,13 @@ export function useSettingsRestore(onRestored?: () => void) {
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
       vimMode: DEFAULT_UNIFIED_SETTINGS.vimMode,
       wordWrap: DEFAULT_UNIFIED_SETTINGS.wordWrap,
+      showFileConflictWarning: DEFAULT_UNIFIED_SETTINGS.showFileConflictWarning,
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
       sidebarThreadPreviewCount: DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount,
       autoOpenPlanSidebar: DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar,
       enableAssistantStreaming: DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming,
+      autoCompactEnabled: DEFAULT_UNIFIED_SETTINGS.autoCompactEnabled,
+      autoCompactThresholdTokens: DEFAULT_UNIFIED_SETTINGS.autoCompactThresholdTokens,
       automaticGitFetchInterval: DEFAULT_UNIFIED_SETTINGS.automaticGitFetchInterval,
       defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
       newWorktreesStartFromOrigin: DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin,
@@ -643,6 +682,33 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
+          title="File conflict warning"
+          description="Warn in the editor when the open file changed on disk while you were editing."
+          resetAction={
+            settings.showFileConflictWarning !==
+            DEFAULT_UNIFIED_SETTINGS.showFileConflictWarning ? (
+              <SettingResetButton
+                label="file conflict warning"
+                onClick={() =>
+                  updateSettings({
+                    showFileConflictWarning: DEFAULT_UNIFIED_SETTINGS.showFileConflictWarning,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.showFileConflictWarning}
+              onCheckedChange={(checked) =>
+                updateSettings({ showFileConflictWarning: Boolean(checked) })
+              }
+              aria-label="Warn when the open file changed on disk while editing"
+            />
+          }
+        />
+
+        <SettingsRow
           title="Hide whitespace changes"
           description="Set whether the diff panel ignores whitespace-only edits by default."
           resetAction={
@@ -692,6 +758,75 @@ export function GeneralSettingsPanel() {
               }
               aria-label="Stream assistant messages"
             />
+          }
+        />
+
+        <SettingsRow
+          title="Auto-compact context"
+          description="Silently summarize Claude conversations once they reach the token threshold, keeping responses sharp and context usage low. Applies when a session starts or restarts."
+          resetAction={
+            settings.autoCompactEnabled !== DEFAULT_UNIFIED_SETTINGS.autoCompactEnabled ? (
+              <SettingResetButton
+                label="auto-compact context"
+                onClick={() =>
+                  updateSettings({
+                    autoCompactEnabled: DEFAULT_UNIFIED_SETTINGS.autoCompactEnabled,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.autoCompactEnabled}
+              onCheckedChange={(checked) =>
+                updateSettings({ autoCompactEnabled: Boolean(checked) })
+              }
+              aria-label="Automatically compact conversation context"
+            />
+          }
+        />
+
+        <SettingsRow
+          title="Auto-compact threshold"
+          description="Token count at which the conversation is summarized. The Claude SDK accepts 100,000 to 1,000,000 tokens."
+          resetAction={
+            settings.autoCompactThresholdTokens !==
+            DEFAULT_UNIFIED_SETTINGS.autoCompactThresholdTokens ? (
+              <SettingResetButton
+                label="auto-compact threshold"
+                onClick={() =>
+                  updateSettings({
+                    autoCompactThresholdTokens: DEFAULT_UNIFIED_SETTINGS.autoCompactThresholdTokens,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <div className="flex shrink-0 items-center gap-2">
+              <NumberField
+                value={settings.autoCompactThresholdTokens}
+                min={MIN_AUTO_COMPACT_THRESHOLD_TOKENS}
+                max={MAX_AUTO_COMPACT_THRESHOLD_TOKENS}
+                step={AUTO_COMPACT_THRESHOLD_STEP_TOKENS}
+                size="sm"
+                className="w-32"
+                disabled={!settings.autoCompactEnabled}
+                onValueChange={(value) =>
+                  updateSettings({
+                    autoCompactThresholdTokens: normalizeAutoCompactThresholdTokens(value),
+                  })
+                }
+              >
+                <NumberFieldGroup>
+                  <NumberFieldDecrement aria-label="Decrease auto-compact threshold" />
+                  <NumberFieldInput aria-label="Auto-compact threshold in tokens" />
+                  <NumberFieldIncrement aria-label="Increase auto-compact threshold" />
+                </NumberFieldGroup>
+              </NumberField>
+              <span className="text-xs text-muted-foreground">tokens</span>
+            </div>
           }
         />
 

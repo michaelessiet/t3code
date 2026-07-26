@@ -87,6 +87,38 @@ function expandHomePath(input: string, path: Path.Path): string {
   return input;
 }
 
+// Mirror `git clone`'s "humanish" directory rule: strip trailing separators,
+// take the final path/scp segment, then drop a trailing `.git`. Used to nest
+// the checkout in a subfolder when the chosen destination is not empty.
+function deriveCloneDirectoryNameFromUrl(remoteUrl: string): string | null {
+  const withoutTrailingSeparators = remoteUrl.trim().replace(/[/\\]+$/, "");
+  const lastSegmentStart = Math.max(
+    withoutTrailingSeparators.lastIndexOf("/"),
+    withoutTrailingSeparators.lastIndexOf("\\"),
+    withoutTrailingSeparators.lastIndexOf(":"),
+  );
+  const lastSegment =
+    lastSegmentStart >= 0
+      ? withoutTrailingSeparators.slice(lastSegmentStart + 1)
+      : withoutTrailingSeparators;
+  const name = lastSegment.replace(/\.git$/i, "").trim();
+  return name.length > 0 ? name : null;
+}
+
+function deriveCloneDirectoryName(
+  remoteUrl: string,
+  repository: SourceControlRepositoryInfo | null,
+): string | null {
+  if (repository) {
+    const segments = repository.nameWithOwner.split("/");
+    const name = segments[segments.length - 1]?.trim();
+    if (name && name.length > 0) {
+      return name;
+    }
+  }
+  return deriveCloneDirectoryNameFromUrl(remoteUrl);
+}
+
 export const make = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -141,38 +173,61 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  const prepareDestination = Effect.fn("SourceControlRepositoryService.prepareDestination")(
-    function* (destinationPath: string) {
-      const normalizedDestination = yield* normalizeDestinationPath(destinationPath);
-      if (yield* fileSystem.exists(normalizedDestination)) {
-        const entries = yield* fileSystem
-          .readDirectory(normalizedDestination, { recursive: false })
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new SourceControlRepositoryError({
-                  operation: "cloneRepository",
-                  provider: "unknown",
-                  detail: "Destination path already exists and is not a directory.",
-                  cause,
-                }),
-            ),
-          );
-        if (entries.length > 0) {
-          return yield* new SourceControlRepositoryError({
+  // Returns the number of entries when `directoryPath` exists (mapping a
+  // non-directory into a repository error), or null when it does not exist.
+  const probeDirectory = Effect.fn("SourceControlRepositoryService.probeDirectory")(function* (
+    directoryPath: string,
+  ) {
+    if (!(yield* fileSystem.exists(directoryPath))) {
+      return null;
+    }
+    const entries = yield* fileSystem.readDirectory(directoryPath, { recursive: false }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new SourceControlRepositoryError({
             operation: "cloneRepository",
             provider: "unknown",
-            detail: "Destination path already exists and is not empty.",
-          });
+            detail: "Destination path already exists and is not a directory.",
+            cause,
+          }),
+      ),
+    );
+    return entries.length;
+  });
+
+  const destinationAlreadyExists = () =>
+    new SourceControlRepositoryError({
+      operation: "cloneRepository",
+      provider: "unknown",
+      detail: "Destination path already exists and is not empty.",
+    });
+
+  const prepareDestination = Effect.fn("SourceControlRepositoryService.prepareDestination")(
+    function* (destinationPath: string, nestedDirectoryName?: string | null) {
+      const normalizedDestination = yield* normalizeDestinationPath(destinationPath);
+      const entryCount = yield* probeDirectory(normalizedDestination);
+
+      let targetPath = normalizedDestination;
+      if (entryCount !== null && entryCount > 0) {
+        // The chosen folder is not empty. Rather than refusing to clone,
+        // mirror `git clone <url>` from the CLI: create a repo-named
+        // subdirectory inside it and check the repository out there.
+        if (!nestedDirectoryName) {
+          return yield* destinationAlreadyExists();
         }
-      } else {
+        targetPath = path.join(normalizedDestination, nestedDirectoryName);
+        const nestedEntryCount = yield* probeDirectory(targetPath);
+        if (nestedEntryCount !== null && nestedEntryCount > 0) {
+          return yield* destinationAlreadyExists();
+        }
+      } else if (entryCount === null) {
         yield* fileSystem.makeDirectory(path.dirname(normalizedDestination), { recursive: true });
       }
 
       return {
-        destinationPath: normalizedDestination,
-        parentPath: path.dirname(normalizedDestination),
-        directoryName: path.basename(normalizedDestination),
+        destinationPath: targetPath,
+        parentPath: path.dirname(targetPath),
+        directoryName: path.basename(targetPath),
       };
     },
   );
@@ -180,16 +235,16 @@ export const make = Effect.gen(function* () {
   const cloneRepository = Effect.fn("SourceControlRepositoryService.cloneRepository")(function* (
     input: SourceControlCloneRepositoryInput,
   ) {
-    const preparedDestination = yield* prepareDestination(input.destinationPath);
     let repository: SourceControlRepositoryInfo | null = null;
     let remoteUrl = input.remoteUrl?.trim() ?? null;
     let provider: SourceControlProviderKind = input.provider ?? "unknown";
 
     if (input.provider && input.repository) {
+      const normalizedDestination = yield* normalizeDestinationPath(input.destinationPath);
       repository = yield* lookupRepository({
         provider: input.provider,
         repository: input.repository,
-        cwd: preparedDestination.parentPath,
+        cwd: path.dirname(normalizedDestination),
       });
       remoteUrl = selectRemoteUrl(repository, input.protocol);
       provider = input.provider;
@@ -202,6 +257,11 @@ export const make = Effect.gen(function* () {
         detail: "Enter a repository path or clone URL before cloning.",
       });
     }
+
+    const preparedDestination = yield* prepareDestination(
+      input.destinationPath,
+      deriveCloneDirectoryName(remoteUrl, repository),
+    );
 
     yield* git.execute({
       operation: "SourceControlRepositoryService.cloneRepository",

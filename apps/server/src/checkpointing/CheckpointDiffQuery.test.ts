@@ -108,6 +108,7 @@ describe("CheckpointDiffQuery.layer", () => {
             getThreadShellById: () => Effect.succeed(Option.none()),
             getThreadDetailById: () => Effect.succeed(Option.none()),
             getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+            searchThreadMessages: () => Effect.succeed({ matches: [], truncated: false }),
           }),
         ),
       );
@@ -201,6 +202,7 @@ describe("CheckpointDiffQuery.layer", () => {
             getThreadShellById: () => Effect.succeed(Option.none()),
             getThreadDetailById: () => Effect.succeed(Option.none()),
             getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+            searchThreadMessages: () => Effect.succeed({ matches: [], truncated: false }),
           }),
         ),
       );
@@ -284,6 +286,7 @@ describe("CheckpointDiffQuery.layer", () => {
             getThreadShellById: () => Effect.succeed(Option.none()),
             getThreadDetailById: () => Effect.succeed(Option.none()),
             getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+            searchThreadMessages: () => Effect.succeed({ matches: [], truncated: false }),
           }),
         ),
       );
@@ -352,6 +355,7 @@ describe("CheckpointDiffQuery.layer", () => {
             getThreadShellById: () => Effect.succeed(Option.none()),
             getThreadDetailById: () => Effect.succeed(Option.none()),
             getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+            searchThreadMessages: () => Effect.succeed({ matches: [], truncated: false }),
           }),
         ),
       );
@@ -405,6 +409,7 @@ describe("CheckpointDiffQuery.layer", () => {
             getThreadShellById: () => Effect.succeed(Option.none()),
             getThreadDetailById: () => Effect.succeed(Option.none()),
             getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+            searchThreadMessages: () => Effect.succeed({ matches: [], truncated: false }),
           }),
         ),
       );

@@ -57,6 +57,32 @@ export function parseBase64DataUrl(
   return { mimeType, base64 };
 }
 
+const GENERIC_MIME_TYPES = new Set(["application/octet-stream", "binary/octet-stream"]);
+
+// Extension inference for non-image ("file") attachments. Browser-reported
+// MIME types are unreliable for source files (`.ts` is often reported as
+// `video/mp2t` or left empty), so the original filename extension wins.
+export function inferAttachmentFileExtension(input: {
+  mimeType: string;
+  fileName?: string;
+}): string {
+  const fileName = input.fileName?.trim() ?? "";
+  const extensionMatch = /\.([a-z0-9]{1,10})$/i.exec(fileName);
+  if (extensionMatch) {
+    return `.${extensionMatch[1]!.toLowerCase()}`;
+  }
+
+  const mimeType = input.mimeType.toLowerCase();
+  if (!GENERIC_MIME_TYPES.has(mimeType)) {
+    const fromMimeExtension = Mime.getExtension(mimeType);
+    if (fromMimeExtension && /^\.[a-z0-9]{1,10}$/.test(fromMimeExtension)) {
+      return fromMimeExtension;
+    }
+  }
+
+  return ".bin";
+}
+
 export function inferImageExtension(input: { mimeType: string; fileName?: string }): string {
   const key = input.mimeType.toLowerCase();
   const fromMime = Object.hasOwn(IMAGE_EXTENSION_BY_MIME_TYPE, key)

@@ -14,6 +14,7 @@ import {
   IsoDateTime,
   MessageId,
   NonNegativeInt,
+  PositiveInt,
   ProjectId,
   ProviderItemId,
   ThreadId,
@@ -27,6 +28,7 @@ export const ORCHESTRATION_WS_METHODS = {
   getTurnDiff: "orchestration.getTurnDiff",
   getFullThreadDiff: "orchestration.getFullThreadDiff",
   replayEvents: "orchestration.replayEvents",
+  searchMessages: "orchestration.searchMessages",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   subscribeShell: "orchestration.subscribeShell",
   subscribeThread: "orchestration.subscribeThread",
@@ -141,6 +143,7 @@ export type ProviderUserInputAnswers = typeof ProviderUserInputAnswers.Type;
 export const PROVIDER_SEND_TURN_MAX_INPUT_CHARS = 120_000;
 export const PROVIDER_SEND_TURN_MAX_ATTACHMENTS = 8;
 export const PROVIDER_SEND_TURN_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+export const PROVIDER_SEND_TURN_MAX_FILE_BYTES = 10 * 1024 * 1024;
 const PROVIDER_SEND_TURN_MAX_IMAGE_DATA_URL_CHARS = 14_000_000;
 const CHAT_ATTACHMENT_ID_MAX_CHARS = 128;
 // Correlation id is command id by design in this model.
@@ -173,9 +176,32 @@ const UploadChatImageAttachment = Schema.Struct({
 });
 export type UploadChatImageAttachment = typeof UploadChatImageAttachment.Type;
 
-export const ChatAttachment = Schema.Union([ChatImageAttachment]);
+// Non-image attachments (source files, PDFs, text documents, ...). Any MIME
+// type is accepted at the contract layer; provider adapters decide how (or
+// whether) each payload can be forwarded to the model.
+export const ChatFileAttachment = Schema.Struct({
+  type: Schema.Literal("file"),
+  id: ChatAttachmentId,
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
+  mimeType: TrimmedNonEmptyString.check(Schema.isMaxLength(100)),
+  sizeBytes: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_FILE_BYTES)),
+});
+export type ChatFileAttachment = typeof ChatFileAttachment.Type;
+
+const UploadChatFileAttachment = Schema.Struct({
+  type: Schema.Literal("file"),
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
+  mimeType: TrimmedNonEmptyString.check(Schema.isMaxLength(100)),
+  sizeBytes: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROVIDER_SEND_TURN_MAX_FILE_BYTES)),
+  dataUrl: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_IMAGE_DATA_URL_CHARS),
+  ),
+});
+export type UploadChatFileAttachment = typeof UploadChatFileAttachment.Type;
+
+export const ChatAttachment = Schema.Union([ChatImageAttachment, ChatFileAttachment]);
 export type ChatAttachment = typeof ChatAttachment.Type;
-const UploadChatAttachment = Schema.Union([UploadChatImageAttachment]);
+const UploadChatAttachment = Schema.Union([UploadChatImageAttachment, UploadChatFileAttachment]);
 export type UploadChatAttachment = typeof UploadChatAttachment.Type;
 
 export const ProjectScriptIcon = Schema.Literals([
@@ -1259,6 +1285,29 @@ export const OrchestrationReplayEventsInput = Schema.Struct({
 });
 export type OrchestrationReplayEventsInput = typeof OrchestrationReplayEventsInput.Type;
 
+export const OrchestrationSearchMessagesInput = Schema.Struct({
+  query: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  limit: PositiveInt.check(Schema.isLessThanOrEqualTo(100)),
+});
+export type OrchestrationSearchMessagesInput = typeof OrchestrationSearchMessagesInput.Type;
+
+export const OrchestrationMessageSearchMatch = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+  role: OrchestrationMessageRole,
+  threadTitle: Schema.String,
+  /** Short excerpt of the message text centered on the first match. */
+  snippet: Schema.String,
+  updatedAt: IsoDateTime,
+});
+export type OrchestrationMessageSearchMatch = typeof OrchestrationMessageSearchMatch.Type;
+
+export const OrchestrationSearchMessagesResult = Schema.Struct({
+  matches: Schema.Array(OrchestrationMessageSearchMatch),
+  truncated: Schema.Boolean,
+});
+export type OrchestrationSearchMessagesResult = typeof OrchestrationSearchMessagesResult.Type;
+
 const OrchestrationReplayEventsResult = Schema.Array(OrchestrationEvent);
 export type OrchestrationReplayEventsResult = typeof OrchestrationReplayEventsResult.Type;
 
@@ -1278,6 +1327,10 @@ export const OrchestrationRpcSchemas = {
   replayEvents: {
     input: OrchestrationReplayEventsInput,
     output: OrchestrationReplayEventsResult,
+  },
+  searchMessages: {
+    input: OrchestrationSearchMessagesInput,
+    output: OrchestrationSearchMessagesResult,
   },
   getArchivedShellSnapshot: {
     input: Schema.Struct({}),
@@ -1319,6 +1372,14 @@ export class OrchestrationGetTurnDiffError extends Schema.TaggedErrorClass<Orche
 
 export class OrchestrationGetFullThreadDiffError extends Schema.TaggedErrorClass<OrchestrationGetFullThreadDiffError>()(
   "OrchestrationGetFullThreadDiffError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+export class OrchestrationSearchMessagesError extends Schema.TaggedErrorClass<OrchestrationSearchMessagesError>()(
+  "OrchestrationSearchMessagesError",
   {
     message: TrimmedNonEmptyString,
     cause: Schema.optional(Schema.Defect()),

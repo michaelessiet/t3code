@@ -20,5 +20,11 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
       label: "environment-data:orchestration:archived-shell-snapshot",
       tag: ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot,
     }),
+    searchMessages: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:search-messages",
+      tag: ORCHESTRATION_WS_METHODS.searchMessages,
+      staleTimeMs: 10_000,
+      idleTtlMs: 60_000,
+    }),
   };
 }

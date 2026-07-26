@@ -15,13 +15,39 @@ import {
   lineNumbers,
   rectangularSelection,
 } from "@codemirror/view";
-import { vim } from "@replit/codemirror-vim";
+import { CodeMirror, Vim, vim } from "@replit/codemirror-vim";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
+import { syncCodeEditorFocusToDesktop } from "../../../lib/desktopEditorZoom";
+
 import { computeDocReplacement } from "./docReplacement";
+import { requestDocumentSave } from "./documentSave";
+import { editorFontSize } from "./fontSize";
 import { languageExtensionForPath } from "./languages";
+import { goToLspDefinitionAtCursor, showLspHoverAtCursor } from "./lspBridge";
 import { revealEditorLine, revealLineExtension } from "./revealLine";
 import { editorTheme } from "./theme";
+
+// `gh` in vim normal mode shows LSP hover info at the cursor (the VSCode-vim
+// convention). Registered once; no-ops in documents without an LSP bridge.
+Vim.defineAction("lspHover", (cm) => {
+  showLspHoverAtCursor(cm.cm6);
+});
+Vim.mapCommand("gh", "action", "lspHover", {}, { context: "normal" });
+
+// `gd` (VSCode-vim) and `<C-]>` (classic vim tag jump) go to the LSP
+// definition of the symbol at the cursor; no-ops without an LSP bridge.
+Vim.defineAction("lspDefinition", (cm) => {
+  goToLspDefinitionAtCursor(cm.cm6);
+});
+Vim.mapCommand("gd", "action", "lspDefinition", {}, { context: "normal" });
+Vim.mapCommand("<C-]>", "action", "lspDefinition", {}, { context: "normal" });
+
+// Vim's `:w`/`:write` ex command dispatches to CodeMirror.commands.save;
+// route it to the host's save handler (flushes the debounced auto-save).
+CodeMirror.commands.save = (cm: CodeMirror) => {
+  requestDocumentSave(cm.cm6);
+};
 
 export interface CodeMirrorFileEditorProps {
   relativePath: string;
@@ -67,6 +93,8 @@ const baseExtensions: Extension = [
   highlightActiveLine(),
   highlightSelectionMatches(),
   search({ top: true }),
+  // Precedes the default keymap so Cmd/Ctrl +/- adjust font size while focused.
+  editorFontSize,
   keymap.of([
     ...closeBracketsKeymap,
     ...defaultKeymap,
@@ -76,6 +104,18 @@ const baseExtensions: Extension = [
   ]),
   editorTheme,
   revealLineExtension,
+  // Report focus to the desktop shell so it yields Cmd/Ctrl +/-/0 to the
+  // editor's font-size shortcuts while focused (see desktopEditorZoom.ts).
+  EditorView.domEventHandlers({
+    focus: () => {
+      syncCodeEditorFocusToDesktop();
+      return false;
+    },
+    blur: () => {
+      syncCodeEditorFocusToDesktop();
+      return false;
+    },
+  }),
 ];
 
 function readOnlyExtension(readOnly: boolean): Extension {
@@ -171,6 +211,9 @@ export function CodeMirrorFileEditor({
       onViewReadyRef.current?.(null);
       setEditor(null);
       editorView.destroy();
+      // Destroying a focused editor won't emit a blur; re-sync so the desktop
+      // shell restores window zoom.
+      syncCodeEditorFocusToDesktop();
     };
   }, [relativePath]);
 
@@ -214,5 +257,7 @@ export function CodeMirrorFileEditor({
     revealEditorLine(view, revealLine);
   }, [view, revealLine, revealRequestId]);
 
-  return <div ref={containerRef} className={className} />;
+  // data-code-editor feeds the `editorFocus` keybinding when-context
+  // (see lib/editorFocus.ts).
+  return <div ref={containerRef} className={className} data-code-editor="" />;
 }

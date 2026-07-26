@@ -10,6 +10,10 @@
 import * as NodeFSP from "node:fs/promises";
 
 import type {
+  ProjectCopyEntryInput,
+  ProjectCopyEntryResult,
+  ProjectMutateEntryInput,
+  ProjectMutateEntryResult,
   ProjectReadFileInput,
   ProjectReadFileResult,
   ProjectWriteFileInput,
@@ -44,6 +48,10 @@ export class WorkspaceFileSystemOperationError extends Schema.TaggedErrorClass<W
       "close",
       "make-directory",
       "write-file",
+      "exists",
+      "rename",
+      "remove",
+      "copy",
     ]),
     cause: Schema.Defect(),
   },
@@ -111,12 +119,40 @@ export class WorkspaceFileStaleRevisionError extends Schema.TaggedErrorClass<Wor
   }
 }
 
+export class WorkspaceEntryExistsError extends Schema.TaggedErrorClass<WorkspaceEntryExistsError>()(
+  "WorkspaceEntryExistsError",
+  {
+    workspaceRoot: Schema.String,
+    relativePath: Schema.String,
+    resolvedPath: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Workspace entry '${this.relativePath}' in '${this.workspaceRoot}' already exists.`;
+  }
+}
+
+export class WorkspaceEntryNotFoundError extends Schema.TaggedErrorClass<WorkspaceEntryNotFoundError>()(
+  "WorkspaceEntryNotFoundError",
+  {
+    workspaceRoot: Schema.String,
+    relativePath: Schema.String,
+    resolvedPath: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Workspace entry '${this.relativePath}' in '${this.workspaceRoot}' does not exist.`;
+  }
+}
+
 export const WorkspaceFileSystemError = Schema.Union([
   WorkspaceFileSystemOperationError,
   WorkspaceFilePathEscapeError,
   WorkspacePathNotFileError,
   WorkspaceBinaryFileError,
   WorkspaceFileStaleRevisionError,
+  WorkspaceEntryExistsError,
+  WorkspaceEntryNotFoundError,
 ]);
 export type WorkspaceFileSystemError = typeof WorkspaceFileSystemError.Type;
 
@@ -141,6 +177,28 @@ export class WorkspaceFileSystem extends Context.Service<
       input: ProjectWriteFileInput,
     ) => Effect.Effect<
       ProjectWriteFileResult,
+      WorkspaceFileSystemError | WorkspacePaths.WorkspacePathOutsideRootError
+    >;
+    /**
+     * Structural entry mutation (create/rename/delete of files and
+     * directories) relative to the workspace root. Content writes stay on
+     * `writeFile`.
+     */
+    readonly mutateEntry: (
+      input: ProjectMutateEntryInput,
+    ) => Effect.Effect<
+      ProjectMutateEntryResult,
+      WorkspaceFileSystemError | WorkspacePaths.WorkspacePathOutsideRootError
+    >;
+    /**
+     * Copy a file or directory (recursively) from one workspace root to
+     * another on the same server. Both `fromCwd` and `toCwd` are resolved and
+     * sandboxed independently.
+     */
+    readonly copyEntry: (
+      input: ProjectCopyEntryInput,
+    ) => Effect.Effect<
+      ProjectCopyEntryResult,
       WorkspaceFileSystemError | WorkspacePaths.WorkspacePathOutsideRootError
     >;
   }
@@ -375,7 +433,245 @@ export const make = Effect.gen(function* () {
     return { relativePath: target.relativePath, revision: fileContentRevision(input.contents) };
   });
 
-  return WorkspaceFileSystem.of({ readFile, writeFile });
+  const entryExists = Effect.fn("WorkspaceFileSystem.entryExists")(function* (context: {
+    readonly cwd: string;
+    readonly relativePath: string;
+    readonly absolutePath: string;
+  }) {
+    return yield* fileSystem.exists(context.absolutePath).pipe(
+      Effect.mapError(
+        (cause) =>
+          new WorkspaceFileSystemOperationError({
+            workspaceRoot: context.cwd,
+            relativePath: context.relativePath,
+            resolvedPath: context.absolutePath,
+            operationPath: context.absolutePath,
+            operation: "exists",
+            cause,
+          }),
+      ),
+    );
+  });
+
+  const mutateEntry: WorkspaceFileSystem["Service"]["mutateEntry"] = Effect.fn(
+    "WorkspaceFileSystem.mutateEntry",
+  )(function* (input) {
+    switch (input._tag) {
+      case "create": {
+        const target = yield* workspacePaths.resolveRelativePathWithinRoot({
+          workspaceRoot: input.cwd,
+          relativePath: input.relativePath,
+        });
+        if (yield* entryExists({ ...input, absolutePath: target.absolutePath })) {
+          return yield* new WorkspaceEntryExistsError({
+            workspaceRoot: input.cwd,
+            relativePath: input.relativePath,
+            resolvedPath: target.absolutePath,
+          });
+        }
+        const createDirectoryPath =
+          input.kind === "directory" ? target.absolutePath : path.dirname(target.absolutePath);
+        yield* fileSystem.makeDirectory(createDirectoryPath, { recursive: true }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new WorkspaceFileSystemOperationError({
+                workspaceRoot: input.cwd,
+                relativePath: input.relativePath,
+                resolvedPath: target.absolutePath,
+                operationPath: createDirectoryPath,
+                operation: "make-directory",
+                cause,
+              }),
+          ),
+        );
+        if (input.kind === "file") {
+          yield* fileSystem.writeFileString(target.absolutePath, "").pipe(
+            Effect.mapError(
+              (cause) =>
+                new WorkspaceFileSystemOperationError({
+                  workspaceRoot: input.cwd,
+                  relativePath: input.relativePath,
+                  resolvedPath: target.absolutePath,
+                  operationPath: target.absolutePath,
+                  operation: "write-file",
+                  cause,
+                }),
+            ),
+          );
+        }
+        yield* workspaceEntries.refresh(input.cwd);
+        return { relativePath: target.relativePath };
+      }
+      case "rename": {
+        const source = yield* workspacePaths.resolveRelativePathWithinRoot({
+          workspaceRoot: input.cwd,
+          relativePath: input.fromRelativePath,
+        });
+        const destination = yield* workspacePaths.resolveRelativePathWithinRoot({
+          workspaceRoot: input.cwd,
+          relativePath: input.toRelativePath,
+        });
+        if (
+          !(yield* entryExists({
+            cwd: input.cwd,
+            relativePath: input.fromRelativePath,
+            absolutePath: source.absolutePath,
+          }))
+        ) {
+          return yield* new WorkspaceEntryNotFoundError({
+            workspaceRoot: input.cwd,
+            relativePath: input.fromRelativePath,
+            resolvedPath: source.absolutePath,
+          });
+        }
+        if (
+          yield* entryExists({
+            cwd: input.cwd,
+            relativePath: input.toRelativePath,
+            absolutePath: destination.absolutePath,
+          })
+        ) {
+          return yield* new WorkspaceEntryExistsError({
+            workspaceRoot: input.cwd,
+            relativePath: input.toRelativePath,
+            resolvedPath: destination.absolutePath,
+          });
+        }
+        yield* fileSystem
+          .makeDirectory(path.dirname(destination.absolutePath), { recursive: true })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new WorkspaceFileSystemOperationError({
+                  workspaceRoot: input.cwd,
+                  relativePath: input.toRelativePath,
+                  resolvedPath: destination.absolutePath,
+                  operationPath: path.dirname(destination.absolutePath),
+                  operation: "make-directory",
+                  cause,
+                }),
+            ),
+          );
+        yield* fileSystem.rename(source.absolutePath, destination.absolutePath).pipe(
+          Effect.mapError(
+            (cause) =>
+              new WorkspaceFileSystemOperationError({
+                workspaceRoot: input.cwd,
+                relativePath: input.fromRelativePath,
+                resolvedPath: source.absolutePath,
+                operationPath: destination.absolutePath,
+                operation: "rename",
+                cause,
+              }),
+          ),
+        );
+        yield* workspaceEntries.refresh(input.cwd);
+        return { relativePath: destination.relativePath };
+      }
+      case "delete": {
+        const target = yield* workspacePaths.resolveRelativePathWithinRoot({
+          workspaceRoot: input.cwd,
+          relativePath: input.relativePath,
+        });
+        if (!(yield* entryExists({ ...input, absolutePath: target.absolutePath }))) {
+          return yield* new WorkspaceEntryNotFoundError({
+            workspaceRoot: input.cwd,
+            relativePath: input.relativePath,
+            resolvedPath: target.absolutePath,
+          });
+        }
+        yield* fileSystem.remove(target.absolutePath, { recursive: true }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new WorkspaceFileSystemOperationError({
+                workspaceRoot: input.cwd,
+                relativePath: input.relativePath,
+                resolvedPath: target.absolutePath,
+                operationPath: target.absolutePath,
+                operation: "remove",
+                cause,
+              }),
+          ),
+        );
+        yield* workspaceEntries.refresh(input.cwd);
+        return { relativePath: target.relativePath };
+      }
+    }
+  });
+
+  const copyEntry: WorkspaceFileSystem["Service"]["copyEntry"] = Effect.fn(
+    "WorkspaceFileSystem.copyEntry",
+  )(function* (input) {
+    const source = yield* workspacePaths.resolveRelativePathWithinRoot({
+      workspaceRoot: input.fromCwd,
+      relativePath: input.fromRelativePath,
+    });
+    const destination = yield* workspacePaths.resolveRelativePathWithinRoot({
+      workspaceRoot: input.toCwd,
+      relativePath: input.toRelativePath,
+    });
+    if (
+      !(yield* entryExists({
+        cwd: input.fromCwd,
+        relativePath: input.fromRelativePath,
+        absolutePath: source.absolutePath,
+      }))
+    ) {
+      return yield* new WorkspaceEntryNotFoundError({
+        workspaceRoot: input.fromCwd,
+        relativePath: input.fromRelativePath,
+        resolvedPath: source.absolutePath,
+      });
+    }
+    if (
+      input.overwrite !== true &&
+      (yield* entryExists({
+        cwd: input.toCwd,
+        relativePath: input.toRelativePath,
+        absolutePath: destination.absolutePath,
+      }))
+    ) {
+      return yield* new WorkspaceEntryExistsError({
+        workspaceRoot: input.toCwd,
+        relativePath: input.toRelativePath,
+        resolvedPath: destination.absolutePath,
+      });
+    }
+    yield* fileSystem
+      .makeDirectory(path.dirname(destination.absolutePath), { recursive: true })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new WorkspaceFileSystemOperationError({
+              workspaceRoot: input.toCwd,
+              relativePath: input.toRelativePath,
+              resolvedPath: destination.absolutePath,
+              operationPath: path.dirname(destination.absolutePath),
+              operation: "make-directory",
+              cause,
+            }),
+        ),
+      );
+    yield* fileSystem
+      .copy(source.absolutePath, destination.absolutePath, { overwrite: input.overwrite === true })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new WorkspaceFileSystemOperationError({
+              workspaceRoot: input.toCwd,
+              relativePath: input.toRelativePath,
+              resolvedPath: destination.absolutePath,
+              operationPath: source.absolutePath,
+              operation: "copy",
+              cause,
+            }),
+        ),
+      );
+    yield* workspaceEntries.refresh(input.toCwd);
+    return { relativePath: destination.relativePath };
+  });
+
+  return WorkspaceFileSystem.of({ readFile, writeFile, mutateEntry, copyEntry });
 });
 
 export const layer = Layer.effect(WorkspaceFileSystem, make);

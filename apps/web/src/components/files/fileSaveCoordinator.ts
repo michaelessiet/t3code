@@ -32,6 +32,16 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
   }
 
   /**
+   * Persist pending debounced edits now instead of waiting out the debounce
+   * (e.g. vim `:w`). No-ops when the buffer is clean or a save is in flight
+   * (the in-flight save already reschedules any trailing edits).
+   */
+  flush(): void {
+    this.clearTimer();
+    void this.persistLatest();
+  }
+
+  /**
    * Discard unsaved local changes (e.g. when the user chooses to reload the
    * buffer from disk after a concurrent-edit conflict). Pending debounced
    * saves are cancelled; an in-flight save settles without rescheduling.

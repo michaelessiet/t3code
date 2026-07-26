@@ -12,6 +12,8 @@ import type {
   ProjectSearchEntriesResult,
 } from "@t3tools/contracts";
 
+import * as WorkspaceIgnoredEntries from "./WorkspaceIgnoredEntries.ts";
+
 const WORKSPACE_INDEX_MAX_ENTRIES = 25_000;
 const WORKSPACE_INDEX_PAGE_SIZE = WORKSPACE_INDEX_MAX_ENTRIES + 2;
 const WORKSPACE_INDEX_SCAN_TIMEOUT = "15 seconds";
@@ -155,6 +157,71 @@ function mapMixedSearchResult(
   };
 }
 
+/**
+ * Append supplement entries (gitignored paths git enumerated but fff's
+ * gitignore-respecting walker never indexed) to the fff results, deduplicated
+ * by path with the fff entry winning.
+ */
+export function mergeSupplementEntries(
+  entries: ReadonlyArray<ProjectEntry>,
+  supplement: ReadonlyArray<ProjectEntry>,
+): ProjectEntry[] {
+  const seenPaths = new Set(entries.map((entry) => entry.path));
+  const merged = [...entries];
+  for (const entry of supplement) {
+    if (seenPaths.has(entry.path)) continue;
+    seenPaths.add(entry.path);
+    merged.push(entry);
+  }
+  return merged;
+}
+
+/**
+ * Rank merged search results so contiguous-substring matches outrank
+ * scattered subsequence matches regardless of source. Without this, a broad
+ * query fills the result limit with fff's fuzzy tail and slices off an
+ * ignored file whose name is exactly what the user typed. Within each tier
+ * the native index's relevance order is preserved and supplement entries
+ * follow it; duplicates keep their first (highest-ranked) occurrence.
+ */
+export function rankMergedSearchEntries(
+  indexed: ReadonlyArray<ProjectEntry>,
+  supplementMatches: ReadonlyArray<ProjectEntry>,
+  query: string,
+): ProjectEntry[] {
+  const containsQuery = (entry: ProjectEntry) => entry.path.toLowerCase().includes(query);
+  const ordered = [
+    ...indexed.filter(containsQuery),
+    ...supplementMatches.filter(containsQuery),
+    ...indexed.filter((entry) => !containsQuery(entry)),
+    ...supplementMatches.filter((entry) => !containsQuery(entry)),
+  ];
+  const seenPaths = new Set<string>();
+  const merged: ProjectEntry[] = [];
+  for (const entry of ordered) {
+    if (seenPaths.has(entry.path)) continue;
+    seenPaths.add(entry.path);
+    merged.push(entry);
+  }
+  return merged;
+}
+
+/**
+ * Subsequence match (fzf-style) approximating fff's fuzzy matching for the
+ * supplement, which never reaches the native matcher. `query` is expected
+ * lowercased; an empty query matches everything.
+ */
+export function matchesSupplementQuery(path: string, query: string): boolean {
+  const lowerPath = path.toLowerCase();
+  let queryIndex = 0;
+  for (let pathIndex = 0; pathIndex < lowerPath.length && queryIndex < query.length; pathIndex++) {
+    if (lowerPath[pathIndex] === query[queryIndex]) {
+      queryIndex++;
+    }
+  }
+  return queryIndex === query.length;
+}
+
 function withDirectoryAncestors(entries: ReadonlyArray<ProjectEntry>): ProjectEntry[] {
   const entryByPath = new Map(entries.map((entry) => [entry.path, entry]));
   for (const entry of entries) {
@@ -218,16 +285,26 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (cwd: strin
       catch: (cause) => new WorkspaceSearchIndexDestroyFailed({ cwd, cause }),
     }).pipe(Effect.orDie),
   );
-  yield* waitForScan(
-    cwd,
-    finder,
-    (cause) =>
-      new WorkspaceSearchIndexCreateFailed({
+  // The gitignored-entries supplement makes files fff's gitignore-respecting
+  // walker skips (build output, .env, generated code) visible in the entries
+  // index; enumerated concurrently with the initial scan.
+  const [, initialSupplement] = yield* Effect.all(
+    [
+      waitForScan(
         cwd,
-        reason: "FileFinder.isScanning threw while creating the index.",
-        cause,
-      }),
+        finder,
+        (cause) =>
+          new WorkspaceSearchIndexCreateFailed({
+            cwd,
+            reason: "FileFinder.isScanning threw while creating the index.",
+            cause,
+          }),
+      ),
+      WorkspaceIgnoredEntries.listIgnoredEntries(cwd),
+    ],
+    { concurrency: 2 },
   );
+  let supplement = initialSupplement;
 
   const runMixedSearch = Effect.fn("WorkspaceSearchIndex.runMixedSearch")(function* (
     query: string,
@@ -273,29 +350,38 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (cwd: strin
         reason: result.error,
       });
     }
-    yield* waitForScan(
-      cwd,
-      finder,
-      (cause) =>
-        new WorkspaceSearchIndexRefreshFailed({
+    const [, refreshedSupplement] = yield* Effect.all(
+      [
+        waitForScan(
           cwd,
-          reason: "FileFinder.isScanning threw while refreshing the index.",
-          cause,
-        }),
+          finder,
+          (cause) =>
+            new WorkspaceSearchIndexRefreshFailed({
+              cwd,
+              reason: "FileFinder.isScanning threw while refreshing the index.",
+              cause,
+            }),
+        ),
+        WorkspaceIgnoredEntries.listIgnoredEntries(cwd),
+      ],
+      { concurrency: 2 },
     );
+    supplement = refreshedSupplement;
   });
 
   const list: WorkspaceSearchIndex["Service"]["list"] = Effect.fn("WorkspaceSearchIndex.list")(
     function* () {
       const result = yield* runMixedSearch("", WORKSPACE_INDEX_PAGE_SIZE);
       const mapped = mapMixedSearchResult(result, WORKSPACE_INDEX_MAX_ENTRIES);
-      const sortedEntries = withDirectoryAncestors(mapped.entries).toSorted((left, right) =>
+      const merged = mergeSupplementEntries(mapped.entries, supplement.entries);
+      const sortedEntries = withDirectoryAncestors(merged).toSorted((left, right) =>
         left.path.localeCompare(right.path),
       );
       const entries = sortedEntries.slice(0, WORKSPACE_INDEX_MAX_ENTRIES);
       return {
         entries,
-        truncated: mapped.truncated || entries.length < sortedEntries.length,
+        truncated:
+          mapped.truncated || supplement.truncated || entries.length < sortedEntries.length,
       };
     },
   );
@@ -304,7 +390,16 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (cwd: strin
     "WorkspaceSearchIndex.search",
   )(function* (query, limit) {
     const result = yield* runMixedSearch(query, Math.max(1, limit + 1));
-    return mapMixedSearchResult(result, limit);
+    const mapped = mapMixedSearchResult(result, limit);
+    const supplementMatches = supplement.entries.filter((entry) =>
+      matchesSupplementQuery(entry.path, query),
+    );
+    const merged = rankMergedSearchEntries(mapped.entries, supplementMatches, query);
+    const entries = merged.slice(0, limit);
+    return {
+      entries,
+      truncated: mapped.truncated || entries.length < merged.length,
+    };
   });
 
   return WorkspaceSearchIndex.of({ list, refresh, search });

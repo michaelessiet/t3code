@@ -379,4 +379,327 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
       }),
     );
   });
+
+  describe("mutateEntry", () => {
+    it.effect("creates empty files and nested directories", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+
+        const created = yield* workspaceFileSystem.mutateEntry({
+          _tag: "create",
+          cwd,
+          relativePath: "src/lib/util.ts",
+          kind: "file",
+        });
+        expect(created.relativePath).toBe("src/lib/util.ts");
+        expect(yield* fileSystem.readFileString(path.join(cwd, "src/lib/util.ts"))).toBe("");
+
+        const directory = yield* workspaceFileSystem.mutateEntry({
+          _tag: "create",
+          cwd,
+          relativePath: "docs/guides",
+          kind: "directory",
+        });
+        expect(directory.relativePath).toBe("docs/guides");
+        const stat = yield* fileSystem.stat(path.join(cwd, "docs/guides"));
+        expect(stat.type).toBe("Directory");
+      }),
+    );
+
+    it.effect("rejects creating an entry that already exists", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "notes.md", "existing\n");
+
+        const error = yield* workspaceFileSystem
+          .mutateEntry({ _tag: "create", cwd, relativePath: "notes.md", kind: "file" })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceEntryExistsError);
+      }),
+    );
+
+    it.effect("renames entries and creates missing destination directories", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "src/old.ts", "contents\n");
+
+        const renamed = yield* workspaceFileSystem.mutateEntry({
+          _tag: "rename",
+          cwd,
+          fromRelativePath: "src/old.ts",
+          toRelativePath: "src/nested/new.ts",
+        });
+
+        expect(renamed.relativePath).toBe("src/nested/new.ts");
+        expect(yield* fileSystem.readFileString(path.join(cwd, "src/nested/new.ts"))).toBe(
+          "contents\n",
+        );
+        expect(yield* fileSystem.exists(path.join(cwd, "src/old.ts"))).toBe(false);
+      }),
+    );
+
+    it.effect("rejects renames whose source is missing or destination exists", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "a.txt", "a\n");
+        yield* writeTextFile(cwd, "b.txt", "b\n");
+
+        const missing = yield* workspaceFileSystem
+          .mutateEntry({
+            _tag: "rename",
+            cwd,
+            fromRelativePath: "nope.txt",
+            toRelativePath: "c.txt",
+          })
+          .pipe(Effect.flip);
+        expect(missing).toBeInstanceOf(WorkspaceFileSystem.WorkspaceEntryNotFoundError);
+
+        const collision = yield* workspaceFileSystem
+          .mutateEntry({ _tag: "rename", cwd, fromRelativePath: "a.txt", toRelativePath: "b.txt" })
+          .pipe(Effect.flip);
+        expect(collision).toBeInstanceOf(WorkspaceFileSystem.WorkspaceEntryExistsError);
+      }),
+    );
+
+    it.effect("deletes files and directories recursively", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "trash/inner/file.txt", "x\n");
+
+        const deleted = yield* workspaceFileSystem.mutateEntry({
+          _tag: "delete",
+          cwd,
+          relativePath: "trash",
+        });
+
+        expect(deleted.relativePath).toBe("trash");
+        expect(yield* fileSystem.exists(path.join(cwd, "trash"))).toBe(false);
+      }),
+    );
+
+    it.effect("rejects deleting a missing entry", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+
+        const error = yield* workspaceFileSystem
+          .mutateEntry({ _tag: "delete", cwd, relativePath: "ghost.txt" })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceEntryNotFoundError);
+      }),
+    );
+
+    it.effect("rejects mutations that escape the workspace root", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+
+        const create = yield* workspaceFileSystem
+          .mutateEntry({ _tag: "create", cwd, relativePath: "../escape.txt", kind: "file" })
+          .pipe(Effect.flip);
+        expect(create.message).toContain(
+          "Workspace file path must be relative to the project root: ../escape.txt",
+        );
+
+        const renameOut = yield* workspaceFileSystem
+          .mutateEntry({
+            _tag: "rename",
+            cwd,
+            fromRelativePath: "a.txt",
+            toRelativePath: "../stolen.txt",
+          })
+          .pipe(Effect.flip);
+        expect(renameOut.message).toContain(
+          "Workspace file path must be relative to the project root: ../stolen.txt",
+        );
+
+        // The workspace root itself is never a valid mutation target.
+        const deleteRoot = yield* workspaceFileSystem
+          .mutateEntry({ _tag: "delete", cwd, relativePath: "." })
+          .pipe(Effect.flip);
+        expect(deleteRoot.message).toContain(
+          "Workspace file path must be relative to the project root: .",
+        );
+      }),
+    );
+  });
+
+  describe("copyEntry", () => {
+    it.effect("copies a file from one workspace root to another", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fromCwd = yield* makeTempDir;
+        const toCwd = yield* makeTempDir;
+        yield* writeTextFile(fromCwd, "src/config.ts", "export const port = 3000;\n");
+
+        const result = yield* workspaceFileSystem.copyEntry({
+          fromCwd,
+          fromRelativePath: "src/config.ts",
+          toCwd,
+          toRelativePath: "config.ts",
+        });
+
+        expect(result).toEqual({ relativePath: "config.ts" });
+        const copied = yield* fileSystem
+          .readFileString(path.join(toCwd, "config.ts"))
+          .pipe(Effect.orDie);
+        expect(copied).toBe("export const port = 3000;\n");
+        // Source is left untouched.
+        const original = yield* fileSystem
+          .readFileString(path.join(fromCwd, "src/config.ts"))
+          .pipe(Effect.orDie);
+        expect(original).toBe("export const port = 3000;\n");
+      }),
+    );
+
+    it.effect("copies a directory recursively across roots", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fromCwd = yield* makeTempDir;
+        const toCwd = yield* makeTempDir;
+        yield* writeTextFile(fromCwd, "assets/a.txt", "a\n");
+        yield* writeTextFile(fromCwd, "assets/nested/b.txt", "b\n");
+
+        const result = yield* workspaceFileSystem.copyEntry({
+          fromCwd,
+          fromRelativePath: "assets",
+          toCwd,
+          toRelativePath: "assets",
+        });
+
+        expect(result).toEqual({ relativePath: "assets" });
+        expect(
+          yield* fileSystem.readFileString(path.join(toCwd, "assets/a.txt")).pipe(Effect.orDie),
+        ).toBe("a\n");
+        expect(
+          yield* fileSystem
+            .readFileString(path.join(toCwd, "assets/nested/b.txt"))
+            .pipe(Effect.orDie),
+        ).toBe("b\n");
+      }),
+    );
+
+    it.effect("creates missing destination parent directories", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fromCwd = yield* makeTempDir;
+        const toCwd = yield* makeTempDir;
+        yield* writeTextFile(fromCwd, "note.md", "hi\n");
+
+        yield* workspaceFileSystem.copyEntry({
+          fromCwd,
+          fromRelativePath: "note.md",
+          toCwd,
+          toRelativePath: "docs/deep/note.md",
+        });
+
+        expect(
+          yield* fileSystem
+            .readFileString(path.join(toCwd, "docs/deep/note.md"))
+            .pipe(Effect.orDie),
+        ).toBe("hi\n");
+      }),
+    );
+
+    it.effect("fails when the source does not exist", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fromCwd = yield* makeTempDir;
+        const toCwd = yield* makeTempDir;
+
+        const error = yield* workspaceFileSystem
+          .copyEntry({
+            fromCwd,
+            fromRelativePath: "missing.ts",
+            toCwd,
+            toRelativePath: "missing.ts",
+          })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceEntryNotFoundError);
+      }),
+    );
+
+    it.effect("fails when the destination exists without overwrite", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fromCwd = yield* makeTempDir;
+        const toCwd = yield* makeTempDir;
+        yield* writeTextFile(fromCwd, "dup.ts", "source\n");
+        yield* writeTextFile(toCwd, "dup.ts", "existing\n");
+
+        const error = yield* workspaceFileSystem
+          .copyEntry({ fromCwd, fromRelativePath: "dup.ts", toCwd, toRelativePath: "dup.ts" })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceEntryExistsError);
+      }),
+    );
+
+    it.effect("replaces the destination when overwrite is set", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fromCwd = yield* makeTempDir;
+        const toCwd = yield* makeTempDir;
+        yield* writeTextFile(fromCwd, "dup.ts", "source\n");
+        yield* writeTextFile(toCwd, "dup.ts", "existing\n");
+
+        const result = yield* workspaceFileSystem.copyEntry({
+          fromCwd,
+          fromRelativePath: "dup.ts",
+          toCwd,
+          toRelativePath: "dup.ts",
+          overwrite: true,
+        });
+
+        expect(result).toEqual({ relativePath: "dup.ts" });
+        expect(
+          yield* fileSystem.readFileString(path.join(toCwd, "dup.ts")).pipe(Effect.orDie),
+        ).toBe("source\n");
+      }),
+    );
+
+    it.effect("rejects destinations outside the workspace root", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fromCwd = yield* makeTempDir;
+        const toCwd = yield* makeTempDir;
+        yield* writeTextFile(fromCwd, "secret.txt", "secret\n");
+
+        const error = yield* workspaceFileSystem
+          .copyEntry({
+            fromCwd,
+            fromRelativePath: "secret.txt",
+            toCwd,
+            toRelativePath: "../stolen.txt",
+          })
+          .pipe(Effect.flip);
+
+        expect(error.message).toContain(
+          "Workspace file path must be relative to the project root: ../stolen.txt",
+        );
+      }),
+    );
+  });
 });

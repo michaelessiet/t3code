@@ -994,6 +994,12 @@ export interface DesktopBridge {
   ) => Promise<T | null>;
   openExternal: (url: string) => Promise<boolean>;
   onMenuAction: (listener: (action: string) => void) => () => void;
+  /**
+   * Reports whether the in-app code editor is focused so the desktop shell can
+   * hand Cmd/Ctrl +/- to the editor (font zoom) instead of window zoom.
+   * Optional: absent on web builds and on desktop builds predating this method.
+   */
+  setCodeEditorFocused?: (focused: boolean) => void;
   getWindowFullscreenState: () => boolean;
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;

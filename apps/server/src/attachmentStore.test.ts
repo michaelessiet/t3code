@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  attachmentRelativePath,
   createAttachmentId,
   parseThreadSegmentFromAttachmentId,
   resolveAttachmentPathById,
@@ -58,6 +59,55 @@ describe("attachmentStore", () => {
         attachmentId,
       });
       expect(resolved).toBe(pngPath);
+    } finally {
+      NodeFS.rmSync(attachmentsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("derives file attachment extensions from the original filename", () => {
+    expect(
+      attachmentRelativePath({
+        type: "file",
+        id: "thread-1-a",
+        name: "notes.TS",
+        mimeType: "application/octet-stream",
+        sizeBytes: 10,
+      }),
+    ).toBe("thread-1-a.ts");
+    expect(
+      attachmentRelativePath({
+        type: "file",
+        id: "thread-1-b",
+        name: "report.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 10,
+      }),
+    ).toBe("thread-1-b.pdf");
+    expect(
+      attachmentRelativePath({
+        type: "file",
+        id: "thread-1-c",
+        name: "no-extension",
+        mimeType: "application/octet-stream",
+        sizeBytes: 10,
+      }),
+    ).toBe("thread-1-c.bin");
+  });
+
+  it("resolves file attachment paths by id for non-image extensions", () => {
+    const attachmentsDir = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3code-attachment-store-"),
+    );
+    try {
+      const attachmentId = "thread-1-file";
+      const tsPath = NodePath.join(attachmentsDir, `${attachmentId}.ts`);
+      NodeFS.writeFileSync(tsPath, Buffer.from("export const x = 1;"));
+
+      const resolved = resolveAttachmentPathById({
+        attachmentsDir,
+        attachmentId,
+      });
+      expect(resolved).toBe(tsPath);
     } finally {
       NodeFS.rmSync(attachmentsDir, { recursive: true, force: true });
     }

@@ -152,7 +152,18 @@ import { newDraftId, newMessageId, newThreadId } from "~/lib/utils";
 import { getProviderModelCapabilities, resolveSelectableProvider } from "../providerModels";
 import { useEnvironmentSettings } from "../hooks/useSettings";
 import { resolveAppModelSelectionForInstance } from "../modelSelection";
+import { isEditorFocused } from "../lib/editorFocus";
+import { isFileTreeFocused } from "../lib/fileTreeFocus";
+import { isPreviewFocused } from "../lib/previewFocus";
+import {
+  focusRightPanel,
+  focusRightPanelWhenReady,
+  isRightPanelFocused,
+} from "../lib/rightPanelFocus";
+import { requestEditorFocus } from "./files/editorFocusRequest";
 import { getTerminalFocusOwner } from "../lib/terminalFocus";
+import { subscribeAppCommand } from "./appCommandBus";
+import { dispatchFileTreeAction } from "./files/fileTreeActionBus";
 import { resolveNewDraftStartFromOrigin } from "../lib/chatThreadActions";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -160,7 +171,7 @@ import {
 } from "../logicalProject";
 import { buildDraftThreadRouteParams } from "../threadRoutes";
 import {
-  type ComposerImageAttachment,
+  type ComposerAttachment,
   type DraftThreadEnvMode,
   useComposerDraftStore,
   type DraftId,
@@ -252,7 +263,7 @@ import {
 import { useAssetUrls } from "../assets/assetUrls";
 
 const IMAGE_ONLY_BOOTSTRAP_PROMPT =
-  "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
+  "[User attached one or more files without additional text. Respond using the conversation context and the attached file(s).]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
@@ -1094,7 +1105,7 @@ function ChatViewContent(props: ChatViewProps) {
         : null,
   );
   const promptRef = useRef("");
-  const composerImagesRef = useRef<ComposerImageAttachment[]>([]);
+  const composerImagesRef = useRef<ComposerAttachment[]>([]);
   const composerTerminalContextsRef = useRef<TerminalContextDraft[]>([]);
   const composerElementContextsRef = useRef<ElementContextDraft[]>([]);
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
@@ -3543,6 +3554,12 @@ function ChatViewContent(props: ChatViewProps) {
     for (const removedMessage of removedMessages) {
       const previewUrls = collectUserMessageBlobPreviewUrls(removedMessage);
       if (previewUrls.length > 0) {
+        // Non-image blobs never join the preview handoff; release them now.
+        for (const attachment of removedMessage.attachments ?? []) {
+          if (attachment.type !== "image") {
+            revokeBlobPreviewUrl(attachment.previewUrl);
+          }
+        }
         handoffAttachmentPreviews(removedMessage.id, previewUrls);
         continue;
       }
@@ -3678,6 +3695,173 @@ function ChatViewContent(props: ChatViewProps) {
   }, [activeThreadKey, focusComposer, terminalUiState.terminalOpen]);
 
   useEffect(() => {
+    /**
+     * Execute a keybinding command. Shared by the keyboard dispatcher below
+     * and the app-command bus (command palette). Returns true when the
+     * command was claimed, so the keyboard path knows to preventDefault.
+     */
+    const runCommand = (command: KeybindingCommand): boolean => {
+      const terminalFocusOwner = getTerminalFocusOwner();
+
+      if (command === "terminal.toggle") {
+        toggleTerminalVisibility();
+        return true;
+      }
+
+      if (command === "rightPanel.toggle") {
+        const opening = !rightPanelState.isOpen;
+        const panelHadFocus = isRightPanelFocused();
+        toggleRightPanel();
+        if (opening) {
+          if (activeRightPanelSurface?.kind === "file") {
+            requestEditorFocus("panel-command");
+          }
+          // Retries until the animating/unhiding shell can take focus.
+          focusRightPanelWhenReady();
+        } else if (panelHadFocus) {
+          // Closing the panel while it held focus: hand focus back to the
+          // composer instead of stranding it on a detached element.
+          focusComposer();
+        }
+        return true;
+      }
+
+      if (command === "terminal.split" || command === "terminal.splitVertical") {
+        const direction = command === "terminal.splitVertical" ? "vertical" : undefined;
+        if (terminalFocusOwner === "right-panel") {
+          splitPanelTerminal(direction);
+          return true;
+        }
+        if (!terminalUiState.terminalOpen) {
+          setTerminalOpen(true);
+        }
+        splitTerminal(direction);
+        return true;
+      }
+
+      if (command === "terminal.close") {
+        if (terminalFocusOwner === "right-panel" && activeRightPanelSurface?.kind === "terminal") {
+          closePanelTerminal(activeRightPanelSurface.activeTerminalId);
+          return true;
+        }
+        if (!terminalUiState.terminalOpen) return true;
+        closeTerminal(terminalUiState.activeTerminalId);
+        return true;
+      }
+
+      if (command === "terminal.new") {
+        if (terminalFocusOwner === "right-panel") {
+          addTerminalSurface();
+          return true;
+        }
+        if (!terminalUiState.terminalOpen) {
+          setTerminalOpen(true);
+        }
+        createNewTerminal();
+        return true;
+      }
+
+      if (command === "diff.toggle") {
+        onToggleDiff();
+        return true;
+      }
+
+      if (command === "search.toggle") {
+        addSearchSurface();
+        return true;
+      }
+
+      if (command === "fileTree.toggleFocus") {
+        if (isFileTreeFocused()) {
+          focusComposer();
+          return true;
+        }
+        addFilesSurface();
+        // Double rAF: let the files surface mount before asking it to focus.
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => dispatchFileTreeAction("focus"));
+        });
+        return true;
+      }
+
+      if (command === "fileTree.search") {
+        addFilesSurface();
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => dispatchFileTreeAction("search"));
+        });
+        return true;
+      }
+
+      if (
+        command === "fileTree.newFile" ||
+        command === "fileTree.newDirectory" ||
+        command === "fileTree.rename"
+      ) {
+        const action =
+          command === "fileTree.newFile"
+            ? ("new-file" as const)
+            : command === "fileTree.newDirectory"
+              ? ("new-directory" as const)
+              : ("rename" as const);
+        if (isFileTreeFocused()) {
+          // The tree is mounted and focused (keyboard path); act in place.
+          dispatchFileTreeAction(action);
+          return true;
+        }
+        // Palette path: reveal the tree first, then act once it mounts.
+        addFilesSurface();
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => dispatchFileTreeAction(action));
+        });
+        return true;
+      }
+
+      if (command === "rightPanel.closeSurface") {
+        // Only claim mod+w while a right-panel surface is open; otherwise
+        // fall through to the platform default.
+        if (!activeRightPanelSurface) return false;
+        closeRightPanelSurface(activeRightPanelSurface);
+        return true;
+      }
+
+      if (command === "rightPanel.nextSurface" || command === "rightPanel.previousSurface") {
+        const surfaces = rightPanelState.surfaces;
+        if (surfaces.length === 0 || !activeRightPanelSurface) return false;
+        const currentIndex = surfaces.findIndex(
+          (surface) => surface.id === activeRightPanelSurface.id,
+        );
+        const delta = command === "rightPanel.nextSurface" ? 1 : -1;
+        const nextSurface = surfaces[(currentIndex + delta + surfaces.length) % surfaces.length];
+        if (nextSurface === undefined || nextSurface.id === activeRightPanelSurface.id) {
+          return true;
+        }
+        if (nextSurface.kind === "file") {
+          requestEditorFocus("panel-command");
+        }
+        activateRightPanelSurface(nextSurface);
+        // The outgoing surface unmounts with focus; park focus on the panel
+        // shell (double rAF: after the new surface commits) so repeated
+        // traversal keeps resolving with rightPanelFocus. File surfaces then
+        // pull focus into their editor via the armed request above.
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => focusRightPanel());
+        });
+        return true;
+      }
+
+      if (command === "modelPicker.toggle") {
+        composerRef.current?.toggleModelPicker();
+        return true;
+      }
+
+      const scriptId = projectScriptIdFromCommand(command);
+      if (!scriptId || !activeProject) return false;
+      const script = activeProject.scripts.find((entry) => entry.id === scriptId);
+      if (!script) return false;
+      void runProjectScript(script);
+      return true;
+    };
+
     const handler = (event: globalThis.KeyboardEvent) => {
       if (!activeThreadId || isCommandPaletteOpen()) {
         return;
@@ -3689,6 +3873,10 @@ function ChatViewContent(props: ChatViewProps) {
       const shortcutContext = {
         terminalFocus: terminalFocusOwner !== null,
         terminalOpen: Boolean(terminalUiState.terminalOpen),
+        previewFocus: isPreviewFocused(),
+        editorFocus: isEditorFocused(),
+        fileTreeFocus: isFileTreeFocused(),
+        rightPanelFocus: isRightPanelFocused(),
         modelPickerOpen: composerRef.current?.isModelPickerOpen() ?? false,
       };
 
@@ -3709,115 +3897,36 @@ function ChatViewContent(props: ChatViewProps) {
       });
       if (!command) return;
 
-      if (command === "terminal.toggle") {
+      if (runCommand(command)) {
         event.preventDefault();
         event.stopPropagation();
-        toggleTerminalVisibility();
-        return;
       }
-
-      if (command === "rightPanel.toggle") {
-        event.preventDefault();
-        event.stopPropagation();
-        toggleRightPanel();
-        return;
-      }
-
-      if (command === "terminal.split") {
-        event.preventDefault();
-        event.stopPropagation();
-        if (terminalFocusOwner === "right-panel") {
-          splitPanelTerminal();
-          return;
-        }
-        if (!terminalUiState.terminalOpen) {
-          setTerminalOpen(true);
-        }
-        splitTerminal();
-        return;
-      }
-
-      if (command === "terminal.splitVertical") {
-        event.preventDefault();
-        event.stopPropagation();
-        if (terminalFocusOwner === "right-panel") {
-          splitPanelTerminal("vertical");
-          return;
-        }
-        if (!terminalUiState.terminalOpen) {
-          setTerminalOpen(true);
-        }
-        splitTerminal("vertical");
-        return;
-      }
-
-      if (command === "terminal.close") {
-        event.preventDefault();
-        event.stopPropagation();
-        if (terminalFocusOwner === "right-panel" && activeRightPanelSurface?.kind === "terminal") {
-          closePanelTerminal(activeRightPanelSurface.activeTerminalId);
-          return;
-        }
-        if (!terminalUiState.terminalOpen) return;
-        closeTerminal(terminalUiState.activeTerminalId);
-        return;
-      }
-
-      if (command === "terminal.new") {
-        event.preventDefault();
-        event.stopPropagation();
-        if (terminalFocusOwner === "right-panel") {
-          addTerminalSurface();
-          return;
-        }
-        if (!terminalUiState.terminalOpen) {
-          setTerminalOpen(true);
-        }
-        createNewTerminal();
-        return;
-      }
-
-      if (command === "diff.toggle") {
-        event.preventDefault();
-        event.stopPropagation();
-        onToggleDiff();
-        return;
-      }
-
-      if (command === "search.toggle") {
-        event.preventDefault();
-        event.stopPropagation();
-        addSearchSurface();
-        return;
-      }
-
-      if (command === "modelPicker.toggle") {
-        event.preventDefault();
-        event.stopPropagation();
-        composerRef.current?.toggleModelPicker();
-        return;
-      }
-
-      const scriptId = projectScriptIdFromCommand(command);
-      if (!scriptId || !activeProject) return;
-      const script = activeProject.scripts.find((entry) => entry.id === scriptId);
-      if (!script) return;
-      event.preventDefault();
-      event.stopPropagation();
-      void runProjectScript(script);
     };
     window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
+    const unsubscribeAppCommands = subscribeAppCommand((command) => {
+      if (!activeThreadId) return;
+      runCommand(command);
+    });
+    return () => {
+      window.removeEventListener("keydown", handler, true);
+      unsubscribeAppCommands();
+    };
   }, [
+    activateRightPanelSurface,
     activeProject,
     activeRightPanelSurface,
+    addFilesSurface,
     addTerminalSurface,
+    rightPanelState.isOpen,
+    rightPanelState.surfaces,
     terminalUiState.terminalOpen,
     terminalUiState.activeTerminalId,
     activeThreadId,
     closeTerminal,
     closePanelTerminal,
+    closeRightPanelSurface,
     createNewTerminal,
+    focusComposer,
     setTerminalOpen,
     runProjectScript,
     splitTerminal,
@@ -4025,7 +4134,7 @@ function ChatViewContent(props: ChatViewProps) {
     });
     const turnAttachmentsPromise = Promise.all(
       composerImagesSnapshot.map(async (image) => ({
-        type: "image" as const,
+        type: image.type,
         name: image.name,
         mimeType: image.mimeType,
         sizeBytes: image.sizeBytes,
@@ -4033,7 +4142,7 @@ function ChatViewContent(props: ChatViewProps) {
       })),
     );
     const optimisticAttachments = composerImagesSnapshot.map((image) => ({
-      type: "image" as const,
+      type: image.type,
       id: image.id,
       name: image.name,
       mimeType: image.mimeType,
@@ -4095,7 +4204,7 @@ function ChatViewContent(props: ChatViewProps) {
     let titleSeed = trimmed;
     if (!titleSeed) {
       if (firstComposerImageName) {
-        titleSeed = `Image: ${firstComposerImageName}`;
+        titleSeed = `Attachment: ${firstComposerImageName}`;
       } else if (composerTerminalContextsSnapshot.length > 0) {
         titleSeed = formatTerminalContextLabel(composerTerminalContextsSnapshot[0]!);
       } else if (composerElementContextsSnapshot.length > 0) {

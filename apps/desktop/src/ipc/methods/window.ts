@@ -22,6 +22,7 @@ import * as ElectronMenu from "../../electron/ElectronMenu.ts";
 import * as ElectronShell from "../../electron/ElectronShell.ts";
 import * as ElectronTheme from "../../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
+import { WINDOW_ZOOM_MENU_ITEM_IDS } from "../../window/DesktopApplicationMenu.ts";
 import * as IpcChannels from "../channels.ts";
 import * as DesktopIpc from "../DesktopIpc.ts";
 import {
@@ -256,6 +257,21 @@ export const showContextMenu = DesktopIpc.makeIpcMethod({
       position: Option.fromNullishOr(input.position),
     });
     return Option.getOrNull(selectedItemId);
+  }),
+});
+
+export const setCodeEditorFocused = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.SET_CODE_EDITOR_FOCUS_CHANNEL,
+  payload: Schema.Boolean,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.window.setCodeEditorFocused")(function* (focused) {
+    const electronMenu = yield* ElectronMenu.ElectronMenu;
+    // Disable the window-zoom items while the editor is focused so Cmd/Ctrl
+    // +/-/0 fall through to the editor's font-size shortcuts; re-enable them
+    // on blur so window zoom works everywhere else.
+    for (const id of WINDOW_ZOOM_MENU_ITEM_IDS) {
+      yield* electronMenu.setMenuItemEnabled(id, !focused);
+    }
   }),
 });
 
