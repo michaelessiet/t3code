@@ -10,6 +10,8 @@ import {
   type PreviewAutomationOpenInput,
   type PreviewAutomationResizeInput,
   type PreviewAutomationResizeResult,
+  type PreviewAutomationSetColorSchemeInput,
+  type PreviewAutomationSetColorSchemeResult,
   type PreviewAutomationHost as PreviewAutomationHostState,
   type PreviewAutomationRequest,
   type PreviewAutomationStatus,
@@ -27,10 +29,10 @@ import {
   reconcilePreviewServerSessions,
   updatePreviewServerSnapshot,
 } from "~/previewStateStore";
-import { useRightPanelStore } from "~/rightPanelStore";
+import { usePreviewMiniPlayerStore } from "~/previewMiniPlayerStore";
 import { resolveBrowserNavigationTarget } from "~/browser/browserTargetResolver";
 import {
-  readActiveBrowserRecordingTabId,
+  readActiveBrowserRecordingTabIds,
   startBrowserRecording,
   stopBrowserRecording,
 } from "~/browser/browserRecording";
@@ -51,7 +53,10 @@ import {
   PreviewAutomationTargetUnavailableError,
   PreviewAutomationViewportTimeoutError,
 } from "./previewAutomationErrors";
-import { previewAutomationOpenNeedsOverlay } from "./previewAutomationOpenReadiness";
+import {
+  previewAutomationOpenNeedsOverlay,
+  shouldOpenPreviewMiniPlayer,
+} from "./previewAutomationOpenReadiness";
 import { createPreviewAutomationRequestConsumerAtom } from "./previewAutomationRequestConsumer";
 import { createPreviewAutomationClientId } from "./previewAutomationClientId";
 import {
@@ -317,7 +322,7 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
           if (result._tag === "Failure") {
             return raiseAtomCommandFailure(result);
           }
-          reconcilePreviewServerSessions(threadRef, result.value.sessions);
+          reconcilePreviewServerSessions(threadRef, result.value);
           state = readThreadPreviewState(threadRef);
         }
         tabId = request.tabId ?? state.snapshot?.tabId ?? null;
@@ -376,8 +381,8 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
               activeSnapshot = snapshot;
               tabId = activeTabId;
             }
-            if (input.show ?? true) {
-              useRightPanelStore.getState().openBrowser(threadRef, activeTabId);
+            if (shouldOpenPreviewMiniPlayer(input)) {
+              usePreviewMiniPlayerStore.getState().open(threadRef, activeTabId);
             }
             if (activeSnapshot && previewAutomationOpenNeedsOverlay(input, activeSnapshot)) {
               await waitForDesktopOverlay(
@@ -451,6 +456,15 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
               viewport,
             } satisfies PreviewAutomationResizeResult;
           }
+          case "setColorScheme": {
+            const ready = await requireReadyTab();
+            const input = request.input as PreviewAutomationSetColorSchemeInput;
+            await ready.bridge.setColorScheme(ready.tabId, input.colorScheme);
+            return {
+              tabId: ready.tabId,
+              colorScheme: input.colorScheme,
+            } satisfies PreviewAutomationSetColorSchemeResult;
+          }
           case "snapshot": {
             const ready = await requireReadyTab();
             return await ready.bridge.automation.snapshot(ready.tabId);
@@ -499,7 +513,7 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
           }
           case "recordingStart": {
             const ready = await requireReadyTab();
-            const startedAt = await startBrowserRecording(ready.tabId);
+            const startedAt = await startBrowserRecording(ready.tabId, threadRef);
             return {
               tabId: ready.tabId,
               recording: true,
@@ -507,11 +521,13 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
             };
           }
           case "recordingStop": {
-            const recordingTabId = readActiveBrowserRecordingTabId();
+            const activeTabIds = readActiveBrowserRecordingTabIds(threadRef);
             const stopTabId = resolveBrowserRecordingStopTarget(
-              recordingTabId,
+              activeTabIds,
+              tabId,
               request.tabIdExplicit ? request.tabId : undefined,
             );
+            tabId = stopTabId ?? tabId;
             const artifact = stopTabId ? await stopBrowserRecording(stopTabId) : null;
             if (!artifact) {
               return raisePreviewAutomationHostError(

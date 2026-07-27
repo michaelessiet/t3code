@@ -12,7 +12,7 @@ import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environ
 import { GitBranch, MessageSquare, SearchIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { isCommandPaletteOpen } from "../commandPaletteContext";
+import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { subscribeAppCommand } from "./appCommandBus";
 import { isEditorFocused } from "../lib/editorFocus";
 import { isFileTreeFocused } from "../lib/fileTreeFocus";
