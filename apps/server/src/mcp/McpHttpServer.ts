@@ -13,6 +13,8 @@ import packageJson from "../../package.json" with { type: "json" };
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import { GraphToolkitHandlersLive } from "./toolkits/graph/handlers.ts";
+import { GraphToolkit } from "./toolkits/graph/tools.ts";
 import {
   PreviewSnapshotToolkitHandlersLive,
   PreviewStandardToolkitHandlersLive,
@@ -208,10 +210,22 @@ export const PreviewToolkitRegistrationLive = Layer.mergeAll(
   PreviewSnapshotRegistrationLive,
 );
 
+/**
+ * Registered unconditionally, like the preview toolkit: `McpServer.toolkit`
+ * runs at layer construction, before any session exists, so there is nowhere to
+ * put a per-session decision. Gating happens inside the handlers.
+ */
+export const GraphToolkitRegistrationLive = McpServer.toolkit(GraphToolkit).pipe(
+  Layer.provide(GraphToolkitHandlersLive),
+);
+
 const McpTransportLive = McpServer.layerHttp({
   name: "T3 Code",
   version: packageJson.version,
   path: "/mcp",
 }).pipe(Layer.provide(McpAuthMiddlewareLive));
 
-export const layer = PreviewToolkitRegistrationLive.pipe(Layer.provideMerge(McpTransportLive));
+export const layer = Layer.mergeAll(
+  PreviewToolkitRegistrationLive,
+  GraphToolkitRegistrationLive,
+).pipe(Layer.provideMerge(McpTransportLive));

@@ -1,5 +1,6 @@
 import {
   type EnvironmentId,
+  GraphCapabilityUnavailableError,
   PreviewAutomationUnavailableError,
   type ProviderInstanceId,
   type ThreadId,
@@ -7,7 +8,7 @@ import {
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
-export type McpCapability = "preview";
+export type McpCapability = "preview" | "graph";
 
 export interface McpInvocationScope {
   readonly environmentId: EnvironmentId;
@@ -25,7 +26,7 @@ export class McpInvocationContext extends Context.Service<
 >()("t3/mcp/McpInvocationContext") {}
 
 export const requireMcpCapability = Effect.fn("mcp.requireCapability")(function* (
-  capability: McpCapability,
+  capability: "preview",
 ) {
   const invocation = yield* McpInvocationContext;
   if (!invocation.capabilities.has(capability)) {
@@ -36,6 +37,23 @@ export const requireMcpCapability = Effect.fn("mcp.requireCapability")(function*
       providerSessionId: invocation.providerSessionId,
       providerInstanceId: invocation.providerInstanceId,
     });
+  }
+  return invocation;
+});
+
+/**
+ * The same check for the graph toolkit, with its own error.
+ *
+ * It does not share `requireMcpCapability` because that one raises
+ * `PreviewAutomationUnavailableError`, whose tag is what
+ * `PreviewAutomationBroker` switches on and what preview clients already
+ * handle. Widening it to cover graph would send agents a preview-shaped
+ * failure for a graph call; duplicating one `if` is the cheaper trade.
+ */
+export const requireGraphCapability = Effect.fn("mcp.requireGraphCapability")(function* () {
+  const invocation = yield* McpInvocationContext;
+  if (!invocation.capabilities.has("graph")) {
+    return yield* new GraphCapabilityUnavailableError();
   }
   return invocation;
 });
