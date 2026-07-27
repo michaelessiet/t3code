@@ -2,7 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
-import { TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
+import { NonNegativeInt, TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
 import { DEFAULT_GIT_TEXT_GENERATION_MODEL, ProviderOptionSelections } from "./model.ts";
 import { ModelSelection } from "./orchestration.ts";
 import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
@@ -495,6 +495,36 @@ export const ObservabilitySettings = Schema.Struct({
 });
 export type ObservabilitySettings = typeof ObservabilitySettings.Type;
 
+/**
+ * Knowledge graph (graphify) settings.
+ *
+ * Off by default and gated on `enabled`: graphify is an external Python tool
+ * that T3 Code does not ship, so nothing about the feature may cost anything
+ * — bundle size, subprocesses, disk — for users who never turn it on.
+ */
+export const DEFAULT_GRAPH_RETENTION_DAYS = 60;
+export const DEFAULT_GRAPH_MAX_STORE_MEGABYTES = 2048;
+
+export const KnowledgeGraphSettings = Schema.Struct({
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /** Empty means auto-detect. An explicit `graphify` binary path wins. */
+  graphifyPath: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /** Rebuild structurally when the workspace watcher sees code change. */
+  autoRebuild: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * Drop a stored graph this many days after it was last *opened* — not last
+   * built, so a graph in weekly use never expires. 0 disables age eviction.
+   */
+  retentionDays: NonNegativeInt.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_GRAPH_RETENTION_DAYS)),
+  ),
+  /** Size budget for the whole store; 0 disables size eviction. */
+  maxStoreMegabytes: NonNegativeInt.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_GRAPH_MAX_STORE_MEGABYTES)),
+  ),
+});
+export type KnowledgeGraphSettings = typeof KnowledgeGraphSettings.Type;
+
 export const DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL = Duration.seconds(30);
 
 // The Claude Agent SDK validates `autoCompactWindow` with
@@ -567,6 +597,7 @@ export const ServerSettings = Schema.Struct({
   languageServers: Schema.Array(CustomLanguageServer)
     .check(validateLanguageServers)
     .pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  knowledgeGraph: KnowledgeGraphSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
 export type ServerSettings = typeof ServerSettings.Type;
 
@@ -693,6 +724,15 @@ export const ServerSettingsPatch = Schema.Struct({
   // Whole-array replacement, matching providerInstances: the UI sends the
   // fully-formed list every time it edits this field.
   languageServers: Schema.optionalKey(Schema.Array(CustomLanguageServer)),
+  knowledgeGraph: Schema.optionalKey(
+    Schema.Struct({
+      enabled: Schema.optionalKey(Schema.Boolean),
+      graphifyPath: Schema.optionalKey(TrimmedString),
+      autoRebuild: Schema.optionalKey(Schema.Boolean),
+      retentionDays: Schema.optionalKey(NonNegativeInt),
+      maxStoreMegabytes: Schema.optionalKey(NonNegativeInt),
+    }),
+  ),
 });
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 

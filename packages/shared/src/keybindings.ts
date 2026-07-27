@@ -32,6 +32,10 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod+w", command: "terminal.close", when: "terminalFocus" },
   { key: "mod+w", command: "rightPanel.closeSurface", when: "!terminalFocus" },
   { key: "mod+d", command: "diff.toggle", when: "!terminalFocus" },
+  // The knowledge graph is off by default, so this binding does nothing until
+  // the feature is enabled. Shipping it unconditionally keeps the default
+  // keymap identical for everyone rather than mutating under a setting.
+  { key: "mod+shift+g", command: "graph.toggle", when: "!terminalFocus" },
   { key: "mod+shift+f", command: "quickSearch.content", when: "!terminalFocus" },
   { key: "mod+p", command: "quickSearch.open", when: "!terminalFocus" },
   { key: "mod+shift+j", command: "preview.toggle" },
