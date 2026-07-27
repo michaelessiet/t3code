@@ -98,6 +98,14 @@ import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolve
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as LspManager from "./lsp/LspManager.ts";
+import * as GraphBuildWorker from "./graph/GraphBuildWorker.ts";
+import * as GraphService from "./graph/GraphService.ts";
+import * as GraphStore from "./graph/GraphStore.ts";
+import * as GraphWorkspaceResolver from "./graph/GraphWorkspaceResolver.ts";
+import * as GraphifyCli from "./graph/GraphifyCli.ts";
+import * as GraphifyRuntime from "./graph/GraphifyRuntime.ts";
+import * as WorkspaceGraph from "./graph/WorkspaceGraph.ts";
+import * as ProcessRunner from "./processRunner.ts";
 import * as WorkspaceContentSearch from "./workspace/WorkspaceContentSearch.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import * as WorkspaceWatcher from "./workspace/WorkspaceWatcher.ts";
@@ -351,6 +359,7 @@ const buildAppUnderTest = (options?: {
       CloudManagedEndpointRuntime.CloudManagedEndpointRuntime["Service"]
     >;
     relayClient?: Partial<RelayClient.RelayClient["Service"]>;
+    processRunner?: Partial<ProcessRunner.ProcessRunner["Service"]>;
     cloudCliTokenManager?: Partial<CloudCliTokenManager.CloudCliTokenManager["Service"]>;
   };
 }) =>
@@ -502,6 +511,20 @@ const buildAppUnderTest = (options?: {
       streamChanges: Stream.empty,
       ...options?.layers?.serverSettings,
     });
+    // Nothing in the socket tests should shell out. Overridable so a graph
+    // test can hand back canned `--version` output instead.
+    const stubProcessRunnerLayer = Layer.mock(ProcessRunner.ProcessRunner)({
+      run: () =>
+        Effect.succeed({
+          stdout: "",
+          stderr: "",
+          code: ChildProcessSpawner.ExitCode(127),
+          timedOut: false,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        }),
+      ...options?.layers?.processRunner,
+    });
     const workspaceAndProjectServicesLayer = Layer.mergeAll(
       WorkspacePaths.layer,
       workspaceEntriesLayer,
@@ -516,6 +539,12 @@ const buildAppUnderTest = (options?: {
         Layer.provide(serverSettingsLayer),
       ),
       ProjectFaviconResolver.layer.pipe(Layer.provide(WorkspacePaths.layer)),
+      // Real service, stub subprocess: detection probes resolve against the
+      // injected ProcessRunner, so no test ever needs Python on the machine.
+      GraphifyRuntime.layer.pipe(
+        Layer.provide(stubProcessRunnerLayer),
+        Layer.provide(serverSettingsLayer),
+      ),
     );
     const gitWorkflowLayer = GitWorkflowService.layer.pipe(
       Layer.provideMerge(vcsDriverRegistryLayer),
@@ -539,19 +568,40 @@ const buildAppUnderTest = (options?: {
         })
       : VcsStatusBroadcaster.layer.pipe(Layer.provide(gitWorkflowLayer));
 
+    // The real graph stack over the stub subprocess runner, so the settings
+    // gate can be exercised end-to-end without graphify on the machine. Its
+    // remaining dependencies — GraphifyRuntime, ProjectionSnapshotQuery,
+    // GitVcsDriver, ServerSettingsService — are satisfied further down this
+    // chain, which is why it is provided first.
+    const graphLayer = GraphService.layer.pipe(
+      Layer.provideMerge(Layer.mergeAll(GraphBuildWorker.layer, GraphWorkspaceResolver.layer)),
+      Layer.provideMerge(
+        Layer.mergeAll(
+          GraphStore.layer,
+          WorkspaceGraph.layer,
+          GraphifyCli.layer.pipe(Layer.provide(stubProcessRunnerLayer)),
+        ),
+      ),
+    );
+
     const servedRoutesLayer = HttpRouter.serve(makeRoutesLayer, {
       disableListenLog: true,
       disableLogger: true,
     }).pipe(
+      // Merged with the keybindings mock rather than given its own entry:
+      // `.pipe()` tops out at twenty arguments and this chain is at the limit.
       Layer.provide(
-        Layer.mock(Keybindings.Keybindings)({
-          loadConfigState: Effect.succeed({
-            keybindings: [],
-            issues: [],
+        Layer.mergeAll(
+          graphLayer,
+          Layer.mock(Keybindings.Keybindings)({
+            loadConfigState: Effect.succeed({
+              keybindings: [],
+              issues: [],
+            }),
+            streamChanges: Stream.empty,
+            ...options?.layers?.keybindings,
           }),
-          streamChanges: Stream.empty,
-          ...options?.layers?.keybindings,
-        }),
+        ),
       ),
       Layer.provide(
         Layer.mock(ProviderRegistry.ProviderRegistry)({
@@ -1991,6 +2041,179 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           { type: "complete", status: installedRelayClient },
         ]);
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("reports the knowledge graph runtime as disabled without probing for it", () =>
+    Effect.gen(function* () {
+      // A disabled feature must not spawn subprocesses. The stub runner counts
+      // every call, so an accidental probe fails the test rather than merely
+      // returning the right string.
+      let runCalls = 0;
+      yield* buildAppUnderTest({
+        layers: {
+          processRunner: {
+            run: () => {
+              runCalls += 1;
+              return Effect.succeed({
+                stdout: "graphify 0.9.27",
+                stderr: "",
+                code: ChildProcessSpawner.ExitCode(0),
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              });
+            },
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const status = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.graphRuntimeStatus]({})),
+      );
+
+      assert.equal(status.state, "disabled");
+      assert.equal(status.version, null);
+      assert.equal(runCalls, 0);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("resolves the knowledge graph runtime from PATH once the feature is enabled", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({
+        layers: {
+          serverSettings: {
+            getSettings: Effect.succeed({
+              ...DEFAULT_SERVER_SETTINGS,
+              knowledgeGraph: { ...DEFAULT_SERVER_SETTINGS.knowledgeGraph, enabled: true },
+            }),
+          },
+          processRunner: {
+            run: (input) =>
+              Effect.succeed(
+                input.command === "graphify"
+                  ? {
+                      stdout: "graphify 0.9.27",
+                      stderr: "",
+                      code: ChildProcessSpawner.ExitCode(0),
+                      timedOut: false,
+                      stdoutTruncated: false,
+                      stderrTruncated: false,
+                    }
+                  : {
+                      stdout: "",
+                      stderr: "",
+                      code: ChildProcessSpawner.ExitCode(127),
+                      timedOut: false,
+                      stdoutTruncated: false,
+                      stderrTruncated: false,
+                    },
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const status = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.graphRuntimeStatus]({})),
+      );
+
+      assert.equal(status.state, "ready");
+      assert.equal(status.source, "system");
+      assert.equal(status.version, "0.9.27");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  // The settings gate is the server's, not the UI's. A stale client, an MCP
+  // tool, or anything else that reaches the socket must be refused too — which
+  // is exactly what hiding the panel cannot do.
+  it.effect("refuses every graph read while the feature is disabled", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const wsUrl = yield* getWsServerUrl("/ws");
+
+      const results = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.all([
+            Effect.result(client[WS_METHODS.graphStatus]({ cwd: "/tmp/not-a-project" })),
+            Effect.result(client[WS_METHODS.graphSnapshot]({ cwd: "/tmp/not-a-project" })),
+            Effect.result(
+              client[WS_METHODS.graphBuild]({
+                cwd: "/tmp/not-a-project",
+                mode: "structural",
+                force: false,
+              }),
+            ),
+            Effect.result(
+              client[WS_METHODS.graphSubgraph]({
+                cwd: "/tmp/not-a-project",
+                nodeId: null,
+                communityId: null,
+                depth: 1,
+                limit: 10,
+              }),
+            ),
+            Effect.result(
+              client[WS_METHODS.graphQuery]({
+                cwd: "/tmp/not-a-project",
+                question: "router",
+                limit: 10,
+              }),
+            ),
+            Effect.result(
+              client[WS_METHODS.graphExplain]({ cwd: "/tmp/not-a-project", node: "router" }),
+            ),
+            Effect.result(
+              client[WS_METHODS.graphPath]({
+                cwd: "/tmp/not-a-project",
+                from: "router",
+                to: "store",
+              }),
+            ),
+          ]),
+        ),
+      );
+
+      for (const result of results) {
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") {
+          assert.equal(result.failure._tag, "GraphDisabledError");
+        }
+      }
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  // Enabled but pointed at a directory no project owns: the honest answer is
+  // "this is not a T3 project", not an empty graph the panel would render as
+  // real.
+  it.effect("reports an unknown workspace rather than inventing a store key", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({
+        layers: {
+          serverSettings: {
+            getSettings: Effect.succeed({
+              ...DEFAULT_SERVER_SETTINGS,
+              knowledgeGraph: { ...DEFAULT_SERVER_SETTINGS.knowledgeGraph, enabled: true },
+            }),
+          },
+          projectionSnapshotQuery: {
+            getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.result(client[WS_METHODS.graphStatus]({ cwd: "/tmp/not-a-project" })),
+        ),
+      );
+
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.equal(result.failure._tag, "GraphWorkspaceUnknownError");
+      }
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("requires relay write scope to update agent activity publication", () =>

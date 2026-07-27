@@ -23,6 +23,8 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
 import * as ServerConfig from "./config.ts";
+import * as GraphAutoRebuild from "./graph/GraphAutoRebuild.ts";
+import * as GraphStoreSweep from "./graph/GraphStoreSweep.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
@@ -293,6 +295,8 @@ export const make = Effect.gen(function* () {
   const keybindings = yield* Keybindings.Keybindings;
   const orchestrationReactor = yield* OrchestrationReactor.OrchestrationReactor;
   const providerSessionReaper = yield* ProviderSessionReaper.ProviderSessionReaper;
+  const graphStoreSweep = yield* GraphStoreSweep.GraphStoreSweep;
+  const graphAutoRebuild = yield* GraphAutoRebuild.GraphAutoRebuild;
   const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
@@ -343,6 +347,12 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
         yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
+        // Runs even with the feature off: the store may still hold entries
+        // from before it was switched off, and those should still expire.
+        yield* graphStoreSweep.start().pipe(Scope.provide(reactorScope));
+        // Also unconditional, but for the opposite reason: its first act is to
+        // read the setting, and with auto-rebuild off it subscribes to nothing.
+        yield* graphAutoRebuild.start().pipe(Scope.provide(reactorScope));
       }),
     );
 

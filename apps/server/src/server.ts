@@ -40,6 +40,15 @@ import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as ProcessRunner from "./processRunner.ts";
+import * as GraphAutoRebuild from "./graph/GraphAutoRebuild.ts";
+import * as GraphBuildWorker from "./graph/GraphBuildWorker.ts";
+import * as GraphService from "./graph/GraphService.ts";
+import * as GraphStore from "./graph/GraphStore.ts";
+import * as GraphStoreSweep from "./graph/GraphStoreSweep.ts";
+import * as GraphWorkspaceResolver from "./graph/GraphWorkspaceResolver.ts";
+import * as GraphifyCli from "./graph/GraphifyCli.ts";
+import * as GraphifyRuntime from "./graph/GraphifyRuntime.ts";
+import * as WorkspaceGraph from "./graph/WorkspaceGraph.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
@@ -272,6 +281,40 @@ const WorkspaceContentSearchLayerLive = WorkspaceContentSearch.layer.pipe(
 
 const LspManagerLayerLive = LspManager.layer.pipe(Layer.provide(WorkspacePaths.layer));
 
+const GraphifyRuntimeLayerLive = GraphifyRuntime.layer.pipe(Layer.provide(ProcessRunner.layer));
+
+/**
+ * The knowledge-graph stack, in dependency order: the store owns the directory,
+ * the CLI and parsed-graph cache sit on top of it, the worker and resolver on
+ * top of those, and `GraphService` — what the RPCs call — on top of everything.
+ * `GraphStoreSweep` and `GraphAutoRebuild` sit beside `GraphService`: they read
+ * the same store but nothing reads them, so they are merged in rather than
+ * depended upon.
+ *
+ * `GraphifyRuntime`, `ProjectionSnapshotQuery`, `GitVcsDriver`,
+ * `WorkspaceWatcher` and `ServerSettingsService` are deliberately left
+ * unprovided so this composes against the single shared instance of each in the
+ * runtime chain rather than standing up a second one.
+ *
+ * Constructing these layers is cheap and does no I/O: nothing here reads a
+ * directory or spawns a process until an RPC arrives and passes the settings
+ * gate, which is what keeps a disabled feature actually free.
+ */
+const GraphLayerLive = Layer.mergeAll(
+  GraphService.layer,
+  GraphStoreSweep.layer,
+  GraphAutoRebuild.layer,
+).pipe(
+  Layer.provideMerge(Layer.mergeAll(GraphBuildWorker.layer, GraphWorkspaceResolver.layer)),
+  Layer.provideMerge(
+    Layer.mergeAll(
+      GraphStore.layer,
+      WorkspaceGraph.layer,
+      GraphifyCli.layer.pipe(Layer.provide(ProcessRunner.layer)),
+    ),
+  ),
+);
+
 const WorkspaceLayerLive = Layer.mergeAll(
   WorkspacePaths.layer,
   WorkspaceEntriesLayerLive,
@@ -305,7 +348,12 @@ const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
 
 const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // Core Services
-  Layer.provideMerge(CheckpointingLayerLive),
+  // Merged with the checkpointing layer rather than given its own entry
+  // because `.pipe()` tops out at twenty arguments and this chain is at the
+  // limit. Position matters more than grouping: the graph stack consumes
+  // `ProjectionSnapshotQuery`, `GitVcsDriver` and `ServerSettingsService`,
+  // all of which appear later in this chain and therefore provide to it.
+  Layer.provideMerge(Layer.mergeAll(CheckpointingLayerLive, GraphLayerLive)),
   Layer.provideMerge(SourceControlProviderRegistryLayerLive),
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
@@ -334,7 +382,11 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(OpenCodeRuntime.OpenCodeRuntimeLive),
   // WorkspaceLayerLive precedes ServerSettings so the single shared settings
   // instance (below) satisfies LspManager's ServerSettingsService dependency.
-  Layer.provideMerge(WorkspaceLayerLive),
+  // GraphifyRuntime rides along for the same reason: it reads
+  // `knowledgeGraph.enabled` before it probes for a toolchain. Merged here
+  // rather than given its own `provideMerge` because `.pipe()` tops out at
+  // twenty arguments and this chain is already there.
+  Layer.provideMerge(Layer.mergeAll(WorkspaceLayerLive, GraphifyRuntimeLayerLive)),
   Layer.provideMerge(ServerSettings.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(ProjectFaviconResolverLayerLive),
   Layer.provideMerge(RepositoryIdentityResolver.layer),
