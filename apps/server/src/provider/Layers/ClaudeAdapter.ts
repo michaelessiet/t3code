@@ -55,6 +55,7 @@ import {
   resolvePromptInjectedEffort,
 } from "@t3tools/shared/model";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -76,6 +77,8 @@ import {
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import * as GraphAvailability from "../../graph/GraphAvailability.ts";
+import { knowledgeGraphNote } from "../KnowledgeGraphInstructions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import {
@@ -1399,6 +1402,28 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const serverConfig = yield* ServerConfig;
   const serverSettingsService = yield* ServerSettingsService;
   const crypto = yield* Crypto.Crypto;
+
+  /**
+   * The knowledge-graph note for a workspace, or null when there is nothing to
+   * say.
+   *
+   * Null covers every uninteresting case — feature off, no `cwd`, no graph for
+   * this checkout — and also every failure, because an optional line of prompt
+   * must never be able to take a session down. Same posture as the auto-compact
+   * read further down: degrade to the default and carry on.
+   */
+  const knowledgeGraphNoteFor = (cwd: string | undefined) =>
+    Effect.gen(function* () {
+      if (cwd === undefined || cwd.trim() === "") return null;
+      // Read before the map so a user who has switched the feature off stops
+      // seeing the note without having to evict the graph they already built.
+      const currentSettings = yield* serverSettingsService.getSettings;
+      if (!currentSettings.knowledgeGraph.enabled) return null;
+      const available = GraphAvailability.readGraphAvailability(cwd);
+      if (available === undefined || available.nodeCount === 0) return null;
+      const now = yield* Clock.currentTimeMillis;
+      return knowledgeGraphNote({ ...available, now });
+    }).pipe(Effect.orElseSucceed(() => null));
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, options?.environment).pipe(
     Effect.provideService(Path.Path, path),
   );
@@ -3512,11 +3537,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(autoCompact.enabled ? { autoCompactWindow: autoCompact.window } : {}),
       };
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+      // Null unless a graph has actually been built for this checkout, so the
+      // overwhelmingly common case appends nothing and costs nothing.
+      const graphNote = yield* knowledgeGraphNoteFor(input.cwd);
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
         pathToClaudeCodeExecutable: claudeBinaryPath,
-        systemPrompt: { type: "preset", preset: "claude_code" },
+        systemPrompt: {
+          type: "preset",
+          preset: "claude_code",
+          ...(graphNote === null ? {} : { append: graphNote }),
+        },
         settingSources: [...CLAUDE_SETTING_SOURCES],
         // `ultracode` is a Claude Code setting, not an API effort level. It is
         // normalized to `xhigh` above and paired with `settings.ultracode`.
