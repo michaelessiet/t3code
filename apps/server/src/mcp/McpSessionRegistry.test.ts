@@ -1,10 +1,18 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
+  ProviderInstanceId,
+  type ServerSettings,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import { HttpServer } from "effect/unstable/http";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 
 const environmentId = EnvironmentId.make("environment-1");
@@ -19,7 +27,24 @@ const fakeEnvironment = ServerEnvironment.ServerEnvironment.of({
   getDescriptor: Effect.die("unused"),
 });
 
-const makeRegistry = (now: () => number, httpServer = fakeHttpServer) =>
+const settingsLayer = (knowledgeGraphEnabled: boolean) =>
+  Layer.mock(ServerSettingsService)({
+    getSettings: Effect.sync(
+      (): ServerSettings => ({
+        ...DEFAULT_SERVER_SETTINGS,
+        knowledgeGraph: {
+          ...DEFAULT_SERVER_SETTINGS.knowledgeGraph,
+          enabled: knowledgeGraphEnabled,
+        },
+      }),
+    ),
+  });
+
+const makeRegistry = (
+  now: () => number,
+  httpServer = fakeHttpServer,
+  knowledgeGraphEnabled = false,
+) =>
   McpSessionRegistry.__testing
     .make({
       now,
@@ -29,7 +54,7 @@ const makeRegistry = (now: () => number, httpServer = fakeHttpServer) =>
     .pipe(
       Effect.provideService(HttpServer.HttpServer, httpServer),
       Effect.provideService(ServerEnvironment.ServerEnvironment, fakeEnvironment),
-      Effect.provide(NodeServices.layer),
+      Effect.provide(Layer.mergeAll(settingsLayer(knowledgeGraphEnabled), NodeServices.layer)),
     );
 
 it.effect("stores only a token hash, resolves the bearer token, and revokes by thread", () =>
@@ -72,6 +97,29 @@ it.effect("builds MCP endpoints from the bound server host", () =>
       });
       expect(issued.config.endpoint).toBe(expectedEndpoint);
     }
+  }),
+);
+
+it.effect("grants the graph capability only when the knowledge graph is enabled", () =>
+  Effect.gen(function* () {
+    const off = yield* makeRegistry(() => 1_000);
+    const withoutGraph = yield* off.issue({
+      threadId: ThreadId.make("thread-graph-off"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    });
+    const offToken = withoutGraph.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    expect((yield* off.resolve(offToken))?.capabilities.has("graph")).toBe(false);
+
+    const on = yield* makeRegistry(() => 1_000, fakeHttpServer, true);
+    const withGraph = yield* on.issue({
+      threadId: ThreadId.make("thread-graph-on"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    });
+    const onToken = withGraph.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const scope = yield* on.resolve(onToken);
+    expect(scope?.capabilities.has("graph")).toBe(true);
+    // The preview grant is unconditional and must not have been displaced.
+    expect(scope?.capabilities.has("preview")).toBe(true);
   }),
 );
 

@@ -7,6 +7,7 @@ import {
   GitBranchIcon,
   KeyboardIcon,
   Link2Icon,
+  NetworkIcon,
   Settings2Icon,
 } from "lucide-react";
 import { useCanGoBack, useNavigate } from "@tanstack/react-router";
@@ -28,6 +29,7 @@ export type SettingsSectionPath =
   | "/settings/keybindings"
   | "/settings/providers"
   | "/settings/language-servers"
+  | "/settings/knowledge-graph"
   | "/settings/source-control"
   | "/settings/connections"
   | "/settings/archived";
@@ -41,6 +43,7 @@ export const SETTINGS_NAV_ITEMS: ReadonlyArray<{
   { label: "Keybindings", to: "/settings/keybindings", icon: KeyboardIcon },
   { label: "Providers", to: "/settings/providers", icon: BotIcon },
   { label: "Language Servers", to: "/settings/language-servers", icon: BracesIcon },
+  { label: "Knowledge Graph", to: "/settings/knowledge-graph", icon: NetworkIcon },
   { label: "Source Control", to: "/settings/source-control", icon: GitBranchIcon },
   { label: "Connections", to: "/settings/connections", icon: Link2Icon },
   { label: "Archive", to: "/settings/archived", icon: ArchiveIcon },

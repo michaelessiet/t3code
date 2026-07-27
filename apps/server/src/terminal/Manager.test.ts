@@ -1334,6 +1334,91 @@ it.layer(
     }),
   );
 
+  it.effect("defaults LANG to a UTF-8 locale when the host env lacks one", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        env: { PATH: "/usr/bin" },
+      });
+      yield* manager.open(openInput());
+      const spawnInput = ptyAdapter.spawnInputs[0];
+      expect(spawnInput).toBeDefined();
+      if (!spawnInput) return;
+
+      expect(spawnInput.env.LANG).toMatch(/\.UTF-8$/);
+    }).pipe(Effect.provide(withHostPlatform("darwin"))),
+  );
+
+  it.effect("upgrades a non-UTF-8 LANG while keeping its language and region", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        env: { LANG: "en_GB.ISO8859-1" },
+      });
+      yield* manager.open(openInput());
+      const spawnInput = ptyAdapter.spawnInputs[0];
+      expect(spawnInput).toBeDefined();
+      if (!spawnInput) return;
+
+      expect(spawnInput.env.LANG).toBe("en_GB.UTF-8");
+    }).pipe(Effect.provide(withHostPlatform("darwin"))),
+  );
+
+  it.effect("keeps an existing UTF-8 locale untouched", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        env: { LANG: "fr_FR.UTF-8" },
+      });
+      yield* manager.open(openInput());
+      const spawnInput = ptyAdapter.spawnInputs[0];
+      expect(spawnInput).toBeDefined();
+      if (!spawnInput) return;
+
+      expect(spawnInput.env.LANG).toBe("fr_FR.UTF-8");
+    }).pipe(Effect.provide(withHostPlatform("darwin"))),
+  );
+
+  it.effect("does not fight a deliberate non-UTF-8 LC_ALL", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        env: { LC_ALL: "C" },
+      });
+      yield* manager.open(openInput());
+      const spawnInput = ptyAdapter.spawnInputs[0];
+      expect(spawnInput).toBeDefined();
+      if (!spawnInput) return;
+
+      expect(spawnInput.env.LANG).toBeUndefined();
+      expect(spawnInput.env.LC_ALL).toBe("C");
+    }).pipe(Effect.provide(withHostPlatform("darwin"))),
+  );
+
+  it.effect("lets runtime env overrides win over the locale fallback", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        env: { PATH: "/usr/bin" },
+      });
+      yield* manager.open(openInput({ env: { LANG: "C" } }));
+      const spawnInput = ptyAdapter.spawnInputs[0];
+      expect(spawnInput).toBeDefined();
+      if (!spawnInput) return;
+
+      expect(spawnInput.env.LANG).toBe("C");
+    }).pipe(Effect.provide(withHostPlatform("darwin"))),
+  );
+
+  it.effect("does not inject LANG on Windows", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        env: { SystemRoot: "C:\\Windows" },
+      });
+      yield* manager.open(openInput());
+      const spawnInput = ptyAdapter.spawnInputs[0];
+      expect(spawnInput).toBeDefined();
+      if (!spawnInput) return;
+
+      expect(spawnInput.env.LANG).toBeUndefined();
+    }).pipe(Effect.provide(withHostPlatform("win32"))),
+  );
+
   it.effect("injects runtime env overrides into spawned terminals", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();

@@ -177,6 +177,31 @@ import {
   LspDiagnosticsStreamEvent,
   LspWorkspaceEditResult,
 } from "./lsp.ts";
+import {
+  GraphBuildInput,
+  GraphBuildStatus,
+  GraphCommandFailedError,
+  GraphDisabledError,
+  GraphExplanation,
+  GraphInstallEvent,
+  GraphInstallRuntimeInput,
+  GraphNodeNotFoundError,
+  GraphNodeQueryInput,
+  GraphNotBuiltError,
+  GraphPathInput,
+  GraphPathResult,
+  GraphQueryInput,
+  GraphRuntimeStatus,
+  GraphRuntimeUnavailableError,
+  GraphSearchResult,
+  GraphSnapshot,
+  GraphStatus,
+  GraphStorePathError,
+  GraphSubgraph,
+  GraphSubgraphInput,
+  GraphWorkspaceInput,
+  GraphWorkspaceUnknownError,
+} from "./graph.ts";
 import { VcsError } from "./vcs.ts";
 
 export const WS_METHODS = {
@@ -269,6 +294,17 @@ export const WS_METHODS = {
   // Cloud environment methods
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
   cloudInstallRelayClient: "cloud.installRelayClient",
+
+  // Knowledge graph methods
+  graphRuntimeStatus: "graph.runtimeStatus",
+  graphInstallRuntime: "graph.installRuntime",
+  graphStatus: "graph.status",
+  graphBuild: "graph.build",
+  graphSnapshot: "graph.snapshot",
+  graphSubgraph: "graph.subgraph",
+  graphQuery: "graph.query",
+  graphExplain: "graph.explain",
+  graphPath: "graph.path",
 
   // Source control methods
   sourceControlLookupRepository: "sourceControl.lookupRepository",
@@ -382,6 +418,111 @@ export const WsCloudInstallRelayClientRpc = Rpc.make(WS_METHODS.cloudInstallRela
   success: RelayClientInstallProgressEventSchema,
   error: Schema.Union([RelayClientInstallFailedError, EnvironmentAuthorizationError]),
   stream: true,
+});
+
+/**
+ * Runtime probe for the settings page. Returns a `disabled` status rather than
+ * failing when the feature is off, so the page can render the enable toggle
+ * without special-casing an error.
+ */
+export const WsGraphRuntimeStatusRpc = Rpc.make(WS_METHODS.graphRuntimeStatus, {
+  payload: Schema.Struct({}),
+  success: GraphRuntimeStatus,
+  error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
+});
+
+/**
+ * Streams install stages: a `pip install` runs for minutes and a non-streaming
+ * call would show an unresolving spinner. Mirrors `cloud.installRelayClient`.
+ */
+export const WsGraphInstallRuntimeRpc = Rpc.make(WS_METHODS.graphInstallRuntime, {
+  payload: GraphInstallRuntimeInput,
+  success: GraphInstallEvent,
+  error: Schema.Union([
+    GraphDisabledError,
+    GraphRuntimeUnavailableError,
+    GraphCommandFailedError,
+    ServerSettingsError,
+    EnvironmentAuthorizationError,
+  ]),
+  stream: true,
+});
+
+/**
+ * Errors shared by every graph read.
+ *
+ * `GraphDisabledError` is the settings gate, enforced server-side rather than
+ * only by hiding the UI. `GraphWorkspaceUnknownError` means the `cwd` is not a
+ * registered project, which is distinct from `GraphNotBuiltError` — "we know
+ * where the graph would go, and it is not there yet".
+ */
+const GraphReadErrors = [
+  GraphDisabledError,
+  GraphWorkspaceUnknownError,
+  GraphStorePathError,
+  ServerSettingsError,
+  EnvironmentAuthorizationError,
+] as const;
+
+/**
+ * Everything the panel needs in one round trip: the runtime state, the current
+ * build, the branch the graph belongs to, and a community-level snapshot.
+ */
+export const WsGraphStatusRpc = Rpc.make(WS_METHODS.graphStatus, {
+  payload: GraphWorkspaceInput,
+  success: GraphStatus,
+  error: Schema.Union([...GraphReadErrors]),
+});
+
+/**
+ * Queues a build and returns immediately. A structural extraction of a large
+ * repository is minutes, so the caller polls `graph.status` rather than waiting
+ * on this call.
+ */
+export const WsGraphBuildRpc = Rpc.make(WS_METHODS.graphBuild, {
+  payload: GraphBuildInput,
+  success: GraphBuildStatus,
+  error: Schema.Union([...GraphReadErrors, GraphRuntimeUnavailableError, GraphCommandFailedError]),
+});
+
+export const WsGraphSnapshotRpc = Rpc.make(WS_METHODS.graphSnapshot, {
+  payload: GraphWorkspaceInput,
+  success: GraphSnapshot,
+  error: Schema.Union([...GraphReadErrors, GraphNotBuiltError]),
+});
+
+/**
+ * A bounded neighbourhood, for progressive expansion. The whole graph is never
+ * sent: a monorepo's is tens of megabytes.
+ */
+export const WsGraphSubgraphRpc = Rpc.make(WS_METHODS.graphSubgraph, {
+  payload: GraphSubgraphInput,
+  success: GraphSubgraph,
+  error: Schema.Union([...GraphReadErrors, GraphNotBuiltError]),
+});
+
+/**
+ * The three traversal reads, answered from the parsed graph rather than by
+ * shelling back out to graphify's own `query` / `explain` / `path` subcommands:
+ * those print prose for a terminal, and parsing an unpinned 0.x's output would
+ * make every release a decoding risk. Same answers, typed.
+ */
+export const WsGraphQueryRpc = Rpc.make(WS_METHODS.graphQuery, {
+  payload: GraphQueryInput,
+  success: GraphSearchResult,
+  error: Schema.Union([...GraphReadErrors, GraphNotBuiltError]),
+});
+
+export const WsGraphExplainRpc = Rpc.make(WS_METHODS.graphExplain, {
+  payload: GraphNodeQueryInput,
+  success: GraphExplanation,
+  error: Schema.Union([...GraphReadErrors, GraphNotBuiltError, GraphNodeNotFoundError]),
+});
+
+export const WsGraphPathRpc = Rpc.make(WS_METHODS.graphPath, {
+  payload: GraphPathInput,
+  success: GraphPathResult,
+  error: Schema.Union([...GraphReadErrors, GraphNotBuiltError, GraphNodeNotFoundError]),
 });
 
 export const WsSourceControlLookupRepositoryRpc = Rpc.make(
@@ -857,6 +998,15 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerSignalProcessRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,
+  WsGraphRuntimeStatusRpc,
+  WsGraphInstallRuntimeRpc,
+  WsGraphStatusRpc,
+  WsGraphBuildRpc,
+  WsGraphSnapshotRpc,
+  WsGraphSubgraphRpc,
+  WsGraphQueryRpc,
+  WsGraphExplainRpc,
+  WsGraphPathRpc,
   WsSourceControlLookupRepositoryRpc,
   WsSourceControlCloneRepositoryRpc,
   WsSourceControlPublishRepositoryRpc,

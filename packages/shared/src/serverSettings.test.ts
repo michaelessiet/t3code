@@ -161,6 +161,27 @@ describe("serverSettings helpers", () => {
     });
   });
 
+  it("deep-merges knowledgeGraph so a single-field patch keeps the rest", () => {
+    const current = {
+      ...DEFAULT_SERVER_SETTINGS,
+      knowledgeGraph: {
+        ...DEFAULT_SERVER_SETTINGS.knowledgeGraph,
+        graphifyPath: "/opt/graphify/bin/graphify",
+        retentionDays: 14,
+      },
+    };
+
+    expect(applyServerSettingsPatch(current, { knowledgeGraph: { enabled: true } })).toMatchObject({
+      knowledgeGraph: {
+        enabled: true,
+        graphifyPath: "/opt/graphify/bin/graphify",
+        autoRebuild: false,
+        retentionDays: 14,
+        maxStoreMegabytes: DEFAULT_SERVER_SETTINGS.knowledgeGraph.maxStoreMegabytes,
+      },
+    });
+  });
+
   it("replaces providerInstances maps so omitted instance fields are cleared", () => {
     const codexId = ProviderInstanceId.make("codex");
     const current = {

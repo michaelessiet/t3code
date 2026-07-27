@@ -60,6 +60,8 @@ const STATIC_KEYBINDING_COMMANDS = [
   "rightPanel.previousSurface",
   "diff.toggle",
   "search.toggle",
+  "graph.toggle",
+  "graph.build",
   "editor.showCompletions",
   "fileTree.toggleFocus",
   "fileTree.newFile",

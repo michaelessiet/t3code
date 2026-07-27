@@ -52,6 +52,11 @@ import {
   ProjectWriteFileError,
   RelayClientInstallFailedError,
   type RelayClientInstallProgressEvent,
+  type GraphCommandFailedError,
+  type GraphDisabledError,
+  type GraphInstallEvent,
+  type GraphRuntimeUnavailableError,
+  type ServerSettingsError,
   OrchestrationReplayEventsError,
   OrchestrationSearchMessagesError,
   type FilesystemBrowseFailure,
@@ -127,6 +132,8 @@ import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
+import { GraphifyRuntime } from "./graph/GraphifyRuntime.ts";
+import { GraphService } from "./graph/GraphService.ts";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -346,6 +353,15 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.serverSignalProcess, AuthOrchestrationOperateScope],
   [WS_METHODS.cloudGetRelayClientStatus, AuthRelayWriteScope],
   [WS_METHODS.cloudInstallRelayClient, AuthRelayWriteScope],
+  [WS_METHODS.graphRuntimeStatus, AuthOrchestrationReadScope],
+  [WS_METHODS.graphInstallRuntime, AuthOrchestrationOperateScope],
+  [WS_METHODS.graphStatus, AuthOrchestrationReadScope],
+  [WS_METHODS.graphSnapshot, AuthOrchestrationReadScope],
+  [WS_METHODS.graphSubgraph, AuthOrchestrationReadScope],
+  [WS_METHODS.graphQuery, AuthOrchestrationReadScope],
+  [WS_METHODS.graphExplain, AuthOrchestrationReadScope],
+  [WS_METHODS.graphPath, AuthOrchestrationReadScope],
+  [WS_METHODS.graphBuild, AuthOrchestrationOperateScope],
   [WS_METHODS.sourceControlLookupRepository, AuthOrchestrationReadScope],
   [WS_METHODS.sourceControlCloneRepository, AuthOrchestrationOperateScope],
   [WS_METHODS.sourceControlPublishRepository, AuthOrchestrationOperateScope],
@@ -505,6 +521,8 @@ const makeWsRpcLayer = (
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const relayClient = yield* RelayClient.RelayClient;
+      const graphifyRuntime = yield* GraphifyRuntime;
+      const graphService = yield* GraphService;
       const authorizationError = (requiredScope: AuthEnvironmentScope) =>
         new EnvironmentAuthorizationError({
           message: `The authenticated token is missing required scope: ${requiredScope}.`,
@@ -1475,6 +1493,61 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "cloud" },
           ),
+        [WS_METHODS.graphRuntimeStatus]: (_input) =>
+          observeRpcEffect(WS_METHODS.graphRuntimeStatus, graphifyRuntime.status, {
+            "rpc.aggregate": "graph",
+          }),
+        [WS_METHODS.graphInstallRuntime]: (_input) =>
+          observeRpcStream(
+            WS_METHODS.graphInstallRuntime,
+            Stream.callback<
+              GraphInstallEvent,
+              | GraphDisabledError
+              | GraphRuntimeUnavailableError
+              | GraphCommandFailedError
+              | ServerSettingsError
+            >((queue) =>
+              graphifyRuntime
+                .installWithProgress((event) => Queue.offer(queue, event).pipe(Effect.asVoid))
+                .pipe(
+                  // The runtime already emitted the `complete` event through
+                  // `report`; the return value is only used to end the stream.
+                  Effect.asVoid,
+                  Effect.catchCause((cause) => Queue.failCause(queue, cause)),
+                  Effect.andThen(Queue.end(queue)),
+                  Effect.forkScoped,
+                ),
+            ),
+            { "rpc.aggregate": "graph" },
+          ),
+        [WS_METHODS.graphStatus]: (input) =>
+          observeRpcEffect(WS_METHODS.graphStatus, graphService.status(input.cwd), {
+            "rpc.aggregate": "graph",
+          }),
+        [WS_METHODS.graphBuild]: (input) =>
+          observeRpcEffect(WS_METHODS.graphBuild, graphService.build(input), {
+            "rpc.aggregate": "graph",
+          }),
+        [WS_METHODS.graphSnapshot]: (input) =>
+          observeRpcEffect(WS_METHODS.graphSnapshot, graphService.snapshot(input.cwd), {
+            "rpc.aggregate": "graph",
+          }),
+        [WS_METHODS.graphSubgraph]: (input) =>
+          observeRpcEffect(WS_METHODS.graphSubgraph, graphService.subgraph(input), {
+            "rpc.aggregate": "graph",
+          }),
+        [WS_METHODS.graphQuery]: (input) =>
+          observeRpcEffect(WS_METHODS.graphQuery, graphService.search(input), {
+            "rpc.aggregate": "graph",
+          }),
+        [WS_METHODS.graphExplain]: (input) =>
+          observeRpcEffect(WS_METHODS.graphExplain, graphService.explain(input), {
+            "rpc.aggregate": "graph",
+          }),
+        [WS_METHODS.graphPath]: (input) =>
+          observeRpcEffect(WS_METHODS.graphPath, graphService.path(input), {
+            "rpc.aggregate": "graph",
+          }),
         [WS_METHODS.sourceControlLookupRepository]: (input) =>
           observeRpcEffect(
             WS_METHODS.sourceControlLookupRepository,

@@ -31,6 +31,10 @@ export interface ServerDerivedPaths {
   readonly keybindingsConfigPath: string;
   readonly settingsPath: string;
   readonly providerStatusCacheDir: string;
+  /** Root of the knowledge-graph store, keyed by project then branch. */
+  readonly graphStoreDir: string;
+  /** Managed venv for graphify, created only when the user asks to install. */
+  readonly graphRuntimeDir: string;
   readonly worktreesDir: string;
   readonly attachmentsDir: string;
   readonly logsDir: string;
@@ -105,6 +109,8 @@ export const deriveServerPaths = Effect.fn(function* (
     keybindingsConfigPath: join(stateDir, "keybindings.json"),
     settingsPath: join(stateDir, "settings.json"),
     providerStatusCacheDir,
+    graphStoreDir: join(providerStatusCacheDir, "graph"),
+    graphRuntimeDir: join(baseDir, "graph-runtime"),
     worktreesDir: join(baseDir, "worktrees"),
     attachmentsDir,
     logsDir,

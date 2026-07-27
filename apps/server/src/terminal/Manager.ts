@@ -1065,15 +1065,54 @@ function shouldExcludeTerminalEnvKey(key: string): boolean {
   return TERMINAL_ENV_BLOCKLIST.has(normalizedKey);
 }
 
+function isUtf8Locale(value: string | undefined): boolean {
+  return value !== undefined && /\.utf-?8($|@)/i.test(value);
+}
+
+const LOCALE_PREFIX_PATTERN = /^[A-Za-z]{2,3}_[A-Za-z]{2,}$/;
+
+function utf8LocaleFallback(currentLang: string | undefined): string {
+  const langPrefix = currentLang?.split(".")[0]?.split("@")[0];
+  if (langPrefix && LOCALE_PREFIX_PATTERN.test(langPrefix)) {
+    return `${langPrefix}.UTF-8`;
+  }
+  const detected = new Intl.DateTimeFormat().resolvedOptions().locale.replaceAll("-", "_");
+  if (LOCALE_PREFIX_PATTERN.test(detected)) {
+    return `${detected}.UTF-8`;
+  }
+  return "en_US.UTF-8";
+}
+
+// GUI-launched apps on macOS (and some Linux sessions) inherit no locale, so
+// tools that derive their encoding from it (Ruby/CocoaPods, Python, git) fall
+// back to ASCII and choke on non-ASCII input. Standalone terminal emulators
+// export a UTF-8 LANG themselves; do the same for our embedded terminal.
+function ensureUtf8Locale(spawnEnv: NodeJS.ProcessEnv): void {
+  if (
+    isUtf8Locale(spawnEnv.LC_ALL) ||
+    isUtf8Locale(spawnEnv.LC_CTYPE) ||
+    isUtf8Locale(spawnEnv.LANG)
+  ) {
+    return;
+  }
+  // A non-UTF-8 LC_ALL overrides LANG entirely; treat it as deliberate.
+  if (spawnEnv.LC_ALL) return;
+  spawnEnv.LANG = utf8LocaleFallback(spawnEnv.LANG);
+}
+
 function createTerminalSpawnEnv(
   baseEnv: NodeJS.ProcessEnv,
-  runtimeEnv?: Record<string, string> | null,
+  runtimeEnv: Record<string, string> | null | undefined,
+  platform: NodeJS.Platform,
 ): NodeJS.ProcessEnv {
   const spawnEnv: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(baseEnv)) {
     if (value === undefined) continue;
     if (shouldExcludeTerminalEnvKey(key)) continue;
     spawnEnv[key] = value;
+  }
+  if (platform !== "win32") {
+    ensureUtf8Locale(spawnEnv);
   }
   if (runtimeEnv) {
     for (const [key, value] of Object.entries(runtimeEnv)) {
@@ -1837,7 +1876,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         Effect.andThen(
           Effect.gen(function* () {
             const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
-            const terminalEnv = createTerminalSpawnEnv(baseEnv, session.runtimeEnv);
+            const terminalEnv = createTerminalSpawnEnv(baseEnv, session.runtimeEnv, platform);
             const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
             ptyProcess = spawnResult.process;
             startedShell = spawnResult.shellLabel;

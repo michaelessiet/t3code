@@ -8,6 +8,7 @@ import * as SynchronizedRef from "effect/SynchronizedRef";
 import { HttpServer } from "effect/unstable/http";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpProviderSession from "./McpProviderSession.ts";
 
@@ -75,6 +76,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   options: McpSessionRegistryOptions = {},
 ) {
   const crypto = yield* Crypto.Crypto;
+  const settingsService = yield* ServerSettingsService;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const environmentId = yield* environment.getEnvironmentId;
   const httpServer = yield* HttpServer.HttpServer;
@@ -102,6 +104,24 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     return next.size === records.size ? records : next;
   };
 
+  /**
+   * Capabilities are decided once, when the credential is minted.
+   *
+   * That makes them a record of what was switched on at session start, not a
+   * live view: toggling the knowledge graph off does not retract an existing
+   * agent session's grant. It does not need to — `GraphService` re-reads the
+   * setting on every call and fails `GraphDisabledError`, so the setting is
+   * the enforcement and this is only what stops agents being handed a
+   * capability for a feature nobody asked for. A settings read that fails is
+   * treated as off, for the same reason.
+   */
+  const capabilitiesFor = Effect.fn("McpSessionRegistry.capabilities")(function* () {
+    const capabilities = new Set<McpInvocationContext.McpCapability>(["preview"]);
+    const settings = yield* settingsService.getSettings.pipe(Effect.orElseSucceed(() => null));
+    if (settings?.knowledgeGraph.enabled === true) capabilities.add("graph");
+    return capabilities as ReadonlySet<McpInvocationContext.McpCapability>;
+  });
+
   const issue: McpSessionRegistryShape["issue"] = Effect.fn("McpSessionRegistry.issue")(
     function* (request) {
       const issuedAt = yield* currentTimeMillis;
@@ -114,7 +134,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         threadId: ThreadId.make(request.threadId),
         providerSessionId,
         providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
-        capabilities: new Set(["preview"]),
+        capabilities: yield* capabilitiesFor(),
         issuedAt,
         expiresAt,
       };

@@ -1,0 +1,26 @@
+diff --git a/dist/graphology.esm.js b/dist/graphology.esm.js
+index 8365f38795796d9a86cbe4db160f71a2cd9231bf..39a5a362ea5db46abfe10d77daf94779698bb403 100644
+--- a/dist/graphology.esm.js
++++ b/dist/graphology.esm.js
+@@ -6198,7 +6198,7 @@ class Graph extends EventEmitter {
+    * @param  {boolean}      merge - Whether to merge data.
+    * @return {Graph}              - Returns itself for chaining.
+    */
+-  import(data, merge = false) {
++  ["import"](data, merge = false) {
+     // Importing a Graph instance directly
+     if (data instanceof Graph) {
+       // Nodes
+diff --git a/dist/graphology.mjs b/dist/graphology.mjs
+index d24c6d9ce8df892f57a6af558f127a07763a7743..cf221a66fe4f82a7bf34c43229f2bdb876bc16ac 100644
+--- a/dist/graphology.mjs
++++ b/dist/graphology.mjs
+@@ -6198,7 +6198,7 @@ class Graph extends EventEmitter {
+    * @param  {boolean}      merge - Whether to merge data.
+    * @return {Graph}              - Returns itself for chaining.
+    */
+-  import(data, merge = false) {
++  ["import"](data, merge = false) {
+     // Importing a Graph instance directly
+     if (data instanceof Graph) {
+       // Nodes
