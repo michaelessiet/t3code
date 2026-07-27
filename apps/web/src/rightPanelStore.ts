@@ -22,6 +22,7 @@ export const RIGHT_PANEL_KINDS = [
   "preview",
   "terminal",
   "search",
+  "graph",
 ] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
@@ -46,10 +47,14 @@ export type RightPanelSurface =
       revealLine: number | null;
       revealRequestId: number;
     }
-  | { id: "plan"; kind: "plan" };
+  | { id: "plan"; kind: "plan" }
+  | { id: "graph"; kind: "graph" };
 
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
-const RIGHT_PANEL_STORAGE_VERSION = 8;
+// 9: added the `graph` surface. The migration below passes unrecognised
+// singleton surfaces through untouched, so the bump is only here to stop an
+// older build from choking on a `graph` entry a newer one persisted.
+const RIGHT_PANEL_STORAGE_VERSION = 9;
 
 export interface ThreadRightPanelState {
   isOpen: boolean;
@@ -104,6 +109,8 @@ const singletonSurface = (
       return { id: "search", kind };
     case "plan":
       return { id: "plan", kind };
+    case "graph":
+      return { id: "graph", kind };
   }
 };
 

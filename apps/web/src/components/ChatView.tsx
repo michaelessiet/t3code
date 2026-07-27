@@ -192,6 +192,7 @@ import { appendReviewCommentsToPrompt, type ReviewCommentContext } from "../revi
 import { environmentCatalog } from "../connection/catalog";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
+import { graphEnvironment } from "../state/graph";
 import { projectEnvironment } from "../state/projects";
 import { useEnvironmentQuery } from "../state/query";
 import {
@@ -274,6 +275,7 @@ const PreviewPanel = lazy(() =>
 const DiffPanel = lazy(() => import("./DiffPanel"));
 const SearchPanel = lazy(() => import("./SearchPanel"));
 const FilePreviewPanel = lazy(() => import("./files/FilePreviewPanel"));
+const GraphPanel = lazy(() => import("./graph/GraphPanel"));
 const EMPTY_PENDING_FILE_SURFACE_IDS: ReadonlySet<string> = new Set();
 const TYPE_TO_FOCUS_EDITABLE_SELECTOR = [
   "input",
@@ -1058,6 +1060,7 @@ function ChatViewContent(props: ChatViewProps) {
     (store) => store.setStickyModelSelection,
   );
   const timestampFormat = settings.timestampFormat;
+  const knowledgeGraphEnabled = settings.knowledgeGraph.enabled;
   const autoOpenPlanSidebar = settings.autoOpenPlanSidebar;
   const navigate = useNavigate();
   const { resolvedTheme } = useTheme();
@@ -2795,6 +2798,21 @@ function ChatViewContent(props: ChatViewProps) {
     if (!activeThreadRef || !activeProject) return;
     useRightPanelStore.getState().openSearch(activeThreadRef);
   }, [activeProject, activeThreadRef]);
+  const addGraphSurface = useCallback(() => {
+    if (!activeThreadRef || !activeProject || !knowledgeGraphEnabled) return;
+    useRightPanelStore.getState().open(activeThreadRef, "graph");
+  }, [activeProject, activeThreadRef, knowledgeGraphEnabled]);
+  const runGraphBuild = useAtomCommand(graphEnvironment.build, { reportFailure: true });
+  // Queueing from the palette rather than from the panel, so `graph.build`
+  // works on the first press instead of needing the surface to mount first.
+  // The panel's status poll picks the build up wherever it is in its lifecycle.
+  const requestGraphBuild = useCallback(() => {
+    if (!activeProject || !activeWorkspaceRoot || !knowledgeGraphEnabled) return;
+    void runGraphBuild({
+      environmentId: activeProject.environmentId,
+      input: { cwd: activeWorkspaceRoot, mode: "structural", force: false },
+    });
+  }, [activeProject, activeWorkspaceRoot, knowledgeGraphEnabled, runGraphBuild]);
   const openFileSurface = useCallback(
     (relativePath: string, line?: number) => {
       if (!activeThreadRef || !activeProject) return;
@@ -3771,6 +3789,22 @@ function ChatViewContent(props: ChatViewProps) {
         return true;
       }
 
+      // Both graph commands report "not handled" while the feature is off, so
+      // the default `mod+shift+g` falls through to the browser instead of
+      // being swallowed by a surface nobody enabled.
+      if (command === "graph.toggle") {
+        if (!knowledgeGraphEnabled) return false;
+        addGraphSurface();
+        return true;
+      }
+
+      if (command === "graph.build") {
+        if (!knowledgeGraphEnabled) return false;
+        addGraphSurface();
+        requestGraphBuild();
+        return true;
+      }
+
       if (command === "fileTree.toggleFocus") {
         if (isFileTreeFocused()) {
           focusComposer();
@@ -3934,6 +3968,9 @@ function ChatViewContent(props: ChatViewProps) {
     keybindings,
     onToggleDiff,
     addSearchSurface,
+    addGraphSurface,
+    knowledgeGraphEnabled,
+    requestGraphBuild,
     toggleRightPanel,
     toggleTerminalVisibility,
     composerRef,
@@ -5102,6 +5139,18 @@ function ChatViewContent(props: ChatViewProps) {
           onOpenFile={openFileSurface}
         />
       </Suspense>
+    ) : activeRightPanelSurface?.kind === "graph" &&
+      knowledgeGraphEnabled &&
+      activeProject &&
+      activeWorkspaceRoot ? (
+      <Suspense fallback={null}>
+        <GraphPanel
+          key={`${activeProject.environmentId}:${activeWorkspaceRoot}`}
+          cwd={activeWorkspaceRoot}
+          environmentId={activeProject.environmentId}
+          onOpenFile={openFileSurface}
+        />
+      </Suspense>
     ) : activeRightPanelSurface?.kind === "plan" ? (
       <PlanSidebar
         activePlan={activePlan}
@@ -5452,10 +5501,12 @@ function ChatViewContent(props: ChatViewProps) {
             onAddDiff={addDiffSurface}
             onAddFiles={addFilesSurface}
             onAddSearch={addSearchSurface}
+            onAddGraph={addGraphSurface}
             browserAvailable={isPreviewSupportedInRuntime()}
             diffAvailable={isServerThread && isGitRepo}
             filesAvailable={activeProject !== null}
             searchAvailable={activeProject !== null}
+            graphEnabled={knowledgeGraphEnabled && activeProject !== null}
           >
             {rightPanelContent}
           </RightPanelTabs>
@@ -5482,10 +5533,12 @@ function ChatViewContent(props: ChatViewProps) {
             onAddDiff={addDiffSurface}
             onAddFiles={addFilesSurface}
             onAddSearch={addSearchSurface}
+            onAddGraph={addGraphSurface}
             browserAvailable={isPreviewSupportedInRuntime()}
             diffAvailable={isServerThread && isGitRepo}
             filesAvailable={activeProject !== null}
             searchAvailable={activeProject !== null}
+            graphEnabled={knowledgeGraphEnabled && activeProject !== null}
           >
             {rightPanelContent}
           </RightPanelTabs>

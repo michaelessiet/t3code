@@ -16,6 +16,7 @@ import { Route as ChatIndexRouteImport } from './routes/_chat.index'
 import { Route as SettingsSourceControlRouteImport } from './routes/settings.source-control'
 import { Route as SettingsProvidersRouteImport } from './routes/settings.providers'
 import { Route as SettingsLanguageServersRouteImport } from './routes/settings.language-servers'
+import { Route as SettingsKnowledgeGraphRouteImport } from './routes/settings.knowledge-graph'
 import { Route as SettingsKeybindingsRouteImport } from './routes/settings.keybindings'
 import { Route as SettingsGeneralRouteImport } from './routes/settings.general'
 import { Route as SettingsDiagnosticsRouteImport } from './routes/settings.diagnostics'
@@ -56,6 +57,11 @@ const SettingsProvidersRoute = SettingsProvidersRouteImport.update({
 const SettingsLanguageServersRoute = SettingsLanguageServersRouteImport.update({
   id: '/language-servers',
   path: '/language-servers',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsKnowledgeGraphRoute = SettingsKnowledgeGraphRouteImport.update({
+  id: '/knowledge-graph',
+  path: '/knowledge-graph',
   getParentRoute: () => SettingsRoute,
 } as any)
 const SettingsKeybindingsRoute = SettingsKeybindingsRouteImport.update({
@@ -104,6 +110,7 @@ export interface FileRoutesByFullPath {
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/knowledge-graph': typeof SettingsKnowledgeGraphRoute
   '/settings/language-servers': typeof SettingsLanguageServersRoute
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
@@ -118,6 +125,7 @@ export interface FileRoutesByTo {
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/knowledge-graph': typeof SettingsKnowledgeGraphRoute
   '/settings/language-servers': typeof SettingsLanguageServersRoute
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
@@ -135,6 +143,7 @@ export interface FileRoutesById {
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/knowledge-graph': typeof SettingsKnowledgeGraphRoute
   '/settings/language-servers': typeof SettingsLanguageServersRoute
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
@@ -153,6 +162,7 @@ export interface FileRouteTypes {
     | '/settings/diagnostics'
     | '/settings/general'
     | '/settings/keybindings'
+    | '/settings/knowledge-graph'
     | '/settings/language-servers'
     | '/settings/providers'
     | '/settings/source-control'
@@ -167,6 +177,7 @@ export interface FileRouteTypes {
     | '/settings/diagnostics'
     | '/settings/general'
     | '/settings/keybindings'
+    | '/settings/knowledge-graph'
     | '/settings/language-servers'
     | '/settings/providers'
     | '/settings/source-control'
@@ -183,6 +194,7 @@ export interface FileRouteTypes {
     | '/settings/diagnostics'
     | '/settings/general'
     | '/settings/keybindings'
+    | '/settings/knowledge-graph'
     | '/settings/language-servers'
     | '/settings/providers'
     | '/settings/source-control'
@@ -246,6 +258,13 @@ declare module '@tanstack/react-router' {
       path: '/language-servers'
       fullPath: '/settings/language-servers'
       preLoaderRoute: typeof SettingsLanguageServersRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/knowledge-graph': {
+      id: '/settings/knowledge-graph'
+      path: '/knowledge-graph'
+      fullPath: '/settings/knowledge-graph'
+      preLoaderRoute: typeof SettingsKnowledgeGraphRouteImport
       parentRoute: typeof SettingsRoute
     }
     '/settings/keybindings': {
@@ -320,6 +339,7 @@ interface SettingsRouteChildren {
   SettingsDiagnosticsRoute: typeof SettingsDiagnosticsRoute
   SettingsGeneralRoute: typeof SettingsGeneralRoute
   SettingsKeybindingsRoute: typeof SettingsKeybindingsRoute
+  SettingsKnowledgeGraphRoute: typeof SettingsKnowledgeGraphRoute
   SettingsLanguageServersRoute: typeof SettingsLanguageServersRoute
   SettingsProvidersRoute: typeof SettingsProvidersRoute
   SettingsSourceControlRoute: typeof SettingsSourceControlRoute
@@ -331,6 +351,7 @@ const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsDiagnosticsRoute: SettingsDiagnosticsRoute,
   SettingsGeneralRoute: SettingsGeneralRoute,
   SettingsKeybindingsRoute: SettingsKeybindingsRoute,
+  SettingsKnowledgeGraphRoute: SettingsKnowledgeGraphRoute,
   SettingsLanguageServersRoute: SettingsLanguageServersRoute,
   SettingsProvidersRoute: SettingsProvidersRoute,
   SettingsSourceControlRoute: SettingsSourceControlRoute,

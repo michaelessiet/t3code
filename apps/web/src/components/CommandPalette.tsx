@@ -37,6 +37,7 @@ import {
   SettingsIcon,
   SquarePenIcon,
   SquareTerminalIcon,
+  WaypointsIcon,
 } from "lucide-react";
 import {
   useCallback,
@@ -56,7 +57,7 @@ import { dispatchAppCommand } from "./appCommandBus";
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
-import { useClientSettings } from "../hooks/useSettings";
+import { useClientSettings, usePrimarySettings } from "../hooks/useSettings";
 import { readLocalApi } from "../localApi";
 import { desktopLocalBackendId } from "../connection/desktopLocal";
 import { filesystemEnvironment } from "../state/filesystem";
@@ -466,6 +467,10 @@ function OpenCommandPaletteDialog(props: {
   const isActionsOnly = deferredQuery.startsWith(">");
   const [highlightedItemValue, setHighlightedItemValue] = useState<string | null>(null);
   const clientSettings = useClientSettings();
+  // Primary-only, matching the settings page that owns this toggle. The
+  // palette entry is discovery: `ChatView.runCommand` re-checks the flag
+  // against the thread's own environment before doing anything.
+  const knowledgeGraphEnabled = usePrimarySettings((current) => current.knowledgeGraph.enabled);
   const createProject = useAtomCommand(projectEnvironment.create, {
     reportFailure: false,
   });
@@ -1111,6 +1116,26 @@ function OpenCommandPaletteDialog(props: {
         searchTerms: ["new folder", "new directory", "create folder", "file tree", "explorer"],
         icon: <FolderPlusIcon className={ITEM_ICON_CLASS} />,
       },
+      // Omitted rather than disabled while the feature is off: an entry that
+      // does nothing when you press Enter is worse than one that is not there.
+      ...(knowledgeGraphEnabled
+        ? [
+            {
+              value: "action:toggle-knowledge-graph",
+              command: "graph.toggle" as KeybindingCommand,
+              title: "Open knowledge graph",
+              searchTerms: ["graph", "knowledge graph", "graphify", "map", "dependencies"],
+              icon: <WaypointsIcon className={ITEM_ICON_CLASS} />,
+            },
+            {
+              value: "action:build-knowledge-graph",
+              command: "graph.build" as KeybindingCommand,
+              title: "Build knowledge graph",
+              searchTerms: ["graph", "build graph", "rebuild graph", "graphify", "extract"],
+              icon: <WaypointsIcon className={ITEM_ICON_CLASS} />,
+            },
+          ]
+        : []),
     ];
     for (const action of workspaceActions) {
       actionItems.push({

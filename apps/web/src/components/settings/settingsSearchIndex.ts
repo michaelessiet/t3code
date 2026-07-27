@@ -77,6 +77,20 @@ const SETTINGS_SEARCH_SECTIONS: ReadonlyArray<SettingsSearchSection> = [
     ],
   },
   {
+    to: "/settings/knowledge-graph",
+    section: "Knowledge Graph",
+    entries: [
+      {
+        title: "Knowledge graph",
+        keywords: ["graphify", "graph", "python", "codebase map", "enable", "install"],
+      },
+      {
+        title: "Graph storage",
+        keywords: ["retention", "cache", "disk", "cleanup", "size budget"],
+      },
+    ],
+  },
+  {
     to: "/settings/source-control",
     section: "Source Control",
     entries: [

@@ -8,6 +8,7 @@ import {
   Plus,
   TerminalSquare,
   TextSearch,
+  Waypoints,
   X,
 } from "lucide-react";
 import {
@@ -54,10 +55,18 @@ interface RightPanelTabsProps {
   onAddDiff: () => void;
   onAddFiles: () => void;
   onAddSearch: () => void;
+  onAddGraph: () => void;
   browserAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
   searchAvailable: boolean;
+  /**
+   * Whether the knowledge-graph feature is switched on. Unlike the other
+   * availability flags this *hides* the entry rather than disabling it:
+   * advertising a surface the user has never opted into would be noise in
+   * every profile that leaves the feature off, which is the default.
+   */
+  graphEnabled: boolean;
   children: ReactNode;
 }
 
@@ -104,10 +113,12 @@ function RightPanelEmptyState(props: {
   onAddDiff: () => void;
   onAddFiles: () => void;
   onAddSearch: () => void;
+  onAddGraph: () => void;
   browserAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
   searchAvailable: boolean;
+  graphEnabled: boolean;
 }) {
   const actions = [
     {
@@ -150,6 +161,18 @@ function RightPanelEmptyState(props: {
       disabledReason: SURFACE_DISABLED_REASONS.diff,
       onClick: props.onAddDiff,
     },
+    ...(props.graphEnabled
+      ? ([
+          {
+            label: "Knowledge graph",
+            description: "See how this codebase connects.",
+            icon: Waypoints,
+            available: true,
+            disabledReason: null,
+            onClick: props.onAddGraph,
+          },
+        ] as const)
+      : []),
   ] as const;
 
   return (
@@ -229,6 +252,8 @@ function surfaceTitle(
       );
     case "plan":
       return "Plan";
+    case "graph":
+      return "Graph";
     case "preview": {
       const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
       if (!snapshot || snapshot.navStatus._tag === "Idle") return "Browser";
@@ -292,6 +317,8 @@ function SurfaceIcon({
       return <TerminalSquare className="size-3.5 shrink-0" />;
     case "plan":
       return <ClipboardList className="size-3.5 shrink-0" />;
+    case "graph":
+      return <Waypoints className="size-3.5 shrink-0" />;
   }
 }
 
@@ -504,6 +531,12 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                     <FileDiff />
                     Diff
                   </SurfaceMenuItem>
+                  {props.graphEnabled ? (
+                    <SurfaceMenuItem available onClick={props.onAddGraph}>
+                      <Waypoints />
+                      Knowledge graph
+                    </SurfaceMenuItem>
+                  ) : null}
                 </MenuPopup>
               </Menu>
             ) : null}
@@ -519,10 +552,12 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddDiff={props.onAddDiff}
             onAddFiles={props.onAddFiles}
             onAddSearch={props.onAddSearch}
+            onAddGraph={props.onAddGraph}
             browserAvailable={props.browserAvailable}
             diffAvailable={props.diffAvailable}
             filesAvailable={props.filesAvailable}
             searchAvailable={props.searchAvailable}
+            graphEnabled={props.graphEnabled}
           />
         ) : (
           props.children
