@@ -70,7 +70,11 @@ export function createLspEnvironmentAtoms<R, E>(
     serverStatus: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:lsp:server-status",
       tag: WS_METHODS.lspServerStatus,
-      staleTimeMs: 5_000,
+      // Poll while mounted so starting→running/failed transitions reach the
+      // editor's server-status indicator; a jdtls-class boot takes 30-120s.
+      // staleTimeMs matches the interval so ticks aren't served from cache.
+      staleTimeMs: 2_000,
+      refreshIntervalMs: 2_000,
       idleTtlMs: 60_000,
     }),
     diagnostics: createEnvironmentRpcSubscriptionAtomFamily(runtime, {

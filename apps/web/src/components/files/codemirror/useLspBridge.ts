@@ -8,7 +8,7 @@ import { keymap, type EditorView } from "@codemirror/view";
 import type { Extension } from "@codemirror/state";
 import type { EnvironmentId, LspLocation } from "@t3tools/contracts";
 import { isLspSupportedPath } from "@t3tools/shared/lspSupport";
-import { useAtomValue } from "@effect/atom-react";
+import { useAtomRefresh, useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { useEffect, useMemo, useRef } from "react";
@@ -44,9 +44,9 @@ export function useLspBridge({
   // servers extend the built-in set. Prefer the server-reported registry;
   // fall back to the static built-in set until the first status result so
   // built-in languages work instantly on cold load.
-  const serverStatusResult = useAtomValue(
-    lspEnvironment.serverStatus({ environmentId, input: { cwd } }),
-  );
+  const serverStatusAtom = lspEnvironment.serverStatus({ environmentId, input: { cwd } });
+  const serverStatusResult = useAtomValue(serverStatusAtom);
+  const refreshServerStatus = useAtomRefresh(serverStatusAtom);
   const serverExtensions = useMemo(() => {
     const status = Option.getOrNull(AsyncResult.value(serverStatusResult));
     return status ? new Set(status.supportedExtensions) : null;
@@ -84,14 +84,17 @@ export function useLspBridge({
   useEffect(() => {
     if (!supported || view === null) return;
     versionRef.current = 0;
+    // didOpen registers the (lazily spawned) server before the RPC resolves,
+    // so refreshing right after lets the status indicator show "starting"
+    // within one round-trip instead of waiting for the next poll tick.
     void didOpen({
       environmentId,
       input: { cwd, relativePath, contents: view.state.doc.toString() },
-    });
+    }).then(() => refreshServerStatus());
     return () => {
       void didClose({ environmentId, input: { cwd, relativePath } });
     };
-  }, [cwd, didClose, didOpen, environmentId, relativePath, supported, view]);
+  }, [cwd, didClose, didOpen, environmentId, refreshServerStatus, relativePath, supported, view]);
 
   const host = useMemo<LspBridgeHost | null>(() => {
     if (!supported) return null;

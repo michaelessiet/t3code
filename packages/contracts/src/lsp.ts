@@ -214,6 +214,14 @@ export const LspServerStatus = Schema.Struct({
   /** Human-readable server name, e.g. "typescript-language-server". */
   displayName: TrimmedNonEmptyString,
   state: Schema.Literals(["starting", "running", "failed", "not_installed"]),
+  /**
+   * File extensions (leading-dot, lowercase) bound to this server, so clients
+   * can map an open file to its server's state. Defaults to [] on the wire
+   * for cross-version decoding.
+   */
+  extensions: Schema.Array(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
 });
 export type LspServerStatus = typeof LspServerStatus.Type;
 
