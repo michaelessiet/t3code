@@ -23,7 +23,7 @@ import { syncCodeEditorFocusToDesktop } from "../../../lib/desktopEditorZoom";
 import { computeDocReplacement } from "./docReplacement";
 import { requestDocumentSave } from "./documentSave";
 import { editorFontSize } from "./fontSize";
-import { languageExtensionForPath } from "./languages";
+import { languageExtensionForPath, lazyLanguageLoaderForPath } from "./languages";
 import { goToLspDefinitionAtCursor, showLspHoverAtCursor } from "./lspBridge";
 import { revealEditorLine, revealLineExtension } from "./revealLine";
 import { editorTheme } from "./theme";
@@ -198,6 +198,21 @@ export function CodeMirrorFileEditor({
       }),
     });
 
+    // Languages outside the eager set resolve from the language-data
+    // registry; the grammar chunk arrives async, so highlighting appears
+    // once loaded. A load that fails or outlives the view degrades to plain.
+    const loadLazyLanguage = lazyLanguageLoaderForPath(relativePath);
+    let lazyLanguageStale = false;
+    if (loadLazyLanguage !== null) {
+      loadLazyLanguage().then(
+        (language) => {
+          if (lazyLanguageStale) return;
+          editorView.dispatch({ effects: languageCompartment.reconfigure(language) });
+        },
+        () => {},
+      );
+    }
+
     syncedContentsRef.current = initial.contents;
     setEditor({
       view: editorView,
@@ -208,6 +223,7 @@ export function CodeMirrorFileEditor({
     });
     onViewReadyRef.current?.(editorView);
     return () => {
+      lazyLanguageStale = true;
       onViewReadyRef.current?.(null);
       setEditor(null);
       editorView.destroy();

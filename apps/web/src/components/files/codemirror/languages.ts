@@ -1,4 +1,6 @@
 import { css } from "@codemirror/lang-css";
+import { LanguageDescription } from "@codemirror/language";
+import { languages as languageData } from "@codemirror/language-data";
 import { html } from "@codemirror/lang-html";
 import { javascript } from "@codemirror/lang-javascript";
 import { json } from "@codemirror/lang-json";
@@ -45,13 +47,17 @@ const LANGUAGE_IDS_BY_EXTENSION: Record<string, EditorLanguageId> = {
   yml: "yaml",
 };
 
+function fileNameForPath(relativePath: string): string {
+  const normalizedPath = relativePath.replaceAll("\\", "/");
+  return normalizedPath.slice(normalizedPath.lastIndexOf("/") + 1);
+}
+
 /**
  * Language id for a workspace-relative path, derived from its file
  * extension. Unknown or missing extensions resolve to `plain`.
  */
 export function editorLanguageIdForPath(relativePath: string): EditorLanguageId {
-  const normalizedPath = relativePath.replaceAll("\\", "/");
-  const fileName = normalizedPath.slice(normalizedPath.lastIndexOf("/") + 1).toLowerCase();
+  const fileName = fileNameForPath(relativePath).toLowerCase();
   const extensionIndex = fileName.lastIndexOf(".");
   if (extensionIndex <= 0 || extensionIndex >= fileName.length - 1) {
     return "plain";
@@ -94,4 +100,23 @@ function languageExtensionForId(languageId: EditorLanguageId): Extension {
  */
 export function languageExtensionForPath(relativePath: string): Extension {
   return languageExtensionForId(editorLanguageIdForPath(relativePath));
+}
+
+/**
+ * Lazy language support for paths outside the curated eager set above,
+ * resolved from the community language-data registry. Grammars load on
+ * demand as separate chunks, so anything the registry knows (Java, Kotlin,
+ * Dockerfile, ...) highlights without being bundled up front. Null when the
+ * path already has eager support or no grammar matches.
+ */
+export function lazyLanguageLoaderForPath(relativePath: string): (() => Promise<Extension>) | null {
+  if (editorLanguageIdForPath(relativePath) !== "plain") return null;
+  const fileName = fileNameForPath(relativePath);
+  // Registry filename patterns (e.g. /^Dockerfile$/) are case-sensitive
+  // while its extension lists are lowercase; try verbatim, then lowercased.
+  const description =
+    LanguageDescription.matchFilename(languageData, fileName) ??
+    LanguageDescription.matchFilename(languageData, fileName.toLowerCase());
+  if (description === null) return null;
+  return () => description.load();
 }
