@@ -35,7 +35,74 @@ const T3_FILE_ICON_SPRITE = `
     <path fill="#f9ad00" d="M30 10.75h-8.749V2H30Zm-9.626 0h-8.75V2h8.75Zm-9.625 0H2V2h8.749ZM30 20.375h-8.749v-8.75H30Z" />
     <path fill="currentColor" d="M20.374 20.375h-8.75v-8.75h8.75Zm0 9.625h-8.75v-8.75h8.75ZM30 30h-8.749v-8.75H30Zm-19.251 0H2v-8.75h8.749Z" />
   </symbol>
+  <symbol id="t3-file-icon-java" viewBox="0 0 16 16">
+    <path fill="#cf6a1a" d="M3.2 6.8h6.6v3.4a2.6 2.6 0 0 1-2.6 2.6H5.8a2.6 2.6 0 0 1-2.6-2.6V6.8Zm7.4.3h.9a2.15 2.15 0 0 1 0 4.3h-.9V10h.9a.85.85 0 0 0 0-1.7h-.9V7.1ZM2.6 13.6h8.4a.7.7 0 0 1 0 1.4H2.6a.7.7 0 0 1 0-1.4Z" />
+    <path fill="none" stroke="#cf6a1a" stroke-width="1.1" stroke-linecap="round" d="M5.6 5.5c1.1-.9-.9-1.5.2-2.5m2.6 2.5c1.1-.9-.9-1.5.2-2.5" />
+  </symbol>
+  <symbol id="t3-file-icon-kotlin" viewBox="0 0 16 16">
+    <path fill="#7f52ff" d="M14.6 14.6H1.4V1.4h13.2L8 8Z" />
+  </symbol>
+  <symbol id="t3-file-icon-gradle" viewBox="0 0 16 16">
+    <path fill="#3fa5b5" d="M2.6 3.1 3.9 1.8 10.1 8l-6.2 6.2-1.3-1.3L7.5 8 2.6 3.1Zm6.5 2.5 1.3-1.3L14.1 8l-3.7 3.7-1.3-1.3L11.5 8 9.1 5.6Z" />
+  </symbol>
+  <symbol id="t3-file-icon-csharp" viewBox="0 0 16 16">
+    <path fill="none" stroke="#8a4fbf" stroke-width="1.7" d="M9.3 5.2A3.9 3.9 0 1 0 9.3 10.8" />
+    <path fill="#8a4fbf" d="M11.3 5.2h.9v5.6h-.9V5.2Zm2 0h.9v5.6h-.9V5.2Zm-2.7 1.5h4.3v.9h-4.3v-.9Zm0 2.2h4.3v.9h-4.3v-.9Z" />
+  </symbol>
+  <symbol id="t3-file-icon-php" viewBox="0 0 16 16">
+    <path fill="#777bb3" fill-rule="evenodd" d="M8 3.2c3.9 0 7 2.15 7 4.8s-3.1 4.8-7 4.8S1 10.65 1 8s3.1-4.8 7-4.8Zm0 1.6C4.9 4.8 2.6 6.3 2.6 8S4.9 11.2 8 11.2 13.4 9.7 13.4 8 11.1 4.8 8 4.8Z" />
+    <path fill="#777bb3" d="M4.6 7.3h2.2v1.4H4.6V7.3Zm4.6 0H11v1.4H9.2V7.3Z" />
+  </symbol>
+  <symbol id="t3-file-icon-dart" viewBox="0 0 16 16">
+    <path fill="#0175c2" d="M14.4 1.6 9.5 14.4 7.4 9.7 2.7 7.6 14.4 1.6Z" />
+  </symbol>
+  <symbol id="t3-file-icon-lua" viewBox="0 0 16 16">
+    <circle cx="7" cy="9.2" r="4.6" fill="#5b5cd6" />
+    <circle cx="12.4" cy="3.8" r="1.9" fill="#5b5cd6" />
+  </symbol>
+  <symbol id="t3-file-icon-scala" viewBox="0 0 16 16">
+    <path fill="#dc322f" d="M3.5 2.6l9-1.2v3.2l-9 1.2V2.6Zm0 4.6 9-1.2v3.2l-9 1.2V7.2Zm0 4.6 9-1.2V14l-9 1.2v-3.4Z" />
+  </symbol>
+  <symbol id="t3-file-icon-elixir" viewBox="0 0 16 16">
+    <path fill="#9a6fb0" d="M8 1.4c3 3 4.4 5.2 4.4 7.4a4.4 4.4 0 1 1-8.8 0C3.6 6.6 5 4.4 8 1.4Z" />
+  </symbol>
+  <symbol id="t3-file-icon-haskell" viewBox="0 0 16 16">
+    <path fill="#8878b8" d="M3.2 2.4h2.9l6.7 11.2H9.9L7.3 9.2l-2.6 4.4H1.8l4-6.8-2.6-4.4Z" />
+  </symbol>
+  <symbol id="t3-file-icon-xml" viewBox="0 0 16 16">
+    <path fill="#6aab73" d="M5.6 4 6.6 5 3.6 8l3 3-1 1L1.6 8 5.6 4Zm4.8 0 4 4-4 4-1-1 3-3-3-3 1-1Z" />
+  </symbol>
+  <symbol id="t3-file-icon-toml" viewBox="0 0 16 16">
+    <path fill="#b8695a" d="M2.4 3h2.8v1.5H3.9v7h1.3V13H2.4V3Zm11.2 0v10h-2.8v-1.5h1.3v-7h-1.3V3h2.8ZM6.2 4.6h4.6v1.6H9.1v5.2H7.9V6.2H6.2V4.6Z" />
+  </symbol>
+  <symbol id="t3-file-icon-powershell" viewBox="0 0 16 16">
+    <rect x="1" y="2.6" width="14" height="10.8" rx="1.8" fill="#2671be" />
+    <path fill="#fff" d="M4.2 5.2 7.6 8l-3.4 2.8-.9-1.1L5.8 8 3.3 6.3l.9-1.1ZM8 10h4v1.3H8V10Z" />
+  </symbol>
+  <symbol id="t3-file-icon-nix" viewBox="0 0 16 16">
+    <path fill="#5277c3" d="M7.2 2.5h1.6v11h-1.6v-11Zm4.24 9.86-1.38.8-5.5-9.52 1.38-.8 5.5 9.52Zm-6.88.8-1.38-.8 5.5-9.52 1.38.8-5.5 9.52Z" />
+  </symbol>
+  <symbol id="t3-file-icon-r" viewBox="0 0 16 16">
+    <path fill="#3b7fd4" fill-rule="evenodd" d="M3.6 2.6h4.8a3.4 3.4 0 0 1 1.6 6.4l2.4 4.4H10L7.8 9.4H5.8v4H3.6V2.6Zm2.2 2v2.8h2.6a1.4 1.4 0 0 0 0-2.8H5.8Z" />
+  </symbol>
+  <symbol id="t3-file-icon-proto" viewBox="0 0 16 16">
+    <path fill="#4a90c2" d="M2.8 2.4h10.4v3.2H2.8V2.4Zm0 4.4h6.6v3.2H2.8V6.8Zm0 4.4h8.6v3.2H2.8v-3.2Z" />
+  </symbol>
+  <symbol id="t3-file-icon-pdf" viewBox="0 0 16 16">
+    <path fill="#d52c36" d="M3.2 1.4h5.6L13 5.6v9H3.2V1.4Z" />
+    <path fill="#fff" d="M4.8 9h6.4v1.4H4.8V9Zm0 2.4h4.2v1.4H4.8v-1.4Z" />
+  </symbol>
+  <symbol id="t3-file-icon-media" viewBox="0 0 16 16">
+    <rect x="1.2" y="3" width="13.6" height="10" rx="2" fill="#a631be" />
+    <path fill="#fff" d="M6.4 5.6 11.2 8 6.4 10.4V5.6Z" />
+  </symbol>
 </svg>`;
+
+/** Pierre ships icons for a fixed token list; everything else resolves to its
+ * generic `default` glyph. These rules fill the gaps, either with a T3 sprite
+ * symbol or by pointing an extension at a built-in Pierre icon it already has.
+ */
+const builtIn = (token: string) => `file-tree-builtin-${token}`;
 
 export const T3_PIERRE_ICONS = {
   set: "complete",
@@ -49,6 +116,112 @@ export const T3_PIERRE_ICONS = {
     "readme.md": "t3-file-icon-readme",
     "pnpm-lock.yaml": "t3-file-icon-pnpm",
     "pnpm-workspace.yaml": "t3-file-icon-pnpm",
+    // Dotless names never produce an extension candidate, so they can only be
+    // matched here.
+    authors: builtIn("text"),
+    brewfile: builtIn("ruby"),
+    changelog: builtIn("text"),
+    gradlew: "t3-file-icon-gradle",
+    justfile: builtIn("bash"),
+    license: builtIn("text"),
+    makefile: builtIn("text"),
+    notice: builtIn("text"),
+    podfile: builtIn("ruby"),
+    // `byFileExtension` below is consulted before Pierre's own filename table,
+    // so names whose extension is remapped need to be restated here.
+    "bunfig.toml": builtIn("bun"),
+    "cargo.toml": builtIn("rust"),
+    "go.mod": builtIn("go"),
+    "go.sum": builtIn("go"),
+    "go.work": builtIn("go"),
+    "gradle.properties": "t3-file-icon-gradle",
+    "gradlew.bat": "t3-file-icon-gradle",
+    "pom.xml": "t3-file-icon-java",
+    ".prettierrc.toml": builtIn("prettier"),
+    "pyproject.toml": builtIn("python"),
+    "requirements.txt": builtIn("python"),
+  },
+  byFileExtension: {
+    java: "t3-file-icon-java",
+    jsp: "t3-file-icon-java",
+    // Groovy is a JVM language and its files are overwhelmingly Gradle-adjacent;
+    // the JVM cup reads better than a bespoke glyph at 16px.
+    groovy: "t3-file-icon-java",
+    gvy: "t3-file-icon-java",
+    kt: "t3-file-icon-kotlin",
+    kts: "t3-file-icon-kotlin",
+    gradle: "t3-file-icon-gradle",
+    // Longest candidate wins, so `build.gradle.kts` lands on Gradle, not Kotlin.
+    "gradle.kts": "t3-file-icon-gradle",
+    cs: "t3-file-icon-csharp",
+    csx: "t3-file-icon-csharp",
+    php: "t3-file-icon-php",
+    dart: "t3-file-icon-dart",
+    lua: "t3-file-icon-lua",
+    scala: "t3-file-icon-scala",
+    sbt: "t3-file-icon-scala",
+    sc: "t3-file-icon-scala",
+    ex: "t3-file-icon-elixir",
+    exs: "t3-file-icon-elixir",
+    eex: "t3-file-icon-elixir",
+    heex: "t3-file-icon-elixir",
+    hs: "t3-file-icon-haskell",
+    lhs: "t3-file-icon-haskell",
+    xml: "t3-file-icon-xml",
+    xsd: "t3-file-icon-xml",
+    xsl: "t3-file-icon-xml",
+    xslt: "t3-file-icon-xml",
+    plist: "t3-file-icon-xml",
+    xaml: "t3-file-icon-xml",
+    csproj: "t3-file-icon-xml",
+    resx: "t3-file-icon-xml",
+    toml: "t3-file-icon-toml",
+    ps1: "t3-file-icon-powershell",
+    psm1: "t3-file-icon-powershell",
+    psd1: "t3-file-icon-powershell",
+    nix: "t3-file-icon-nix",
+    r: "t3-file-icon-r",
+    proto: "t3-file-icon-proto",
+    pdf: "t3-file-icon-pdf",
+    mp4: "t3-file-icon-media",
+    mov: "t3-file-icon-media",
+    webm: "t3-file-icon-media",
+    mkv: "t3-file-icon-media",
+    avi: "t3-file-icon-media",
+    mp3: "t3-file-icon-media",
+    wav: "t3-file-icon-media",
+    flac: "t3-file-icon-media",
+    ogg: "t3-file-icon-media",
+    m4a: "t3-file-icon-media",
+    // Extensions Pierre misses but already has a fitting icon for.
+    bat: builtIn("bash"),
+    cmd: builtIn("bash"),
+    nu: builtIn("bash"),
+    vim: builtIn("bash"),
+    patch: builtIn("git"),
+    diff: builtIn("git"),
+    cmake: builtIn("text"),
+    cnf: builtIn("text"),
+    list: builtIn("text"),
+    mk: builtIn("text"),
+    nfo: builtIn("text"),
+    pl: builtIn("text"),
+    pm: builtIn("text"),
+    properties: builtIn("text"),
+    asm: builtIn("c"),
+    m: builtIn("c"),
+    s: builtIn("c"),
+    apng: builtIn("image"),
+    heic: builtIn("image"),
+    heif: builtIn("image"),
+    jfif: builtIn("image"),
+    ejs: builtIn("html"),
+    hbs: builtIn("html"),
+    liquid: builtIn("html"),
+    njk: builtIn("html"),
+    pug: builtIn("html"),
+    twig: builtIn("html"),
+    ipynb: builtIn("python"),
   },
 } satisfies FileTreeIcons;
 
@@ -58,11 +231,20 @@ const LANGUAGE_EXTENSION_ALIASES: Record<string, string> = {
   bash: "sh",
   csharp: "cs",
   dockerfile: "dockerfile",
+  elixir: "ex",
+  haskell: "hs",
   javascript: "js",
   jsx: "jsx",
+  kotlin: "kt",
   markdown: "md",
   mdx: "mdx",
+  objc: "m",
+  "objective-c": "m",
+  objectivec: "m",
+  perl: "pl",
   plaintext: "txt",
+  powershell: "ps1",
+  protobuf: "proto",
   python: "py",
   ruby: "rb",
   rust: "rs",

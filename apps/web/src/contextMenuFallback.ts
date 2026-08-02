@@ -1,5 +1,7 @@
 import type { ContextMenuItem } from "@t3tools/contracts";
 
+import { clampMenuToViewport } from "~/lib/menuPosition";
+
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 // Inline Lucide-style icon paths (stroke-based, viewBox 0 0 24 24, strokeWidth 2).
@@ -71,13 +73,10 @@ function createIconElement(name: string, tone: "neutral" | "destructive"): SVGSV
 
 function clampMenuPosition(menu: HTMLDivElement, preferredLeft: number, preferredTop: number) {
   const rect = menu.getBoundingClientRect();
-  const left = Math.min(
-    Math.max(4, preferredLeft),
-    Math.max(4, window.innerWidth - rect.width - 4),
-  );
-  const top = Math.min(
-    Math.max(4, preferredTop),
-    Math.max(4, window.innerHeight - rect.height - 4),
+  const { left, top } = clampMenuToViewport(
+    rect,
+    { left: preferredLeft, top: preferredTop },
+    { width: window.innerWidth, height: window.innerHeight },
   );
   menu.style.left = `${left}px`;
   menu.style.top = `${top}px`;
