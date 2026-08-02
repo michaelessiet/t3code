@@ -35,9 +35,13 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   // The knowledge graph is off by default, so this binding does nothing until
   // the feature is enabled. Shipping it unconditionally keeps the default
   // keymap identical for everyone rather than mutating under a setting.
-  { key: "mod+shift+g", command: "graph.toggle", when: "!terminalFocus" },
-  { key: "mod+shift+f", command: "quickSearch.content", when: "!terminalFocus" },
-  { key: "mod+p", command: "quickSearch.open", when: "!terminalFocus" },
+  // Navigation/search shortcuts stay live with the terminal focused. The
+  // shift-modified ones collide with nothing in readline, so they pass through
+  // on every platform; bare mod+p only does so on macOS, where `mod` is Cmd —
+  // on Linux/Windows ctrl+p belongs to shell history.
+  { key: "mod+shift+g", command: "graph.toggle" },
+  { key: "mod+shift+f", command: "quickSearch.content" },
+  { key: "mod+p", command: "quickSearch.open", when: "!terminalFocus || macPlatform" },
   { key: "mod+shift+j", command: "preview.toggle" },
   { key: "mod+r", command: "preview.refresh", when: "previewFocus" },
   { key: "mod+l", command: "preview.focusUrl", when: "previewFocus" },
@@ -45,7 +49,7 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod++", command: "preview.zoomIn", when: "previewFocus" },
   { key: "mod+-", command: "preview.zoomOut", when: "previewFocus" },
   { key: "mod+0", command: "preview.resetZoom", when: "previewFocus" },
-  { key: "mod+shift+p", command: "commandPalette.toggle", when: "!terminalFocus" },
+  { key: "mod+shift+p", command: "commandPalette.toggle" },
   { key: "mod+n", command: "chat.new", when: "!terminalFocus && !fileTreeFocus" },
   { key: "mod+shift+o", command: "chat.new", when: "!terminalFocus" },
   { key: "mod+shift+n", command: "chat.newLocal", when: "!terminalFocus && !fileTreeFocus" },
@@ -74,6 +78,32 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
     command,
     when: "modelPickerOpen",
   })),
+];
+
+/**
+ * Default rules that shipped in earlier versions and have since changed.
+ *
+ * `keybindings.json` persists the full keymap, and both the startup sync and
+ * the read-time merge drop a default whose command already appears in the
+ * user's file. Without this table a default whose `key` or `when` changed would
+ * reach new installs only — everyone else stays pinned to the old rule forever.
+ *
+ * Startup migration rewrites a persisted rule only when it matches an entry
+ * here *exactly*, which means the user never touched it. Anything they edited
+ * looks different and is left alone.
+ *
+ * Add the outgoing rule here whenever you change a rule in
+ * {@link DEFAULT_KEYBINDINGS}; never remove entries, or installs that skipped a
+ * release stop migrating.
+ */
+export const SUPERSEDED_DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
+  // 2026-08: navigation/search shortcuts became usable with the terminal
+  // focused (bare mod+p on macOS only, where `mod` is Cmd rather than a
+  // readline key).
+  { key: "mod+p", command: "quickSearch.open", when: "!terminalFocus" },
+  { key: "mod+shift+p", command: "commandPalette.toggle", when: "!terminalFocus" },
+  { key: "mod+shift+f", command: "quickSearch.content", when: "!terminalFocus" },
+  { key: "mod+shift+g", command: "graph.toggle", when: "!terminalFocus" },
 ];
 
 function normalizeKeyToken(token: string): string {

@@ -16,6 +16,7 @@ import {
   modelPickerJumpIndexFromCommand,
   isOpenFavoriteEditorShortcut,
   isTerminalClearShortcut,
+  isTerminalPassthroughShortcut,
   isTerminalCloseShortcut,
   isTerminalNewShortcut,
   isTerminalSplitShortcut,
@@ -779,6 +780,97 @@ describe("plus key parsing", () => {
   });
 });
 
+describe("navigation shortcuts while the terminal is focused", () => {
+  const inTerminal = { terminalFocus: true, terminalOpen: true };
+
+  it("keeps cmd+p on macOS but leaves ctrl+p to the shell elsewhere", () => {
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "p", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+        context: inTerminal,
+      }),
+      "quickSearch.open",
+    );
+    assert.notStrictEqual(
+      resolveShortcutCommand(event({ key: "p", ctrlKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "Linux x86_64",
+        context: inTerminal,
+      }),
+      "quickSearch.open",
+    );
+    // Still bound on Linux once focus leaves the terminal.
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "p", ctrlKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "Linux x86_64",
+      }),
+      "quickSearch.open",
+    );
+  });
+
+  it("passes the shift-modified navigation shortcuts through on every platform", () => {
+    const cases: ReadonlyArray<[string, KeybindingCommand]> = [
+      ["p", "commandPalette.toggle"],
+      ["f", "quickSearch.content"],
+      ["g", "graph.toggle"],
+    ];
+    for (const [key, command] of cases) {
+      assert.strictEqual(
+        resolveShortcutCommand(
+          event({ key, metaKey: true, shiftKey: true }),
+          DEFAULT_RESOLVED_KEYBINDINGS,
+          { platform: "MacIntel", context: inTerminal },
+        ),
+        command,
+      );
+      assert.strictEqual(
+        resolveShortcutCommand(
+          event({ key, ctrlKey: true, shiftKey: true }),
+          DEFAULT_RESOLVED_KEYBINDINGS,
+          { platform: "Linux x86_64", context: inTerminal },
+        ),
+        command,
+      );
+    }
+  });
+
+  it("hands passthrough keys back to the app but not keys the shell owns", () => {
+    assert.isTrue(
+      isTerminalPassthroughShortcut(
+        event({ key: "p", metaKey: true }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "MacIntel", context: inTerminal },
+      ),
+    );
+    assert.isTrue(
+      isTerminalPassthroughShortcut(
+        event({ key: "p", ctrlKey: true, shiftKey: true }),
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "Linux x86_64", context: inTerminal },
+      ),
+    );
+    // ctrl+p is shell history on Linux, and ctrl+a/ctrl+e are readline motions
+    // that were never bound in the app.
+    for (const key of ["p", "a", "e"]) {
+      assert.isFalse(
+        isTerminalPassthroughShortcut(event({ key, ctrlKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+          platform: "Linux x86_64",
+          context: inTerminal,
+        }),
+      );
+    }
+  });
+
+  it("derives macPlatform from the platform rather than the caller context", () => {
+    assert.notStrictEqual(
+      resolveShortcutCommand(event({ key: "p", ctrlKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "Linux x86_64",
+        context: { ...inTerminal, macPlatform: true },
+      }),
+      "quickSearch.open",
+    );
+  });
+});
+
 describe("IDE default keybindings (Zed-style docks)", () => {
   it("resolves mod+j to rightPanel.toggle and keeps mod+alt+b working", () => {
     assert.strictEqual(
@@ -898,7 +990,7 @@ describe("IDE default keybindings (Zed-style docks)", () => {
     );
   });
 
-  it("resolves mod+p and mod+shift+f to quick search outside the terminal", () => {
+  it("resolves mod+p and mod+shift+f to quick search", () => {
     assert.strictEqual(
       resolveShortcutCommand(event({ key: "p", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
         platform: "MacIntel",
@@ -913,12 +1005,8 @@ describe("IDE default keybindings (Zed-style docks)", () => {
       ),
       "quickSearch.content",
     );
-    assert.isNull(
-      resolveShortcutCommand(event({ key: "p", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
-        platform: "MacIntel",
-        context: { terminalFocus: true },
-      }),
-    );
+    // Terminal-focus behaviour is covered by "navigation shortcuts while the
+    // terminal is focused" above.
   });
 
   it("routes mod+n to new tree file, new chat, or new terminal by focus", () => {
