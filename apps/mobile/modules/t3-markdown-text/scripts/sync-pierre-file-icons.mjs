@@ -79,10 +79,28 @@ const colors = {
 const customIcons = {
   agents: "t3-file-icon-agents",
   claude: "t3-file-icon-claude",
+  csharp: "t3-file-icon-csharp",
+  dart: "t3-file-icon-dart",
+  elixir: "t3-file-icon-elixir",
+  gradle: "t3-file-icon-gradle",
+  haskell: "t3-file-icon-haskell",
+  java: "t3-file-icon-java",
+  kotlin: "t3-file-icon-kotlin",
+  lua: "t3-file-icon-lua",
+  media: "t3-file-icon-media",
+  nix: "t3-file-icon-nix",
   package: "t3-file-icon-package-json",
+  pdf: "t3-file-icon-pdf",
+  php: "t3-file-icon-php",
   pnpm: "t3-file-icon-pnpm",
+  powershell: "t3-file-icon-powershell",
+  proto: "t3-file-icon-proto",
+  r: "t3-file-icon-r",
   readme: "t3-file-icon-readme",
+  scala: "t3-file-icon-scala",
+  toml: "t3-file-icon-toml",
   tsconfig: "t3-file-icon-tsconfig",
+  xml: "t3-file-icon-xml",
 };
 
 function symbolFromSprite(sprite, id) {

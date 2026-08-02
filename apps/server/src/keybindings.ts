@@ -47,6 +47,7 @@ import { fromJsonStringPretty, fromLenientJson } from "@t3tools/shared/schemaJso
 import {
   DEFAULT_KEYBINDINGS,
   DEFAULT_RESOLVED_KEYBINDINGS,
+  SUPERSEDED_DEFAULT_KEYBINDINGS,
   compileResolvedKeybindingRule,
   compileResolvedKeybindingsConfig,
   parseKeybindingShortcut,
@@ -107,6 +108,10 @@ function isSameKeybindingRule(left: KeybindingRule, right: KeybindingRule): bool
     left.key === right.key &&
     (left.when ?? undefined) === (right.when ?? undefined)
   );
+}
+
+function describeKeybindingRule(rule: KeybindingRule): string {
+  return rule.when ? `${rule.key} (${rule.when})` : rule.key;
 }
 
 function keybindingShortcutContext(rule: KeybindingRule): string | null {
@@ -493,7 +498,41 @@ const make = Effect.gen(function* () {
         yield* Cache.invalidate(resolvedConfigCache, resolvedConfigCacheKey);
         return;
       }
-      const customConfig = runtimeConfig.keybindings;
+      // Rewrite untouched copies of superseded defaults before backfilling, so
+      // a default whose `key`/`when` changed reaches existing installs too. An
+      // exact match means the user never edited the rule; anything else is a
+      // customization and is left as-is.
+      const migratedRules: Array<{
+        readonly command: KeybindingRule["command"];
+        readonly from: string;
+        readonly to: string;
+      }> = [];
+      const customConfig = runtimeConfig.keybindings.map((entry) => {
+        const superseded = SUPERSEDED_DEFAULT_KEYBINDINGS.find((stale) =>
+          isSameKeybindingRule(entry, stale),
+        );
+        if (!superseded) return entry;
+        const currentDefault = DEFAULT_KEYBINDINGS.find(
+          (defaultRule) => defaultRule.command === entry.command,
+        );
+        // Dropped from the defaults entirely: leave it, removing a binding the
+        // user still sees is worse than leaving a stale one.
+        if (!currentDefault || isSameKeybindingRule(entry, currentDefault)) return entry;
+        migratedRules.push({
+          command: entry.command,
+          from: describeKeybindingRule(entry),
+          to: describeKeybindingRule(currentDefault),
+        });
+        return currentDefault;
+      });
+      const hasMigratedRules = migratedRules.length > 0;
+      if (hasMigratedRules) {
+        yield* Effect.logInfo("migrating superseded default keybindings", {
+          path: keybindingsConfigPath,
+          rules: migratedRules,
+        });
+      }
+
       const existingCommands = new Set(customConfig.map((entry) => entry.command));
       const missingDefaults: KeybindingRule[] = [];
       const shortcutConflictWarnings: Array<{
@@ -530,7 +569,7 @@ const make = Effect.gen(function* () {
           reason: "shortcut context already used by existing rule",
         });
       }
-      if (missingDefaults.length === 0) {
+      if (missingDefaults.length === 0 && !hasMigratedRules) {
         yield* Cache.invalidate(resolvedConfigCache, resolvedConfigCacheKey);
         return;
       }

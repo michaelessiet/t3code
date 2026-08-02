@@ -37,6 +37,7 @@ import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { useComposerHandleContext } from "~/composerHandleContext";
 import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { useTheme } from "~/hooks/useTheme";
+import { clampMenuToViewport, type MenuPoint } from "~/lib/menuPosition";
 import { cn } from "~/lib/utils";
 import { T3_PIERRE_ICONS } from "~/pierre-icons";
 import { useThreadShell } from "~/state/entities";
@@ -127,6 +128,75 @@ interface TreeContextMenuAction {
   readonly icon: LucideIcon;
   readonly destructive?: boolean;
   readonly run: () => void;
+}
+
+/**
+ * The tree renders no context menu of its own (`render: () => null`), so this is
+ * a plain fixed-position surface anchored to the row. Its height depends on the
+ * action list, so the position is clamped against the *measured* box: rows near
+ * the bottom of a tall tree would otherwise push Delete past the viewport edge.
+ */
+function TreeContextMenu({
+  anchorRect,
+  actions,
+  onRun,
+}: {
+  anchorRect: ContextMenuAnchorRect;
+  actions: ReadonlyArray<TreeContextMenuAction>;
+  onRun: (action: TreeContextMenuAction) => void;
+}) {
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const [position, setPosition] = useState<MenuPoint | null>(null);
+  const preferredLeft = anchorRect.left;
+  const preferredTop = anchorRect.bottom + 2;
+
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    if (menu === null) return;
+    const place = () => {
+      setPosition(
+        clampMenuToViewport(
+          menu.getBoundingClientRect(),
+          { left: preferredLeft, top: preferredTop },
+          { width: window.innerWidth, height: window.innerHeight },
+        ),
+      );
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [preferredLeft, preferredTop]);
+
+  return (
+    <div
+      ref={menuRef}
+      data-file-tree-context-menu-root="true"
+      className="fixed z-50 max-h-[min(24rem,70vh)] min-w-44 overflow-y-auto rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md"
+      style={{
+        left: position?.left ?? preferredLeft,
+        top: position?.top ?? preferredTop,
+        // Measured in a layout effect, so this only hides a pre-paint frame.
+        visibility: position === null ? "hidden" : undefined,
+      }}
+      role="menu"
+    >
+      {actions.map((action) => (
+        <button
+          key={action.label}
+          type="button"
+          role="menuitem"
+          className={cn(
+            "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground",
+            action.destructive === true && "text-destructive hover:text-destructive",
+          )}
+          onClick={() => onRun(action)}
+        >
+          <action.icon className="size-3.5" />
+          {action.label}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 export default function FileBrowserPanel({
@@ -744,35 +814,15 @@ export default function FileBrowserPanel({
       )}
       {contextMenu !== null && contextMenuActions !== null
         ? createPortal(
-            <div
-              data-file-tree-context-menu-root="true"
-              className="fixed z-50 min-w-44 rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md"
-              style={{
-                left: Math.min(contextMenu.anchorRect.left, window.innerWidth - 192),
-                top: Math.min(contextMenu.anchorRect.bottom + 2, window.innerHeight - 160),
+            <TreeContextMenu
+              anchorRect={contextMenu.anchorRect}
+              actions={contextMenuActions}
+              onRun={(action) => {
+                contextMenu.close({ restoreFocus: false });
+                setContextMenu(null);
+                action.run();
               }}
-              role="menu"
-            >
-              {contextMenuActions.map((action) => (
-                <button
-                  key={action.label}
-                  type="button"
-                  role="menuitem"
-                  className={cn(
-                    "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground",
-                    action.destructive === true && "text-destructive hover:text-destructive",
-                  )}
-                  onClick={() => {
-                    contextMenu.close({ restoreFocus: false });
-                    setContextMenu(null);
-                    action.run();
-                  }}
-                >
-                  <action.icon className="size-3.5" />
-                  {action.label}
-                </button>
-              ))}
-            </div>,
+            />,
             document.body,
           )
         : null}

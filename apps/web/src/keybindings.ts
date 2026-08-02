@@ -35,6 +35,13 @@ export interface ShortcutMatchContext {
   editorFocus: boolean;
   fileTreeFocus: boolean;
   rightPanelFocus: boolean;
+  /**
+   * Derived from the platform rather than supplied by callers. `when` clauses
+   * use it to let Cmd-based app shortcuts beat the terminal on macOS while
+   * leaving the Ctrl equivalents (ctrl+p, ctrl+n, ctrl+w…) to readline on
+   * Linux and Windows.
+   */
+  macPlatform: boolean;
   [key: string]: boolean;
 }
 
@@ -117,7 +124,10 @@ function resolvePlatform(options: ShortcutMatchOptions | undefined): string {
   return options?.platform ?? navigator.platform;
 }
 
-function resolveContext(options: ShortcutMatchOptions | undefined): ShortcutMatchContext {
+function resolveContext(
+  options: ShortcutMatchOptions | undefined,
+  platform: string,
+): ShortcutMatchContext {
   return {
     terminalFocus: false,
     terminalOpen: false,
@@ -127,6 +137,8 @@ function resolveContext(options: ShortcutMatchOptions | undefined): ShortcutMatc
     fileTreeFocus: false,
     rightPanelFocus: false,
     ...options?.context,
+    // Spread last: the platform decides this one, not the caller.
+    macPlatform: isMacPlatform(platform),
   };
 }
 
@@ -173,7 +185,7 @@ function findEffectiveShortcutForCommand(
   options?: ShortcutMatchOptions,
 ): KeybindingShortcut | null {
   const platform = resolvePlatform(options);
-  const context = resolveContext(options);
+  const context = resolveContext(options, platform);
   const claimedShortcuts = new Set<string>();
 
   for (let index = keybindings.length - 1; index >= 0; index -= 1) {
@@ -210,7 +222,7 @@ export function resolveShortcutCommand(
   options?: ShortcutMatchOptions,
 ): KeybindingCommand | null {
   const platform = resolvePlatform(options);
-  const context = resolveContext(options);
+  const context = resolveContext(options, platform);
 
   for (let index = keybindings.length - 1; index >= 0; index -= 1) {
     const binding = keybindings[index];
@@ -399,6 +411,34 @@ export function isDiffToggleShortcut(
   options?: ShortcutMatchOptions,
 ): boolean {
   return matchesCommandShortcut(event, keybindings, "diff.toggle", options);
+}
+
+/**
+ * App commands the terminal must hand back to the window instead of consuming.
+ * Resolution honours `when` clauses, so a binding the terminal legitimately
+ * owns on this platform (ctrl+p on Linux, say) never resolves to a command in
+ * this set and stays with the shell.
+ */
+const TERMINAL_PASSTHROUGH_COMMANDS: ReadonlySet<KeybindingCommand> = new Set([
+  "terminal.toggle",
+  "terminal.split",
+  "terminal.splitVertical",
+  "terminal.new",
+  "terminal.close",
+  "diff.toggle",
+  "quickSearch.open",
+  "quickSearch.content",
+  "commandPalette.toggle",
+  "graph.toggle",
+]);
+
+export function isTerminalPassthroughShortcut(
+  event: ShortcutEventLike,
+  keybindings: ResolvedKeybindingsConfig,
+  options?: ShortcutMatchOptions,
+): boolean {
+  const command = resolveShortcutCommand(event, keybindings, options);
+  return command !== null && TERMINAL_PASSTHROUGH_COMMANDS.has(command);
 }
 
 export function isSearchToggleShortcut(

@@ -318,6 +318,59 @@ it.layer(NodeServices.layer)("keybindings", (it) => {
       }).pipe(Effect.provide(makeKeybindingsLayer())),
   );
 
+  it.effect("rewrites untouched superseded defaults on startup but keeps customizations", () =>
+    Effect.gen(function* () {
+      const { keybindingsConfigPath } = yield* ServerConfig.ServerConfig;
+      // mod+p is an untouched copy of the old default, so it migrates.
+      // mod+shift+p was re-bound by the user and must survive verbatim.
+      yield* writeKeybindingsConfig(keybindingsConfigPath, [
+        { key: "mod+p", command: "quickSearch.open", when: "!terminalFocus" },
+        { key: "mod+shift+k", command: "commandPalette.toggle", when: "!terminalFocus" },
+      ]);
+
+      yield* Effect.gen(function* () {
+        const keybindings = yield* Keybindings.Keybindings;
+        yield* keybindings.syncDefaultKeybindingsOnStartup;
+      });
+
+      const persisted = yield* readKeybindingsConfig(keybindingsConfigPath);
+      const byCommand = new Map(persisted.map((entry) => [entry.command, entry]));
+
+      const quickOpen = byCommand.get("quickSearch.open");
+      assert.equal(quickOpen?.key, "mod+p");
+      assert.equal(quickOpen?.when, "!terminalFocus || macPlatform");
+
+      const palette = byCommand.get("commandPalette.toggle");
+      assert.equal(palette?.key, "mod+shift+k");
+      assert.equal(palette?.when, "!terminalFocus");
+
+      // Exactly one rule per migrated command — a rewrite, not a duplicate.
+      assert.lengthOf(
+        persisted.filter((entry) => entry.command === "quickSearch.open"),
+        1,
+      );
+    }).pipe(Effect.provide(makeKeybindingsLayer())),
+  );
+
+  it.effect("leaves a superseded default alone once it already matches the current default", () =>
+    Effect.gen(function* () {
+      const { keybindingsConfigPath } = yield* ServerConfig.ServerConfig;
+      yield* writeKeybindingsConfig(keybindingsConfigPath, [
+        { key: "mod+p", command: "quickSearch.open", when: "!terminalFocus || macPlatform" },
+      ]);
+
+      yield* Effect.gen(function* () {
+        const keybindings = yield* Keybindings.Keybindings;
+        yield* keybindings.syncDefaultKeybindingsOnStartup;
+      });
+
+      const persisted = yield* readKeybindingsConfig(keybindingsConfigPath);
+      const quickOpen = persisted.filter((entry) => entry.command === "quickSearch.open");
+      assert.lengthOf(quickOpen, 1);
+      assert.equal(quickOpen[0]?.when, "!terminalFocus || macPlatform");
+    }).pipe(Effect.provide(makeKeybindingsLayer())),
+  );
+
   it.effect("skips conflicting default keybindings on startup and logs a detailed warning", () => {
     const messages: string[] = [];
     const logger = Logger.make(({ message }) => {
