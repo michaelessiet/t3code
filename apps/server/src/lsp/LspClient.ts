@@ -28,7 +28,10 @@ import type * as Protocol from "vscode-languageserver-protocol";
 import type { LanguageServerConfig } from "./LanguageServers.ts";
 
 const REQUEST_TIMEOUT_MS = 15_000;
-const INITIALIZE_TIMEOUT_MS = 30_000;
+// jdtls-class servers legitimately take over 30s on a cold start (bundle
+// cache creation, project import); a timeout that fires while the server is
+// still booting turns a slow start into a hard failure.
+const INITIALIZE_TIMEOUT_MS = 120_000;
 
 export type LspClientFailure =
   | { readonly kind: "not_installed" }
@@ -146,7 +149,14 @@ export class LspClient {
 
   static async start(options: LspClientOptions): Promise<LspClient> {
     const client = new LspClient(options);
-    await client.spawnAndInitialize();
+    try {
+      await client.spawnAndInitialize();
+    } catch (error) {
+      // A failed initialize must not leak the spawned process: an orphaned
+      // server also wedges future starts that contend on its workspace lock.
+      await client.dispose().catch(() => {});
+      throw error;
+    }
     return client;
   }
 

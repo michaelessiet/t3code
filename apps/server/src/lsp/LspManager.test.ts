@@ -204,6 +204,7 @@ it.layer(CustomServerTestLayer, { excludeTestServices: true })(
         const status = yield* lspManager.serverStatus({ cwd });
         const fake = status.servers.find((server) => server.serverId === "fake-lang");
         expect(fake?.state).toBe("not_installed");
+        expect(fake?.extensions).toEqual([".fake"]);
       }),
     );
   },

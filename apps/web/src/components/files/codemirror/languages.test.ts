@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { editorLanguageIdForPath, languageExtensionForPath } from "./languages";
+import {
+  editorLanguageIdForPath,
+  languageExtensionForPath,
+  lazyLanguageLoaderForPath,
+} from "./languages";
 
 describe("editorLanguageIdForPath", () => {
   it("maps common source extensions to their language ids", () => {
@@ -46,5 +50,31 @@ describe("languageExtensionForPath", () => {
 
   it("returns an empty extension for plain files", () => {
     expect(languageExtensionForPath("LICENSE")).toEqual([]);
+  });
+});
+
+describe("lazyLanguageLoaderForPath", () => {
+  it("resolves registry languages outside the eager set", () => {
+    expect(lazyLanguageLoaderForPath("src/Main.java")).not.toBeNull();
+    expect(lazyLanguageLoaderForPath("src/App.kt")).not.toBeNull();
+    expect(lazyLanguageLoaderForPath("build.gradle.kts")).not.toBeNull();
+    expect(lazyLanguageLoaderForPath("Dockerfile")).not.toBeNull();
+  });
+
+  it("returns null for eagerly supported languages", () => {
+    expect(lazyLanguageLoaderForPath("src/index.ts")).toBeNull();
+    expect(lazyLanguageLoaderForPath("src/main.rs")).toBeNull();
+  });
+
+  it("returns null when no grammar matches", () => {
+    expect(lazyLanguageLoaderForPath("LICENSE")).toBeNull();
+    expect(lazyLanguageLoaderForPath("bin/tool.exe")).toBeNull();
+  });
+
+  it("loads language support for Java and Kotlin", async () => {
+    const java = lazyLanguageLoaderForPath("src/Main.java");
+    const kotlin = lazyLanguageLoaderForPath("src/App.kt");
+    await expect(java?.()).resolves.toBeDefined();
+    await expect(kotlin?.()).resolves.toBeDefined();
   });
 });
