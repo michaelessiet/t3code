@@ -707,8 +707,40 @@ export function TerminalViewport({
       void resizeTerminal(activeTerminal.cols, activeTerminal.rows);
     }, 30);
 
+    // Refit on any container size change (right panel/sidebar toggles, splits,
+    // hidden -> visible) — most of those never fire the window resize event.
+    let containerResizeFrame: number | null = null;
+    const containerResizeObserver = new ResizeObserver(() => {
+      if (containerResizeFrame !== null) return;
+      containerResizeFrame = window.requestAnimationFrame(() => {
+        containerResizeFrame = null;
+        const activeTerminal = terminalRef.current;
+        const activeFitAddon = fitAddonRef.current;
+        const mountElement = containerRef.current;
+        if (!activeTerminal || !activeFitAddon || !mountElement) return;
+        const { width, height } = mountElement.getBoundingClientRect();
+        if (width <= 0 || height <= 0) return;
+        const previousCols = activeTerminal.cols;
+        const previousRows = activeTerminal.rows;
+        const wasAtBottom =
+          activeTerminal.buffer.active.viewportY >= activeTerminal.buffer.active.baseY;
+        if (!fitTerminalSafely(activeFitAddon)) return;
+        if (wasAtBottom) {
+          activeTerminal.scrollToBottom();
+        }
+        if (activeTerminal.cols !== previousCols || activeTerminal.rows !== previousRows) {
+          void resizeTerminal(activeTerminal.cols, activeTerminal.rows);
+        }
+      });
+    });
+    containerResizeObserver.observe(mount);
+
     return () => {
       window.clearTimeout(fitTimer);
+      if (containerResizeFrame !== null) {
+        window.cancelAnimationFrame(containerResizeFrame);
+      }
+      containerResizeObserver.disconnect();
       inputDisposable.dispose();
       selectionDisposable.dispose();
       terminalLinksDisposable.dispose();
