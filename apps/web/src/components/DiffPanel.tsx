@@ -453,10 +453,18 @@ export default function DiffPanel({
   const diffFileKeys = useMemo(() => codeViewFiles.map((file) => file.fileKey), [codeViewFiles]);
   const allDiffFilesCollapsed = areAllDiffFilesCollapsed(diffFileKeys, collapsedDiffFileKeys);
 
+  // The selected file path is sticky in the store, so scroll once per reveal
+  // request — waiting for the file to appear in a still-loading patch — and
+  // then leave the viewport alone. Re-scrolling on every file-list identity
+  // change (collapse toggles, watcher-driven diff refreshes) yanks the view
+  // away from wherever the user scrolled.
+  const handledFileRevealRequestRef = useRef(0);
   useEffect(() => {
-    if (!selectedFilePath) return;
+    if (!selectedFilePath || selectedFileRevealRequestId === 0) return;
+    if (handledFileRevealRequestRef.current === selectedFileRevealRequestId) return;
     const file = codeViewFiles.find((candidate) => candidate.filePath === selectedFilePath);
     if (!file) return;
+    handledFileRevealRequestRef.current = selectedFileRevealRequestId;
     codeViewRef.current?.scrollTo({ type: "item", id: file.fileKey, align: "start" });
   }, [codeViewFiles, selectedFilePath, selectedFileRevealRequestId]);
 
@@ -867,7 +875,7 @@ export default function DiffPanel({
                 <AnnotatableCodeView
                   viewerRef={codeViewRef}
                   key={collapseScopeKey ?? reviewSectionId}
-                  className="diff-render-surface h-full min-h-0 overflow-auto [&>div>div:last-child]:top-0! [&>div>div:last-child]:bottom-auto!"
+                  className="diff-render-surface h-full min-h-0 overflow-auto"
                   files={codeViewFiles}
                   sectionId={reviewSectionId}
                   sectionTitle={reviewSectionTitle}
