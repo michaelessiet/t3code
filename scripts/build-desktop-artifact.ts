@@ -581,6 +581,60 @@ interface StagePackageJson {
 export const STAGE_INSTALL_ARGS = ["install", "--prod"] as const;
 export const DESKTOP_ASAR_UNPACK = ["node_modules/@ff-labs/fff-bin-*/**/*"] as const;
 
+export const BUILDER_HOOKS_FILENAME = "electron-builder-hooks.cjs";
+/**
+ * electron-builder hooks staged next to the app's package.json and referenced
+ * by absolute path from the build config (the config is serialized JSON, so
+ * hooks must be module paths, not inline functions).
+ *
+ * onNodeModuleFile rescues TypeScript's standard-library declarations from
+ * app-builder-lib's default node_modules ignore list, whose excludedExts
+ * strips every *.d.ts. Without typescript/lib/lib.es5.d.ts and friends the
+ * packaged vtsls still runs tsserver, but with zero default libs, so every
+ * ambient global (Error, JSON, Promise, console, ...) reports "Cannot find
+ * name" in every JS/TS project. The hook's return value force-includes a
+ * file, and is only honored when the config also declares a `files` matcher.
+ *
+ * afterPack asserts the libs actually landed in app.asar.unpacked (before
+ * signing), so the stripping can never silently regress again.
+ */
+export const BUILDER_HOOKS_SOURCE = String.raw`"use strict";
+const fs = require("fs");
+const path = require("path");
+
+const TYPESCRIPT_LIB_DTS = /[\\/]node_modules[\\/]typescript[\\/]lib[\\/][^\\/]+\.d\.ts$/;
+
+exports.onNodeModuleFile = (filePath) => TYPESCRIPT_LIB_DTS.test(filePath);
+
+exports.afterPack = async (context) => {
+  const resourcesDir =
+    context.electronPlatformName === "darwin"
+      ? path.join(
+          context.appOutDir,
+          context.packager.appInfo.productFilename + ".app",
+          "Contents",
+          "Resources",
+        )
+      : path.join(context.appOutDir, "resources");
+  const probe = path.join(
+    resourcesDir,
+    "app.asar.unpacked",
+    "node_modules",
+    "typescript",
+    "lib",
+    "lib.es5.d.ts",
+  );
+  if (!fs.existsSync(probe)) {
+    throw new Error(
+      "TypeScript standard library missing from packaged app (" +
+        probe +
+        "). electron-builder stripped node_modules *.d.ts files, so the " +
+        'packaged vtsls would report every JS/TS global (Error, JSON, ...) as "Cannot find name".',
+    );
+  }
+};
+`;
+
 export interface MacPasskeySigningConfiguration {
   readonly appId: string;
   readonly teamId: string;
@@ -1385,6 +1439,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         readonly provisioningProfilePath: string;
       }
     | undefined,
+  builderHooksPath: string,
 ) {
   const buildConfig: Record<string, unknown> = {
     appId: DESKTOP_APP_ID,
@@ -1393,6 +1448,15 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     directories: {
       buildResources: "apps/desktop/resources",
     },
+    // Equivalent to the implicit default ("**/*"), but declared explicitly:
+    // app-builder-lib only honors onNodeModuleFile force-includes when a
+    // files matcher exists (NodeModuleCopyHelper checks fileMatched &&
+    // forceIncluded before applying its default *.d.ts/*.o/... exclusions).
+    files: [{ filter: ["**/*"] }],
+    // See BUILDER_HOOKS_SOURCE: keeps typescript/lib/*.d.ts in the package
+    // and asserts post-pack that they landed.
+    onNodeModuleFile: builderHooksPath,
+    afterPack: builderHooksPath,
     // The Windows primary backend runs the server bundle through
     // ELECTRON_RUN_AS_NODE (asar-aware), so it reads bin.mjs straight out of
     // app.asar. The WSL backend instead launches plain `wsl.exe -- node`, which
@@ -1753,6 +1817,8 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     workspacePatchedDependencies,
     stageDependencies,
   );
+  const builderHooksPath = path.join(stageAppDir, BUILDER_HOOKS_FILENAME);
+  yield* fs.writeFileString(builderHooksPath, BUILDER_HOOKS_SOURCE);
   const stagePackageJson: StagePackageJson = {
     name: "t3code",
     version: appVersion,
@@ -1776,6 +1842,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
             provisioningProfilePath: macPasskeySigning.provisioningProfilePath,
           }
         : undefined,
+      builderHooksPath,
     ),
     dependencies: stageDependencies,
     devDependencies: {
