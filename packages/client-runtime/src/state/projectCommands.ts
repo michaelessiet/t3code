@@ -45,8 +45,12 @@ export function createProjectEnvironmentAtoms<R, E>(
 ) {
   const projectScheduler = createAtomCommandScheduler();
   const fileScheduler = createAtomCommandScheduler();
+  // keepAlive: an unsaved buffer must outlive its file surface (tab switch
+  // with autosave off unmounts the only subscriber); confirmed entries are
+  // nulled after the write round-trips, so retention stays bounded.
   const optimisticFileFamily = Atom.family((key: string) =>
     Atom.make<OptimisticProjectFile | null>(null).pipe(
+      Atom.keepAlive,
       Atom.withLabel(`environment-data:projects:optimistic-file:${key}`),
     ),
   );

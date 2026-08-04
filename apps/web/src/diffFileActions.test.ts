@@ -34,6 +34,25 @@ describe("openDiffFilePrimaryAction", () => {
     expect(openInEditor).not.toHaveBeenCalled();
   });
 
+  it("opens in the external editor when the user opted in", () => {
+    const openInEditor = vi.fn();
+
+    openDiffFilePrimaryAction({
+      threadRef: THREAD_REF,
+      filePath: "apps/web/src/components/DiffPanel.tsx",
+      activeCwd: "/repo/project",
+      openFilesInExternalEditor: true,
+      openInEditor,
+    });
+
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, THREAD_REF),
+    ).toMatchObject({ isOpen: false });
+    expect(openInEditor).toHaveBeenCalledWith(
+      "/repo/project/apps/web/src/components/DiffPanel.tsx",
+    );
+  });
+
   it("falls back to the editor without thread context", () => {
     const openInEditor = vi.fn();
 

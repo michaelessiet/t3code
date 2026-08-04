@@ -466,6 +466,7 @@ export default function DiffPanel({
         threadRef: routeThreadRef,
         filePath,
         activeCwd,
+        openFilesInExternalEditor: settings.openFilesInExternalEditor,
         openInEditor: (targetPath) => {
           void (async () => {
             const result = await openInPreferredEditor(targetPath);
@@ -485,7 +486,7 @@ export default function DiffPanel({
         },
       });
     },
-    [activeCwd, openInPreferredEditor, routeThreadRef],
+    [activeCwd, openInPreferredEditor, routeThreadRef, settings.openFilesInExternalEditor],
   );
   const toggleDiffFileCollapsed = useCallback(
     (fileKey: string) => {

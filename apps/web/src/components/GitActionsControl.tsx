@@ -85,7 +85,8 @@ import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { vcsEnvironment } from "~/state/vcs";
 import { randomUUID } from "~/lib/utils";
-import { resolvePathLinkTarget } from "~/terminal-links";
+import { getClientSettings } from "~/hooks/useSettings";
+import { openWorkspaceFilePrimaryAction } from "~/openFileActions";
 import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { readLocalApi } from "~/localApi";
 import { getSourceControlPresentation } from "~/sourceControlPresentation";
@@ -1628,24 +1629,31 @@ export default function GitActionsControl({
         });
         return;
       }
-      const target = resolvePathLinkTarget(filePath, gitCwd);
-      void (async () => {
-        const result = await openInPreferredEditor(target);
-        if (result._tag === "Success" || isAtomCommandInterrupted(result)) {
-          return;
-        }
-        const error = squashAtomCommandFailure(result);
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Unable to open file",
-            description: error instanceof Error ? error.message : "An error occurred.",
-            ...(threadToastData !== undefined ? { data: threadToastData } : {}),
-          }),
-        );
-      })();
+      openWorkspaceFilePrimaryAction({
+        threadRef: activeThreadRef,
+        filePath,
+        workspaceRoot: gitCwd,
+        openFilesInExternalEditor: getClientSettings().openFilesInExternalEditor,
+        openInEditor: (targetPath) => {
+          void (async () => {
+            const result = await openInPreferredEditor(targetPath);
+            if (result._tag === "Success" || isAtomCommandInterrupted(result)) {
+              return;
+            }
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Unable to open file",
+                description: error instanceof Error ? error.message : "An error occurred.",
+                ...(threadToastData !== undefined ? { data: threadToastData } : {}),
+              }),
+            );
+          })();
+        },
+      });
     },
-    [gitCwd, openInPreferredEditor, threadToastData],
+    [activeThreadRef, gitCwd, openInPreferredEditor, threadToastData],
   );
 
   const canPublishRepository = isRepo && gitStatusForActions !== null && !hasPrimaryRemote;

@@ -175,7 +175,10 @@ function basenameOfPath(path: string): string {
   return separatorIndex >= 0 ? path.slice(separatorIndex + 1) : path;
 }
 
-function workspaceRelativePath(path: string, workspaceRoot: string | undefined): string | null {
+export function workspaceRelativePath(
+  path: string,
+  workspaceRoot: string | undefined,
+): string | null {
   if (!workspaceRoot) return null;
   const normalizedPath = normalizeWindowsDrivePath(path.replaceAll("\\", "/"));
   const normalizedRoot = normalizeWindowsDrivePath(workspaceRoot.replaceAll("\\", "/")).replace(

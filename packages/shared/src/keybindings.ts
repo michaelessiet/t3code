@@ -55,6 +55,8 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod+shift+n", command: "chat.newLocal", when: "!terminalFocus && !fileTreeFocus" },
   { key: "mod+shift+m", command: "modelPicker.toggle", when: "!terminalFocus" },
   { key: "mod+i", command: "editor.showCompletions", when: "editorFocus" },
+  // `!terminalFocus` leaves ctrl+s to the shell (XOFF flow control).
+  { key: "mod+s", command: "file.save", when: "!terminalFocus" },
   { key: "mod+shift+e", command: "fileTree.toggleFocus" },
   { key: "mod+shift+n", command: "fileTree.newDirectory", when: "fileTreeFocus" },
   { key: "mod+n", command: "fileTree.newFile", when: "fileTreeFocus" },

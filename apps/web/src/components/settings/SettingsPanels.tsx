@@ -23,8 +23,10 @@ import {
 import {
   DEFAULT_UNIFIED_SETTINGS,
   MAX_AUTO_COMPACT_THRESHOLD_TOKENS,
+  MAX_AUTO_SAVE_DELAY_MS,
   MAX_GLASS_OPACITY,
   MIN_AUTO_COMPACT_THRESHOLD_TOKENS,
+  MIN_AUTO_SAVE_DELAY_MS,
   MIN_GLASS_OPACITY,
 } from "@t3tools/contracts/settings";
 import { createModelSelection } from "@t3tools/shared/model";
@@ -130,6 +132,20 @@ const TIMESTAMP_FORMAT_LABELS = {
 } as const;
 
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
+
+const AUTO_SAVE_MODE_LABELS = {
+  afterDelay: "After delay",
+  onFocusChange: "On focus change",
+} as const;
+
+const AUTO_SAVE_DELAY_STEP_MS = 100;
+
+function normalizeAutoSaveDelayMs(value: number | null): number {
+  if (value === null || !Number.isFinite(value)) {
+    return DEFAULT_UNIFIED_SETTINGS.autoSaveDelayMs;
+  }
+  return Math.min(MAX_AUTO_SAVE_DELAY_MS, Math.max(MIN_AUTO_SAVE_DELAY_MS, Math.round(value)));
+}
 
 const AUTO_COMPACT_THRESHOLD_STEP_TOKENS = 10_000;
 
@@ -434,6 +450,18 @@ export function useSettingsRestore(onRestored?: () => void) {
         ? ["Project Grouping"]
         : []),
       ...(settings.wordWrap !== DEFAULT_UNIFIED_SETTINGS.wordWrap ? ["Word wrap"] : []),
+      ...(settings.autoSaveEnabled !== DEFAULT_UNIFIED_SETTINGS.autoSaveEnabled
+        ? ["Auto save"]
+        : []),
+      ...(settings.autoSaveMode !== DEFAULT_UNIFIED_SETTINGS.autoSaveMode
+        ? ["Auto save trigger"]
+        : []),
+      ...(settings.autoSaveDelayMs !== DEFAULT_UNIFIED_SETTINGS.autoSaveDelayMs
+        ? ["Auto save delay"]
+        : []),
+      ...(settings.openFilesInExternalEditor !== DEFAULT_UNIFIED_SETTINGS.openFilesInExternalEditor
+        ? ["Open files in external editor"]
+        : []),
       ...(settings.showFileConflictWarning !== DEFAULT_UNIFIED_SETTINGS.showFileConflictWarning
         ? ["File conflict warning"]
         : []),
@@ -497,7 +525,11 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.sidebarProjectGroupingMode,
       settings.sidebarThreadPreviewCount,
       settings.timestampFormat,
+      settings.openFilesInExternalEditor,
       settings.showFileConflictWarning,
+      settings.autoSaveEnabled,
+      settings.autoSaveMode,
+      settings.autoSaveDelayMs,
       settings.vimMode,
       settings.wordWrap,
       theme,
@@ -519,6 +551,10 @@ export function useSettingsRestore(onRestored?: () => void) {
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
       vimMode: DEFAULT_UNIFIED_SETTINGS.vimMode,
       wordWrap: DEFAULT_UNIFIED_SETTINGS.wordWrap,
+      autoSaveEnabled: DEFAULT_UNIFIED_SETTINGS.autoSaveEnabled,
+      autoSaveMode: DEFAULT_UNIFIED_SETTINGS.autoSaveMode,
+      autoSaveDelayMs: DEFAULT_UNIFIED_SETTINGS.autoSaveDelayMs,
+      openFilesInExternalEditor: DEFAULT_UNIFIED_SETTINGS.openFilesInExternalEditor,
       showFileConflictWarning: DEFAULT_UNIFIED_SETTINGS.showFileConflictWarning,
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
       glassOpacity: DEFAULT_UNIFIED_SETTINGS.glassOpacity,
@@ -796,6 +832,140 @@ export function GeneralSettingsPanel() {
               checked={settings.wordWrap}
               onCheckedChange={(checked) => updateSettings({ wordWrap: Boolean(checked) })}
               aria-label="Wrap code, tables, diffs, and file previews by default"
+            />
+          }
+        />
+
+        <SettingsRow
+          title="Auto save"
+          description="Automatically save file edits in the built-in editor. When off, save with ⌘S / Ctrl+S."
+          resetAction={
+            settings.autoSaveEnabled !== DEFAULT_UNIFIED_SETTINGS.autoSaveEnabled ? (
+              <SettingResetButton
+                label="auto save"
+                onClick={() =>
+                  updateSettings({
+                    autoSaveEnabled: DEFAULT_UNIFIED_SETTINGS.autoSaveEnabled,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.autoSaveEnabled}
+              onCheckedChange={(checked) => updateSettings({ autoSaveEnabled: Boolean(checked) })}
+              aria-label="Automatically save file edits in the built-in editor"
+            />
+          }
+        />
+
+        <SettingsRow
+          title="Auto save trigger"
+          description="Save after a typing pause, or as soon as the editor or window loses focus."
+          resetAction={
+            settings.autoSaveMode !== DEFAULT_UNIFIED_SETTINGS.autoSaveMode ? (
+              <SettingResetButton
+                label="auto save trigger"
+                onClick={() =>
+                  updateSettings({
+                    autoSaveMode: DEFAULT_UNIFIED_SETTINGS.autoSaveMode,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={settings.autoSaveMode}
+              onValueChange={(value) => {
+                if (value === "afterDelay" || value === "onFocusChange") {
+                  updateSettings({ autoSaveMode: value });
+                }
+              }}
+            >
+              <SelectTrigger
+                className="w-full sm:w-40"
+                aria-label="Auto save trigger"
+                disabled={!settings.autoSaveEnabled}
+              >
+                <SelectValue>{AUTO_SAVE_MODE_LABELS[settings.autoSaveMode]}</SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="afterDelay">
+                  {AUTO_SAVE_MODE_LABELS.afterDelay}
+                </SelectItem>
+                <SelectItem hideIndicator value="onFocusChange">
+                  {AUTO_SAVE_MODE_LABELS.onFocusChange}
+                </SelectItem>
+              </SelectPopup>
+            </Select>
+          }
+        />
+
+        <SettingsRow
+          title="Auto save delay"
+          description="How long after you stop typing edits are saved."
+          resetAction={
+            settings.autoSaveDelayMs !== DEFAULT_UNIFIED_SETTINGS.autoSaveDelayMs ? (
+              <SettingResetButton
+                label="auto save delay"
+                onClick={() =>
+                  updateSettings({
+                    autoSaveDelayMs: DEFAULT_UNIFIED_SETTINGS.autoSaveDelayMs,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <div className="flex shrink-0 items-center gap-2">
+              <NumberField
+                value={settings.autoSaveDelayMs}
+                min={MIN_AUTO_SAVE_DELAY_MS}
+                max={MAX_AUTO_SAVE_DELAY_MS}
+                step={AUTO_SAVE_DELAY_STEP_MS}
+                size="sm"
+                className="w-32"
+                disabled={!settings.autoSaveEnabled || settings.autoSaveMode !== "afterDelay"}
+                onValueChange={(value) =>
+                  updateSettings({ autoSaveDelayMs: normalizeAutoSaveDelayMs(value) })
+                }
+              >
+                <NumberFieldGroup>
+                  <NumberFieldDecrement aria-label="Decrease auto save delay" />
+                  <NumberFieldInput aria-label="Auto save delay in milliseconds" />
+                  <NumberFieldIncrement aria-label="Increase auto save delay" />
+                </NumberFieldGroup>
+              </NumberField>
+              <span className="text-xs text-muted-foreground">ms</span>
+            </div>
+          }
+        />
+
+        <SettingsRow
+          title="Open files in external editor"
+          description="Open file links in a third-party code editor (Cursor, VS Code, …) instead of T3 Code's built-in editor."
+          resetAction={
+            settings.openFilesInExternalEditor !==
+            DEFAULT_UNIFIED_SETTINGS.openFilesInExternalEditor ? (
+              <SettingResetButton
+                label="open files in external editor"
+                onClick={() =>
+                  updateSettings({
+                    openFilesInExternalEditor: DEFAULT_UNIFIED_SETTINGS.openFilesInExternalEditor,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.openFilesInExternalEditor}
+              onCheckedChange={(checked) =>
+                updateSettings({ openFilesInExternalEditor: Boolean(checked) })
+              }
+              aria-label="Open file links in a third-party code editor instead of the built-in editor"
             />
           }
         />

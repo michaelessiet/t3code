@@ -153,12 +153,21 @@ export function QuickSearch() {
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const navigate = useNavigate();
   const threads = useThreadShells();
-  const { activeThread, routeThreadRef } = useHandleNewThread();
-  const project = useProject(
-    activeThread ? scopeProjectRef(activeThread.environmentId, activeThread.projectId) : null,
-  );
-  const environmentId = activeThread?.environmentId ?? null;
-  const cwd = activeThread?.worktreePath ?? project?.workspaceRoot ?? null;
+  const { activeDraftThread, activeThread, defaultProjectRef, routeThreadRef } =
+    useHandleNewThread();
+  // Search scope: the open thread, else the draft being composed, else the
+  // first project — search must keep working from the home and new-chat
+  // pages, not only inside a thread.
+  const scopeRef = activeThread
+    ? scopeProjectRef(activeThread.environmentId, activeThread.projectId)
+    : activeDraftThread
+      ? scopeProjectRef(activeDraftThread.environmentId, activeDraftThread.projectId)
+      : defaultProjectRef;
+  const project = useProject(scopeRef);
+  const environmentId = scopeRef?.environmentId ?? null;
+  const cwd = activeThread
+    ? (activeThread.worktreePath ?? project?.workspaceRoot ?? null)
+    : (activeDraftThread?.worktreePath ?? project?.workspaceRoot ?? null);
 
   const [mode, setMode] = useState<QuickSearchMode | null>(null);
   const [query, setQuery] = useState("");
@@ -324,10 +333,19 @@ export function QuickSearch() {
       ?.scrollIntoView({ block: "nearest" });
   }, [selectedIndex]);
 
+  // Files open into the right panel, which is keyed by thread: the open
+  // thread, else the draft page's pre-created thread (ChatView keys the
+  // panel the same way on draft routes).
+  const fileThreadRef =
+    routeThreadRef ??
+    (activeDraftThread
+      ? scopeThreadRef(activeDraftThread.environmentId, activeDraftThread.threadId)
+      : null);
+
   const activate = useCallback(
     (item: QuickSearchItem) => {
-      close();
       if (item.kind === "thread") {
+        close();
         void navigate({
           to: "/$environmentId/$threadId",
           params: buildThreadRouteParams(scopeThreadRef(item.thread.environmentId, item.thread.id)),
@@ -335,6 +353,7 @@ export function QuickSearch() {
         return;
       }
       if (item.kind === "message") {
+        close();
         if (environmentId === null) return;
         void navigate({
           to: "/$environmentId/$threadId",
@@ -342,16 +361,19 @@ export function QuickSearch() {
         });
         return;
       }
-      if (routeThreadRef === null) return;
+      // No thread surface to open the file into (home page): keep the dialog
+      // open — its preview pane is the only viewer available.
+      if (fileThreadRef === null) return;
+      close();
       activatedFileRef.current = true;
       requestEditorFocus("quick-search");
       if (item.kind === "file") {
-        useRightPanelStore.getState().openFile(routeThreadRef, item.path);
+        useRightPanelStore.getState().openFile(fileThreadRef, item.path);
         return;
       }
-      useRightPanelStore.getState().openFile(routeThreadRef, item.match.path, item.match.line);
+      useRightPanelStore.getState().openFile(fileThreadRef, item.match.path, item.match.line);
     },
-    [close, environmentId, navigate, routeThreadRef],
+    [close, environmentId, fileThreadRef, navigate],
   );
 
   const onInputKeyDown = useCallback(
@@ -382,6 +404,15 @@ export function QuickSearch() {
         : selectedItem.kind === "file-match"
           ? { path: selectedItem.match.path, line: selectedItem.match.line }
           : null;
+
+  // Surface query failures instead of letting them masquerade as an empty
+  // result set (a failed ripgrep spawn used to look identical to "No results").
+  const searchError =
+    debouncedQuery.length === 0
+      ? null
+      : mode === "content"
+        ? (fileContentResults.error ?? messageResults.error)
+        : fileNameResults.error;
 
   const searchPlaceholder =
     mode === "content" ? "Search chat and file contents…" : "Jump to a chat or file…";
@@ -461,12 +492,19 @@ export function QuickSearch() {
             <div className="flex min-h-0 flex-1">
               <ScrollArea className="min-w-0 flex-1">
                 <div className="p-1.5">
+                  {searchError !== null ? (
+                    <div className="px-2 py-1.5 text-xs text-destructive">{searchError}</div>
+                  ) : null}
                   {flatItems.length === 0 ? (
-                    <div className="px-2 py-6 text-center text-xs text-muted-foreground">
-                      {mode === "content" && trimmedQuery.length < 2
-                        ? "Type at least 2 characters to search."
-                        : "No results."}
-                    </div>
+                    searchError !== null ? null : (
+                      <div className="px-2 py-6 text-center text-xs text-muted-foreground">
+                        {mode === "content" && trimmedQuery.length < 2
+                          ? "Type at least 2 characters to search."
+                          : environmentId === null
+                            ? "Add a project to search."
+                            : "No results."}
+                      </div>
+                    )
                   ) : (
                     groups.map((group) => (
                       <div key={group.label} className="mb-1">

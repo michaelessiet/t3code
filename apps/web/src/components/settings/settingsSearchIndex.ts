@@ -28,6 +28,22 @@ const SETTINGS_SEARCH_SECTIONS: ReadonlyArray<SettingsSearchSection> = [
       { title: "Vim mode", keywords: ["editor", "keybindings", "modal"] },
       { title: "Word wrap", keywords: ["editor", "lines", "wrap"] },
       {
+        title: "Auto save",
+        keywords: ["autosave", "save", "editor", "manual save", "cmd+s", "ctrl+s", "dirty"],
+      },
+      {
+        title: "Auto save trigger",
+        keywords: ["autosave", "focus", "blur", "delay", "on focus change", "save mode"],
+      },
+      {
+        title: "Auto save delay",
+        keywords: ["autosave", "debounce", "milliseconds", "delay", "save timing"],
+      },
+      {
+        title: "Open files in external editor",
+        keywords: ["cursor", "vs code", "vscode", "zed", "open in", "third-party", "file links"],
+      },
+      {
         title: "File conflict warning",
         keywords: ["changed on disk", "reload", "banner", "editor", "external change"],
       },

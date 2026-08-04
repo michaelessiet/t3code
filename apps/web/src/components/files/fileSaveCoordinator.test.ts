@@ -26,7 +26,8 @@ describe("FileSaveCoordinator", () => {
     const onPendingChange = vi.fn();
     const onConfirmed = vi.fn();
     const coordinator = new FileSaveCoordinator({
-      debounceMs: 500,
+      getScheduling: () => ({ kind: "debounce", delayMs: 500 }) as const,
+      getFlushOnDispose: () => true,
       persist,
       onPendingChange,
       onConfirmed,
@@ -54,7 +55,8 @@ describe("FileSaveCoordinator", () => {
       .mockResolvedValueOnce(AsyncResult.success(undefined));
     const onPendingChange = vi.fn();
     const coordinator = new FileSaveCoordinator({
-      debounceMs: 500,
+      getScheduling: () => ({ kind: "debounce", delayMs: 500 }) as const,
+      getFlushOnDispose: () => true,
       persist,
       onPendingChange,
       onConfirmed: vi.fn(),
@@ -80,7 +82,8 @@ describe("FileSaveCoordinator", () => {
       .mockResolvedValue(AsyncResult.success(undefined));
     const onPendingChange = vi.fn();
     const coordinator = new FileSaveCoordinator({
-      debounceMs: 500,
+      getScheduling: () => ({ kind: "debounce", delayMs: 500 }) as const,
+      getFlushOnDispose: () => true,
       persist,
       onPendingChange,
       onConfirmed: vi.fn(),
@@ -103,7 +106,8 @@ describe("FileSaveCoordinator", () => {
       .fn<(contents: string) => Promise<AtomCommandResult<void, never>>>()
       .mockResolvedValue(AsyncResult.success(undefined));
     const coordinator = new FileSaveCoordinator({
-      debounceMs: 500,
+      getScheduling: () => ({ kind: "debounce", delayMs: 500 }) as const,
+      getFlushOnDispose: () => true,
       persist,
       onPendingChange: vi.fn(),
       onConfirmed: vi.fn(),
@@ -121,7 +125,8 @@ describe("FileSaveCoordinator", () => {
       .mockResolvedValue(AsyncResult.success(undefined));
     const onPendingChange = vi.fn();
     const coordinator = new FileSaveCoordinator({
-      debounceMs: 500,
+      getScheduling: () => ({ kind: "debounce", delayMs: 500 }) as const,
+      getFlushOnDispose: () => true,
       persist,
       onPendingChange,
       onConfirmed: vi.fn(),
@@ -143,7 +148,8 @@ describe("FileSaveCoordinator", () => {
       .mockReturnValue(write.promise);
     const onPendingChange = vi.fn();
     const coordinator = new FileSaveCoordinator({
-      debounceMs: 500,
+      getScheduling: () => ({ kind: "debounce", delayMs: 500 }) as const,
+      getFlushOnDispose: () => true,
       persist,
       onPendingChange,
       onConfirmed: vi.fn(),
@@ -161,11 +167,155 @@ describe("FileSaveCoordinator", () => {
     expect(onPendingChange.mock.calls.at(-1)).toEqual([false]);
   });
 
+  it("honors a live scheduling change without recreating the coordinator", async () => {
+    vi.useFakeTimers();
+    const persist = vi
+      .fn<(contents: string) => Promise<AtomCommandResult<void, never>>>()
+      .mockResolvedValue(AsyncResult.success(undefined));
+    let delayMs = 500;
+    const coordinator = new FileSaveCoordinator({
+      getScheduling: () => ({ kind: "debounce", delayMs }) as const,
+      getFlushOnDispose: () => true,
+      persist,
+      onPendingChange: vi.fn(),
+      onConfirmed: vi.fn(),
+    });
+
+    delayMs = 2000;
+    coordinator.change("slow save");
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(persist).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(persist).toHaveBeenCalledOnce();
+  });
+
+  it("manual scheduling never persists on its own", async () => {
+    vi.useFakeTimers();
+    const persist = vi
+      .fn<(contents: string) => Promise<AtomCommandResult<void, never>>>()
+      .mockResolvedValue(AsyncResult.success(undefined));
+    const onPendingChange = vi.fn();
+    const coordinator = new FileSaveCoordinator({
+      getScheduling: () => ({ kind: "manual" }) as const,
+      getFlushOnDispose: () => false,
+      persist,
+      onPendingChange,
+      onConfirmed: vi.fn(),
+    });
+
+    coordinator.change("unsaved");
+    await vi.runAllTimersAsync();
+    expect(persist).not.toHaveBeenCalled();
+    expect(onPendingChange.mock.calls.at(-1)).toEqual([true]);
+
+    await coordinator.flush();
+    expect(persist).toHaveBeenCalledOnce();
+    expect(persist).toHaveBeenCalledWith("unsaved");
+    expect(onPendingChange.mock.calls.at(-1)).toEqual([false]);
+  });
+
+  it("manual scheduling stays pending after trailing edits instead of rescheduling", async () => {
+    vi.useFakeTimers();
+    const firstWrite = deferred();
+    const persist = vi
+      .fn<(contents: string) => Promise<AtomCommandResult<void, never>>>()
+      .mockReturnValueOnce(firstWrite.promise)
+      .mockResolvedValue(AsyncResult.success(undefined));
+    const onPendingChange = vi.fn();
+    const coordinator = new FileSaveCoordinator({
+      getScheduling: () => ({ kind: "manual" }) as const,
+      getFlushOnDispose: () => false,
+      persist,
+      onPendingChange,
+      onConfirmed: vi.fn(),
+    });
+
+    coordinator.change("first");
+    void coordinator.flush();
+    coordinator.change("trailing");
+    firstWrite.resolve(AsyncResult.success(undefined));
+    await vi.runAllTimersAsync();
+
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(onPendingChange.mock.calls.at(-1)).toEqual([true]);
+
+    await coordinator.flush();
+    expect(persist).toHaveBeenCalledTimes(2);
+    expect(persist).toHaveBeenLastCalledWith("trailing");
+    expect(onPendingChange.mock.calls.at(-1)).toEqual([false]);
+  });
+
+  it("a flush during an in-flight save persists trailing edits once it settles", async () => {
+    vi.useFakeTimers();
+    const firstWrite = deferred();
+    const persist = vi
+      .fn<(contents: string) => Promise<AtomCommandResult<void, never>>>()
+      .mockReturnValueOnce(firstWrite.promise)
+      .mockResolvedValue(AsyncResult.success(undefined));
+    const coordinator = new FileSaveCoordinator({
+      getScheduling: () => ({ kind: "manual" }) as const,
+      getFlushOnDispose: () => false,
+      persist,
+      onPendingChange: vi.fn(),
+      onConfirmed: vi.fn(),
+    });
+
+    coordinator.change("first");
+    const firstFlush = coordinator.flush();
+    coordinator.change("trailing");
+    const secondFlush = coordinator.flush();
+    firstWrite.resolve(AsyncResult.success(undefined));
+    await Promise.all([firstFlush, secondFlush]);
+
+    expect(persist).toHaveBeenCalledTimes(2);
+    expect(persist).toHaveBeenLastCalledWith("trailing");
+  });
+
+  it("dispose leaves pending edits unsaved when flush-on-dispose is off", async () => {
+    vi.useFakeTimers();
+    const persist = vi
+      .fn<(contents: string) => Promise<AtomCommandResult<void, never>>>()
+      .mockResolvedValue(AsyncResult.success(undefined));
+    const coordinator = new FileSaveCoordinator({
+      getScheduling: () => ({ kind: "manual" }) as const,
+      getFlushOnDispose: () => false,
+      persist,
+      onPendingChange: vi.fn(),
+      onConfirmed: vi.fn(),
+    });
+
+    coordinator.change("keep me pending");
+    coordinator.dispose();
+    await vi.runAllTimersAsync();
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it("dispose persists pending edits when flush-on-dispose is on", async () => {
+    vi.useFakeTimers();
+    const persist = vi
+      .fn<(contents: string) => Promise<AtomCommandResult<void, never>>>()
+      .mockResolvedValue(AsyncResult.success(undefined));
+    const coordinator = new FileSaveCoordinator({
+      getScheduling: () => ({ kind: "manual" }) as const,
+      getFlushOnDispose: () => true,
+      persist,
+      onPendingChange: vi.fn(),
+      onConfirmed: vi.fn(),
+    });
+
+    coordinator.change("save on unmount");
+    coordinator.dispose();
+    await vi.runAllTimersAsync();
+    expect(persist).toHaveBeenCalledOnce();
+    expect(persist).toHaveBeenCalledWith("save on unmount");
+  });
+
   it("leaves the file pending when the latest write fails", async () => {
     vi.useFakeTimers();
     const onPendingChange = vi.fn();
     const coordinator = new FileSaveCoordinator({
-      debounceMs: 500,
+      getScheduling: () => ({ kind: "debounce", delayMs: 500 }) as const,
+      getFlushOnDispose: () => true,
       persist: vi
         .fn()
         .mockResolvedValue(AsyncResult.failure(Cause.fail(new Error("write failed")))),

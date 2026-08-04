@@ -63,6 +63,7 @@ const STATIC_KEYBINDING_COMMANDS = [
   "graph.toggle",
   "graph.build",
   "editor.showCompletions",
+  "file.save",
   "fileTree.toggleFocus",
   "fileTree.newFile",
   "fileTree.newDirectory",

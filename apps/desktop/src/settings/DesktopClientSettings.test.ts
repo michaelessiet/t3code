@@ -14,12 +14,16 @@ import * as DesktopClientSettings from "./DesktopClientSettings.ts";
 
 const clientSettings: ClientSettings = {
   autoOpenPlanSidebar: false,
+  autoSaveEnabled: false,
+  autoSaveMode: "onFocusChange",
+  autoSaveDelayMs: 1500,
   confirmThreadArchive: true,
   confirmThreadDelete: false,
   dismissedProviderUpdateNotificationKeys: [],
   diffIgnoreWhitespace: true,
   favorites: [],
   glassOpacity: 80,
+  openFilesInExternalEditor: false,
   providerModelPreferences: {},
   sidebarAutoSettleAfterDays: 3,
   sidebarProjectGroupingMode: "repository_path",
