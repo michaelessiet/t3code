@@ -41,7 +41,7 @@ const FILE_PATH_PATTERN =
   /(?:~\/|\.{1,2}\/|\/|[A-Za-z]:[\\/]|\\\\)[^\s"'`<>]+|[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+(?::\d+){0,2}/g;
 const TRAILING_PUNCTUATION_PATTERN = /[.,;!?]+$/;
 
-function trimClosingDelimiters(value: string): string {
+export function trimLinkTrailingDelimiters(value: string): string {
   let output = value.replace(TRAILING_PUNCTUATION_PATTERN, "");
   if (output.length === 0) return output;
 
@@ -78,7 +78,7 @@ function collectMatches(
     const start = rawMatch.index ?? -1;
     if (start < 0 || raw.length === 0) continue;
 
-    const trimmed = trimClosingDelimiters(raw);
+    const trimmed = trimLinkTrailingDelimiters(raw);
     if (trimmed.length === 0) continue;
     if (kind === "path" && /^https?:\/\//i.test(trimmed)) continue;
 
