@@ -36,7 +36,7 @@ import type { Components, Options as ReactMarkdownOptions } from "react-markdown
 import ReactMarkdown from "react-markdown";
 import { defaultUrlTransform } from "react-markdown";
 import rehypeRaw from "rehype-raw";
-import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import rehypeSanitize from "rehype-sanitize";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { renderSkillInlineMarkdownChildren } from "./chat/SkillInlineText";
@@ -64,12 +64,18 @@ import {
   serializeTableElementToCsv,
   serializeTableElementToMarkdown,
 } from "../markdown-clipboard";
+import {
+  FILE_PATH_AUTOLINK_PROPERTY,
+  remarkLinkifyFilePaths,
+} from "../markdown-file-path-autolink";
 import { remarkNormalizeListItemIndentation } from "../markdown-list-indentation";
+import { CHAT_MARKDOWN_SANITIZE_SCHEMA } from "../markdown-sanitize-schema";
 import {
   normalizeMarkdownLinkDestination,
   resolveMarkdownFileLinkMeta,
   rewriteMarkdownFileUriHref,
 } from "../markdown-links";
+import { resolveWorkspaceFilePath, useWorkspaceFilePathSet } from "../workspaceFilePathIndex";
 import { readLocalApi } from "../localApi";
 import { cn } from "../lib/utils";
 import { useRightPanelStore } from "../rightPanelStore";
@@ -157,19 +163,6 @@ function findTaskListMarkerOffset(markdown: string, listItemStart: number): numb
   if (!match?.[1]) return null;
   return listItemStart + firstLine.indexOf(match[1]);
 }
-const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
-  ...defaultSchema,
-  attributes: {
-    ...defaultSchema.attributes,
-    "*": (defaultSchema.attributes?.["*"] ?? []).filter((attribute) => attribute !== "title"),
-    code: [...(defaultSchema.attributes?.code ?? []), "dataCodeMeta"],
-  },
-  protocols: {
-    ...defaultSchema.protocols,
-    href: [...(defaultSchema.protocols?.href ?? []), "file"],
-  },
-} satisfies Parameters<typeof rehypeSanitize>[0];
-
 const CHAT_MARKDOWN_REMARK_PLUGINS = [
   remarkGfm,
   remarkNormalizeListItemIndentation,
@@ -894,6 +887,14 @@ function plainHastText(node: unknown): string | null {
   return parts.every((part) => part !== null) ? parts.join("") : null;
 }
 
+/** True for anchors `remarkLinkifyFilePaths` created from a bare path in prose. */
+function isAutolinkedFilePathNode(node: unknown): boolean {
+  if (!node || typeof node !== "object" || !("properties" in node)) return false;
+  const properties = node.properties;
+  if (!properties || typeof properties !== "object") return false;
+  return (properties as Record<string, unknown>)[FILE_PATH_AUTOLINK_PROPERTY] === "true";
+}
+
 const SANITIZED_FRAGMENT_PREFIX = "user-content-";
 
 function decodeMarkdownFragmentId(href: string): string {
@@ -1266,6 +1267,28 @@ function ChatMarkdown({
     serverConfig?.availableEditors ?? [],
   );
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
+  const workspaceFilePaths = useWorkspaceFilePathSet(
+    threadRef?.environmentId ?? environmentId,
+    cwd,
+  );
+  // Only linkify bare paths once the workspace listing can confirm them, so a
+  // path an agent invented never renders as a link that fails on click.
+  const remarkPlugins = useMemo<NonNullable<ReactMarkdownOptions["remarkPlugins"]>>(() => {
+    const basePlugins = lineBreaks
+      ? CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS
+      : CHAT_MARKDOWN_REMARK_PLUGINS;
+    if (!workspaceFilePaths || !cwd) return basePlugins;
+    return [
+      ...basePlugins,
+      [
+        remarkLinkifyFilePaths,
+        {
+          resolve: (candidate: string) =>
+            resolveWorkspaceFilePath(candidate, workspaceFilePaths, cwd),
+        },
+      ],
+    ];
+  }, [cwd, lineBreaks, workspaceFilePaths]);
   const markdownFileLinkMetaByHref = useMemo(() => {
     const metaByHref = new Map<
       string,
@@ -1385,7 +1408,15 @@ function ChatMarkdown({
       },
       a({ node, href, children, ...props }) {
         const normalizedHref = href ? normalizeMarkdownLinkHrefKey(href) : "";
-        const fileLinkMeta = normalizedHref ? markdownFileLinkMetaByHref.get(normalizedHref) : null;
+        // Autolinked paths never appear in the pre-scanned map, which only sees
+        // explicit `[label](path)` destinations in the source text.
+        const autolinkedPathText = isAutolinkedFilePathNode(node) ? plainHastText(node) : null;
+        const fileLinkMeta = !normalizedHref
+          ? null
+          : (markdownFileLinkMetaByHref.get(normalizedHref) ??
+            (autolinkedPathText === null
+              ? null
+              : resolveMarkdownFileLinkMeta(normalizedHref, cwd)));
         if (!fileLinkMeta) {
           const faviconHost = resolveExternalWebLinkHost(href);
           const isSameDocumentLink = href?.startsWith("#") ?? false;
@@ -1474,8 +1505,8 @@ function ChatMarkdown({
             displayPath={fileLinkMeta.displayPath}
             workspaceRelativePath={fileLinkMeta.workspaceRelativePath}
             line={fileLinkMeta.line}
-            label={labelParts.join(" · ")}
-            copyMarkdown={`[${fileLinkMeta.basename}](${normalizedHref})`}
+            label={autolinkedPathText ?? labelParts.join(" · ")}
+            copyMarkdown={autolinkedPathText ?? `[${fileLinkMeta.basename}](${normalizedHref})`}
             theme={resolvedTheme}
             threadRef={threadRef}
             onOpen={openInPreferredEditor}
@@ -1526,6 +1557,7 @@ function ChatMarkdown({
       },
     }),
     [
+      cwd,
       diffThemeName,
       fileLinkParentSuffixByPath,
       isStreaming,
@@ -1550,9 +1582,7 @@ function ChatMarkdown({
       onCopy={handleCopy}
     >
       <ReactMarkdown
-        remarkPlugins={
-          lineBreaks ? CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS : CHAT_MARKDOWN_REMARK_PLUGINS
-        }
+        remarkPlugins={remarkPlugins}
         rehypePlugins={CHAT_MARKDOWN_REHYPE_PLUGINS}
         components={markdownComponents}
         urlTransform={markdownUrlTransform}
