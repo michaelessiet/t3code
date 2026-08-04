@@ -6,6 +6,8 @@ import { markdown } from "@codemirror/lang-markdown";
 import { python } from "@codemirror/lang-python";
 import { rust } from "@codemirror/lang-rust";
 import { yaml } from "@codemirror/lang-yaml";
+import { LanguageDescription } from "@codemirror/language";
+import { languages as lazyLanguageRegistry } from "@codemirror/language-data";
 import type { Extension } from "@codemirror/state";
 
 export type EditorLanguageId =
@@ -94,4 +96,27 @@ function languageExtensionForId(languageId: EditorLanguageId): Extension {
  */
 export function languageExtensionForPath(relativePath: string): Extension {
   return languageExtensionForId(editorLanguageIdForPath(relativePath));
+}
+
+/**
+ * Lazily-loadable language for a path that has no bundled highlighting
+ * (i.e. resolves to `plain`), from the `@codemirror/language-data`
+ * registry. The registry's filename regexes are case-sensitive (e.g.
+ * `/^Dockerfile$/`), so the verbatim file name is matched before the
+ * lowercased fallback. Returns `null` when the path already has bundled
+ * support or no registered language matches.
+ */
+export function lazyLanguageDescriptionForPath(relativePath: string): LanguageDescription | null {
+  if (editorLanguageIdForPath(relativePath) !== "plain") {
+    return null;
+  }
+  const normalizedPath = relativePath.replaceAll("\\", "/");
+  const fileName = normalizedPath.slice(normalizedPath.lastIndexOf("/") + 1);
+  if (fileName.length === 0) {
+    return null;
+  }
+  return (
+    LanguageDescription.matchFilename(lazyLanguageRegistry, fileName) ??
+    LanguageDescription.matchFilename(lazyLanguageRegistry, fileName.toLowerCase())
+  );
 }
