@@ -1,3 +1,8 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFs from "node:fs";
+import * as NodeOs from "node:os";
+import * as NodePath from "node:path";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, describe, expect } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -57,6 +62,40 @@ describe("ripgrepArguments", () => {
     expect(args).toContain("--word-regexp");
     expect(args).toEqual(expect.arrayContaining(["--glob", "src/**"]));
     expect(args).toEqual(expect.arrayContaining(["--glob", "!*.test.ts"]));
+  });
+});
+
+describe("rewriteAsarUnpackedPath", () => {
+  const makeAsarFixture = () => {
+    const base = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3code-asar-"));
+    const packedPath = NodePath.join(base, "app.asar", "node_modules", "bin", "rg");
+    const unpackedPath = NodePath.join(base, "app.asar.unpacked", "node_modules", "bin", "rg");
+    return { base, packedPath, unpackedPath };
+  };
+
+  it("redirects an asar path to its existing unpacked sibling", () => {
+    const { base, packedPath, unpackedPath } = makeAsarFixture();
+    try {
+      NodeFs.mkdirSync(NodePath.dirname(unpackedPath), { recursive: true });
+      NodeFs.writeFileSync(unpackedPath, "");
+      expect(WorkspaceContentSearch.rewriteAsarUnpackedPath(packedPath)).toBe(unpackedPath);
+    } finally {
+      NodeFs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the asar path when no unpacked sibling exists", () => {
+    const { base, packedPath } = makeAsarFixture();
+    try {
+      expect(WorkspaceContentSearch.rewriteAsarUnpackedPath(packedPath)).toBe(packedPath);
+    } finally {
+      NodeFs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps plain paths without an asar segment", () => {
+    const devPath = "/repo/node_modules/@vscode/ripgrep-darwin-arm64/bin/rg";
+    expect(WorkspaceContentSearch.rewriteAsarUnpackedPath(devPath)).toBe(devPath);
   });
 });
 

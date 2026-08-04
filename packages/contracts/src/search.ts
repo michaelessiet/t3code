@@ -95,7 +95,9 @@ export class ProjectSearchContentError extends Schema.TaggedErrorClass<ProjectSe
   }) {
     super({
       ...props,
-      message: `Failed to search workspace contents in '${props.cwd}'.`,
+      message: `Failed to search workspace contents in '${props.cwd}'.${
+        props.detail === undefined ? "" : ` ${props.detail}`
+      }`,
     } as any);
   }
 }
