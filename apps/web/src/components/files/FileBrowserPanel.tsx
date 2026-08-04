@@ -56,6 +56,9 @@ interface FileBrowserPanelProps {
   cwd: string;
   projectName: string;
   threadRef: ScopedThreadRef;
+  /** File currently open in the editor, revealed (selected + scrolled to) in the tree. */
+  openRelativePath: string | null;
+  revealRequestId: number;
   onOpenFile: (relativePath: string) => void;
 }
 
@@ -204,6 +207,8 @@ export default function FileBrowserPanel({
   cwd,
   projectName,
   threadRef,
+  openRelativePath,
+  revealRequestId,
   onOpenFile,
 }: FileBrowserPanelProps) {
   const { resolvedTheme } = useTheme();
@@ -330,6 +335,7 @@ export default function FileBrowserPanel({
   );
 
   const treeModelRef = useRef<ReturnType<typeof useFileTree>["model"] | null>(null);
+  const revealInProgressRef = useRef(false);
   const dragMention = useMemo(
     () =>
       createFileTreeDragMentionController({
@@ -349,6 +355,13 @@ export default function FileBrowserPanel({
     icons: T3_PIERRE_ICONS,
     onSelectionChange: (selectedPaths) => {
       dragMention.handleSelectionChange(selectedPaths);
+      // Programmatic reveal syncs the selection to the already-open file;
+      // those emissions (including intermediate deselects) must not re-open
+      // files. select()/deselect() emit synchronously, so the flag is set for
+      // exactly the reveal's own emissions.
+      if (revealInProgressRef.current) {
+        return;
+      }
       // Starting a drag selects the dragged row; that selection is a side
       // effect of the gesture, not a request to open the file.
       if (dragMention.isDragInProgress()) {
@@ -384,6 +397,59 @@ export default function FileBrowserPanel({
     pendingCreatesRef.current.clear();
     model.resetPaths(treePaths);
   }, [entryKinds, model, treePaths]);
+
+  // Reveal the open file: select it, expand its ancestors and scroll it into
+  // view. Keyed by reveal request so background entry refreshes don't yank the
+  // user's scroll position back to the open file; declared after the
+  // resetPaths effect so it always sees the fresh tree.
+  const lastRevealedKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (openRelativePath === null) return;
+    const revealKey = `${revealRequestId}:${openRelativePath}`;
+    if (lastRevealedKeyRef.current === revealKey) return;
+
+    // One frame lets a freshly remounted tree measure its viewport before the
+    // scroll request is consumed.
+    const frame = window.requestAnimationFrame(() => {
+      // Absent (entries still loading, or truncated listing): leave the key
+      // unrecorded so the next treePaths change retries.
+      const item = model.getItem(openRelativePath);
+      if (item === null || item.isDirectory()) return;
+
+      const selected = model.getSelectedPaths();
+      if (selected.length === 1 && selected[0] === openRelativePath) {
+        // Opened from the tree itself; the row is already selected.
+        lastRevealedKeyRef.current = revealKey;
+        return;
+      }
+
+      revealInProgressRef.current = true;
+      try {
+        for (const path of selected) {
+          if (stripTrailingSlash(path) !== openRelativePath) model.getItem(path)?.deselect();
+        }
+        item.select();
+      } finally {
+        revealInProgressRef.current = false;
+      }
+
+      // Search owns expansion and row visibility in hide-non-matches mode
+      // (and would clobber programmatic expansion); the tree re-expands
+      // ancestors of selected paths itself when search closes.
+      if (!model.isSearchOpen()) {
+        const parent = parentDirectory(openRelativePath);
+        if (parent.length > 0) {
+          const dir = model.getItem(parent);
+          // expand() opens the entire ancestor chain, not just this level.
+          if (dir !== null && "expand" in dir && !dir.isExpanded()) dir.expand();
+        }
+        // Sets virtual focus only; DOM focus stays in the editor.
+        model.scrollToPath(openRelativePath);
+      }
+      lastRevealedKeyRef.current = revealKey;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [model, openRelativePath, revealRequestId, treePaths]);
 
   /**
    * Directory that New File / New Folder should target: the focused entry if

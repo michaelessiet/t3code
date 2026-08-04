@@ -16,6 +16,8 @@
  * @module WorkspaceContentSearch
  */
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFs from "node:fs";
+import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 
 import type { ProjectSearchContentInput, ProjectSearchContentResult } from "@t3tools/contracts";
@@ -217,7 +219,18 @@ export function parseRipgrepEventLine(jsonLine: string): Array<MutableMatch> {
 
 async function resolveRipgrepPath(): Promise<string> {
   const module = await import("@vscode/ripgrep");
-  return module.rgPath;
+  return rewriteAsarUnpackedPath(module.rgPath);
+}
+
+/**
+ * Electron's asar-aware fs lets `require.resolve` find rg inside app.asar,
+ * but `spawn` needs a real on-disk executable; electron-builder unpacks
+ * node_modules to the app.asar.unpacked sibling (asarUnpack in
+ * build-desktop-artifact.ts), so point there when it exists.
+ */
+export function rewriteAsarUnpackedPath(filePath: string): string {
+  const rewritten = filePath.replace(`.asar${NodePath.sep}`, `.asar.unpacked${NodePath.sep}`);
+  return rewritten !== filePath && NodeFs.existsSync(rewritten) ? rewritten : filePath;
 }
 
 function runRipgrep(

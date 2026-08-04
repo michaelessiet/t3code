@@ -1409,6 +1409,8 @@ export default function FilePreviewPanel({
               cwd={cwd}
               projectName={projectName}
               threadRef={threadRef}
+              openRelativePath={relativePath}
+              revealRequestId={revealRequestId}
               onOpenFile={onOpenFile}
             />
           </aside>
