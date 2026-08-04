@@ -68,6 +68,21 @@ export function getOptimisticProjectFileQueryData(
   return appAtomRegistry.get(optimisticFileAtom(environmentId, cwd, relativePath))?.data ?? null;
 }
 
+/**
+ * Contents of a buffer with local edits that were never confirmed against a
+ * write (autosave off, or a save still pending). Null when the buffer is
+ * clean or already confirmed.
+ */
+export function getUnsavedProjectFileBuffer(
+  environmentId: EnvironmentId,
+  cwd: string,
+  relativePath: string,
+): string | null {
+  const optimisticFile = appAtomRegistry.get(optimisticFileAtom(environmentId, cwd, relativePath));
+  if (!optimisticFile || optimisticFile.confirmedAgainst !== undefined) return null;
+  return optimisticFile.data.contents;
+}
+
 export function confirmProjectFileQueryData(
   environmentId: EnvironmentId,
   cwd: string,
@@ -150,6 +165,22 @@ export function useProjectFileDiskRevision(
   const result = useAtomValue(atom);
   if (relativePath === null) return undefined;
   return Option.getOrNull(AsyncResult.value(result))?.revision;
+}
+
+/**
+ * The file as last read from disk (never the optimistic local buffer).
+ * After a watcher-triggered refresh this holds the fresh disk contents —
+ * what a conflicted buffer should be compared against.
+ */
+export function useProjectFileDiskContents(
+  environmentId: EnvironmentId,
+  cwd: string,
+  relativePath: string | null,
+): ProjectReadFileResult | undefined {
+  const atom = getProjectFileQueryAtom(environmentId, cwd, relativePath);
+  const result = useAtomValue(atom);
+  if (relativePath === null) return undefined;
+  return Option.getOrNull(AsyncResult.value(result)) ?? undefined;
 }
 
 /**

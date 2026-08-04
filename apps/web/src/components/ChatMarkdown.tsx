@@ -1055,7 +1055,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   }, [onOpen, targetPath]);
 
   const handleOpenInFilePreview = useCallback(() => {
-    if (!threadRef || !workspaceRelativePath) {
+    if (getClientSettings().openFilesInExternalEditor || !threadRef || !workspaceRelativePath) {
       handleOpenInEditor();
       return;
     }

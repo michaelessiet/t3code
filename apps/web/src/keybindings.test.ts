@@ -516,6 +516,23 @@ describe("chat/editor shortcuts", () => {
     );
   });
 
+  it("matches file.save shortcut outside terminal focus", () => {
+    assert.strictEqual(
+      resolveShortcutCommand(event({ key: "s", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+        context: { terminalFocus: false },
+      }),
+      "file.save",
+    );
+    assert.notStrictEqual(
+      resolveShortcutCommand(event({ key: "s", metaKey: true }), DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "MacIntel",
+        context: { terminalFocus: true },
+      }),
+      "file.save",
+    );
+  });
+
   it("matches diff.toggle shortcut outside terminal focus", () => {
     assert.isTrue(
       isDiffToggleShortcut(event({ key: "d", metaKey: true }), DEFAULT_BINDINGS, {

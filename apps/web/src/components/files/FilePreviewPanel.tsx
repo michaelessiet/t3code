@@ -8,7 +8,7 @@ import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 import { VirtualizedFile } from "@pierre/diffs";
 import { File, type FileOptions, Virtualizer } from "@pierre/diffs/react";
 import { startCompletion } from "@codemirror/autocomplete";
-import type { EditorView } from "@codemirror/view";
+import { EditorView } from "@codemirror/view";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -46,6 +46,7 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
 import FileBrowserPanel from "./FileBrowserPanel";
+import { FileConflictCompareDialog } from "./FileConflictCompareDialog";
 import { consumeEditorFocusRequest } from "./editorFocusRequest";
 import { CodeMirrorFileEditor } from "./codemirror/CodeMirrorFileEditor";
 import { documentSaveExtension } from "./codemirror/documentSave";
@@ -67,7 +68,7 @@ import {
   remapFileCommentAnnotations,
 } from "./fileCommentAnnotations";
 import { LocalCommentAnnotation } from "./LocalCommentAnnotation";
-import { projectFileCacheKey } from "./fileContentRevision";
+import { fileContentRevision, projectFileCacheKey } from "./fileContentRevision";
 import { fileBreadcrumbs } from "./filePath";
 import { isMarkdownPreviewFile, setMarkdownTaskChecked } from "./filePreviewMode";
 import {
@@ -75,12 +76,21 @@ import {
   detectsExternalConflict,
   isStaleRevisionWriteFailure,
 } from "./fileBufferConflict";
-import { FileSaveCoordinator } from "./fileSaveCoordinator";
+import { FileSaveCoordinator, type SaveScheduling } from "./fileSaveCoordinator";
+import { registerActiveFileSave } from "./fileSaveBus";
+import {
+  getFileBaseRevision,
+  isSelfWrittenRevision,
+  recordSelfWrittenRevision,
+  setFileBaseRevision,
+} from "./fileSaveState";
 import {
   clearProjectFileQueryData,
   confirmProjectFileQueryData,
   getOptimisticProjectFileQueryData,
+  getUnsavedProjectFileBuffer,
   setProjectFileQueryData,
+  useProjectFileDiskContents,
   useProjectFileDiskRevision,
   useProjectFileQuery,
   useWorkspaceFileWatch,
@@ -103,6 +113,10 @@ interface FilePreviewPanelProps {
 
 const FILE_EXPLORER_STORAGE_KEY = "t3code.fileExplorerOpen";
 const FILE_SAVE_DEBOUNCE_MS = 500;
+const MARKDOWN_TASK_SAVE_SCHEDULING: SaveScheduling = {
+  kind: "debounce",
+  delayMs: FILE_SAVE_DEBOUNCE_MS,
+};
 const FILE_LINK_REVEAL_ATTRIBUTE = "data-file-link-reveal";
 const FILE_LINK_REVEAL_UNSAFE_CSS = `
   [${FILE_LINK_REVEAL_ATTRIBUTE}][data-line] {
@@ -344,36 +358,76 @@ function useFileSaveCoordinator({
   diskRevision,
   onPendingChange,
   onStaleSave,
+  schedulingOverride,
 }: Pick<EditableFileSurfaceProps, "environmentId" | "cwd" | "relativePath" | "onPendingChange"> & {
   diskRevision: string | undefined;
   onStaleSave?: () => void;
+  /** Fixed scheduling regardless of the auto-save settings (rendered markdown). */
+  schedulingOverride?: SaveScheduling;
 }): FileSaveCoordination {
   const writeFile = useAtomCommand(projectEnvironment.writeFile);
-  const baseRevisionRef = useRef<string | null>(null);
-  const pendingRef = useRef(false);
+  // A buffer that stayed dirty across an unmount (autosave off keeps unsaved
+  // edits in the optimistic file atom) starts out pending again.
+  const pendingRef = useRef(getUnsavedProjectFileBuffer(environmentId, cwd, relativePath) !== null);
   const onStaleSaveRef = useRef(onStaleSave);
   useEffect(() => {
     onStaleSaveRef.current = onStaleSave;
   }, [onStaleSave]);
 
+  const autoSaveEnabled = useClientSettings((settings) => settings.autoSaveEnabled);
+  const autoSaveMode = useClientSettings((settings) => settings.autoSaveMode);
+  const autoSaveDelayMs = useClientSettings((settings) => settings.autoSaveDelayMs);
+  // The coordinator reads scheduling through refs so a settings change takes
+  // effect mid-edit without recreating it (recreation disposes, and disposing
+  // can flush or strand pending state).
+  const scheduling: SaveScheduling =
+    schedulingOverride ??
+    (autoSaveEnabled && autoSaveMode === "afterDelay"
+      ? { kind: "debounce", delayMs: autoSaveDelayMs }
+      : { kind: "manual" });
+  const flushOnDispose = schedulingOverride !== undefined || autoSaveEnabled;
+  const schedulingRef = useRef(scheduling);
+  const flushOnDisposeRef = useRef(flushOnDispose);
+  useLayoutEffect(() => {
+    schedulingRef.current = scheduling;
+    flushOnDisposeRef.current = flushOnDispose;
+  });
+
+  // A fresh mount without a surviving dirty buffer must not inherit a stale
+  // base revision from an earlier session of this file.
+  useEffect(() => {
+    if (getUnsavedProjectFileBuffer(environmentId, cwd, relativePath) === null) {
+      setFileBaseRevision(environmentId, cwd, relativePath, null);
+    }
+  }, [cwd, environmentId, relativePath]);
+
   // While the buffer is clean it follows the disk: whatever revision the
   // query last read is what future edits are based on.
   useEffect(() => {
     if (!pendingRef.current && diskRevision !== undefined) {
-      baseRevisionRef.current = diskRevision;
+      setFileBaseRevision(environmentId, cwd, relativePath, diskRevision);
     }
-  }, [diskRevision]);
+  }, [cwd, diskRevision, environmentId, relativePath]);
 
   const coordinator = useMemo(
     () =>
       new FileSaveCoordinator({
-        debounceMs: FILE_SAVE_DEBOUNCE_MS,
+        getScheduling: () => schedulingRef.current,
+        getFlushOnDispose: () => flushOnDisposeRef.current,
         onPendingChange: (pending) => {
           pendingRef.current = pending;
           onPendingChange(relativePath, pending);
         },
         persist: async (nextContents) => {
-          const baseRevision = baseRevisionRef.current;
+          const baseRevision = getFileBaseRevision(environmentId, cwd, relativePath);
+          // Recorded before the RPC so a watcher refresh racing the write
+          // confirmation still recognizes the new disk revision as our own.
+          recordSelfWrittenRevision(
+            environmentId,
+            cwd,
+            relativePath,
+            fileContentRevision(nextContents),
+          );
           const result = await writeFile({
             environmentId,
             input: {
@@ -384,7 +438,11 @@ function useFileSaveCoordinator({
             },
           });
           if (result._tag === "Success") {
-            baseRevisionRef.current = Option.getOrNull(AsyncResult.value(result))?.revision ?? null;
+            const revision = Option.getOrNull(AsyncResult.value(result))?.revision ?? null;
+            setFileBaseRevision(environmentId, cwd, relativePath, revision);
+            if (revision !== null) {
+              recordSelfWrittenRevision(environmentId, cwd, relativePath, revision);
+            }
           } else if (isStaleRevisionWriteFailure(result)) {
             onStaleSaveRef.current?.();
           }
@@ -397,14 +455,42 @@ function useFileSaveCoordinator({
     [cwd, environmentId, onPendingChange, relativePath, writeFile],
   );
 
+  // Re-adopt a dirty buffer surviving a previous mount so the tab dot, ⌘S,
+  // and any scheduled autosave stay truthful. Skipped for override surfaces
+  // (rendered markdown must not silently persist edits the code editor left
+  // unsaved in manual mode).
+  useEffect(() => {
+    if (schedulingOverride !== undefined) return;
+    const unsaved = getUnsavedProjectFileBuffer(environmentId, cwd, relativePath);
+    if (unsaved !== null) coordinator.change(unsaved);
+  }, [coordinator, cwd, environmentId, relativePath, schedulingOverride]);
+
+  // Turning autosave on while edits are pending saves them right away;
+  // nothing else would until the next edit.
+  useEffect(() => {
+    if (autoSaveEnabled && schedulingOverride === undefined && pendingRef.current) {
+      void coordinator.flush();
+    }
+  }, [autoSaveEnabled, coordinator, schedulingOverride]);
+
   const forcePersist = useCallback(
     async (nextContents: string) => {
+      recordSelfWrittenRevision(
+        environmentId,
+        cwd,
+        relativePath,
+        fileContentRevision(nextContents),
+      );
       const result = await writeFile({
         environmentId,
         input: { cwd, relativePath, contents: nextContents },
       });
       if (result._tag !== "Success") return false;
-      baseRevisionRef.current = Option.getOrNull(AsyncResult.value(result))?.revision ?? null;
+      const revision = Option.getOrNull(AsyncResult.value(result))?.revision ?? null;
+      setFileBaseRevision(environmentId, cwd, relativePath, revision);
+      if (revision !== null) {
+        recordSelfWrittenRevision(environmentId, cwd, relativePath, revision);
+      }
       coordinator.reset();
       confirmProjectFileQueryData(environmentId, cwd, relativePath, nextContents);
       return true;
@@ -417,13 +503,13 @@ function useFileSaveCoordinator({
     () => ({
       coordinator,
       isDirty: () => pendingRef.current,
-      baseRevision: () => baseRevisionRef.current,
+      baseRevision: () => getFileBaseRevision(environmentId, cwd, relativePath),
       resetBaseRevision: () => {
-        baseRevisionRef.current = null;
+        setFileBaseRevision(environmentId, cwd, relativePath, null);
       },
       forcePersist,
     }),
-    [coordinator, forcePersist],
+    [coordinator, cwd, environmentId, forcePersist, relativePath],
   );
 }
 
@@ -472,6 +558,42 @@ function EditableFileSurface({
   });
   const saveCoordinator = saveCoordination.coordinator;
 
+  // ⌘S routes here through the global file.save command; only this component
+  // holds the mounted coordinator.
+  useEffect(
+    () =>
+      registerActiveFileSave({
+        relativePath,
+        flush: () => saveCoordinator.flush(),
+        isDirty: saveCoordination.isDirty,
+      }),
+    [relativePath, saveCoordination, saveCoordinator],
+  );
+
+  // Focus-lost autosave: flush when the editor or the window loses focus.
+  const autoSaveEnabled = useClientSettings((settings) => settings.autoSaveEnabled);
+  const autoSaveMode = useClientSettings((settings) => settings.autoSaveMode);
+  const flushOnFocusLoss = autoSaveEnabled && autoSaveMode === "onFocusChange";
+  const flushOnFocusLossRef = useRef(flushOnFocusLoss);
+  useLayoutEffect(() => {
+    flushOnFocusLossRef.current = flushOnFocusLoss;
+  });
+  const focusLossExtension = useMemo(
+    () =>
+      EditorView.updateListener.of((update) => {
+        if (update.focusChanged && !update.view.hasFocus && flushOnFocusLossRef.current) {
+          void saveCoordinator.flush();
+        }
+      }),
+    [saveCoordinator],
+  );
+  useEffect(() => {
+    if (!flushOnFocusLoss) return;
+    const flush = () => void saveCoordinator.flush();
+    window.addEventListener("blur", flush);
+    return () => window.removeEventListener("blur", flush);
+  }, [flushOnFocusLoss, saveCoordinator]);
+
   // The workspace watcher refreshed the file query underneath a dirty
   // buffer: the disk no longer matches what these edits are based on.
   useEffect(() => {
@@ -480,11 +602,13 @@ function EditableFileSurface({
         dirty: saveCoordination.isDirty(),
         baseRevision: saveCoordination.baseRevision(),
         diskRevision,
+        isSelfWrittenRevision: (revision) =>
+          isSelfWrittenRevision(environmentId, cwd, relativePath, revision),
       })
     ) {
       setConflict("external-change");
     }
-  }, [diskRevision, saveCoordination]);
+  }, [cwd, diskRevision, environmentId, relativePath, saveCoordination]);
 
   const resolveConflictByReloading = useCallback(() => {
     saveCoordinator.reset();
@@ -511,6 +635,14 @@ function EditableFileSurface({
       );
     });
   }, [contents, cwd, environmentId, relativePath, saveCoordination]);
+
+  // Compare the unsaved buffer against the on-disk contents so conflict
+  // resolution isn't a blind choice.
+  const [compareOpen, setCompareOpen] = useState(false);
+  const diskContents = useProjectFileDiskContents(environmentId, cwd, relativePath);
+  useEffect(() => {
+    if (conflict === null) setCompareOpen(false);
+  }, [conflict]);
 
   const [editorView, setEditorView] = useState<EditorView | null>(null);
   const editorViewRef = useRef<EditorView | null>(null);
@@ -773,8 +905,8 @@ function EditableFileSurface({
     [saveCoordinator],
   );
   const editorExtensions = useMemo(
-    () => [reviewExtension, saveExtension, lspExtension ?? []],
-    [lspExtension, reviewExtension, saveExtension],
+    () => [reviewExtension, saveExtension, focusLossExtension, lspExtension ?? []],
+    [focusLossExtension, lspExtension, reviewExtension, saveExtension],
   );
 
   useEffect(() => {
@@ -805,6 +937,15 @@ function EditableFileSurface({
           <span className="min-w-0 flex-1">
             This file changed on disk while you were editing. Your edits are not being saved.
           </span>
+          {diskContents !== undefined ? (
+            <button
+              type="button"
+              className="shrink-0 font-medium underline underline-offset-2 hover:opacity-80"
+              onClick={() => setCompareOpen(true)}
+            >
+              Compare…
+            </button>
+          ) : null}
           <button
             type="button"
             className="shrink-0 font-medium underline underline-offset-2 hover:opacity-80"
@@ -820,6 +961,27 @@ function EditableFileSurface({
             Keep my version
           </button>
         </div>
+      ) : null}
+      {compareOpen && conflict !== null && diskContents !== undefined ? (
+        <FileConflictCompareDialog
+          relativePath={relativePath}
+          diskContents={diskContents.contents}
+          diskTruncated={diskContents.truncated}
+          diskRevision={diskRevision}
+          bufferContents={
+            getOptimisticProjectFileQueryData(environmentId, cwd, relativePath)?.contents ??
+            contents
+          }
+          onReloadFromDisk={() => {
+            setCompareOpen(false);
+            resolveConflictByReloading();
+          }}
+          onKeepBuffer={() => {
+            setCompareOpen(false);
+            resolveConflictByKeepingBuffer();
+          }}
+          onClose={() => setCompareOpen(false)}
+        />
       ) : null}
       <CodeMirrorFileEditor
         className="min-h-0 flex-1 overflow-hidden"
@@ -902,6 +1064,9 @@ function RenderedMarkdownSurface({
     diskRevision,
     onPendingChange,
     onStaleSave,
+    // Checkbox toggles are discrete actions, not typing: keep saving them
+    // promptly in every auto-save mode.
+    schedulingOverride: MARKDOWN_TASK_SAVE_SCHEDULING,
   });
   useEffect(() => {
     coordinationRef.current = saveCoordination;

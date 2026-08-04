@@ -59,8 +59,31 @@ export const GlassOpacity = Schema.Int.check(
 export type GlassOpacity = typeof GlassOpacity.Type;
 export const DEFAULT_GLASS_OPACITY: GlassOpacity = 80;
 
+export const AutoSaveMode = Schema.Literals(["afterDelay", "onFocusChange"]);
+export type AutoSaveMode = typeof AutoSaveMode.Type;
+export const DEFAULT_AUTO_SAVE_MODE: AutoSaveMode = "afterDelay";
+
+export const MIN_AUTO_SAVE_DELAY_MS = 100;
+export const MAX_AUTO_SAVE_DELAY_MS = 10_000;
+export const AutoSaveDelayMs = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_AUTO_SAVE_DELAY_MS,
+    maximum: MAX_AUTO_SAVE_DELAY_MS,
+  }),
+);
+export type AutoSaveDelayMs = typeof AutoSaveDelayMs.Type;
+export const DEFAULT_AUTO_SAVE_DELAY_MS: AutoSaveDelayMs = 500;
+
 export const ClientSettingsSchema = Schema.Struct({
   autoOpenPlanSidebar: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /** Automatically persist editor buffers. When off, saving is manual (⌘S / `:w`). */
+  autoSaveEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  autoSaveMode: AutoSaveMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AUTO_SAVE_MODE)),
+  ),
+  autoSaveDelayMs: AutoSaveDelayMs.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AUTO_SAVE_DELAY_MS)),
+  ),
   confirmThreadArchive: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   dismissedProviderUpdateNotificationKeys: Schema.Array(TrimmedNonEmptyString).pipe(
@@ -120,6 +143,11 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   vimMode: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   wordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /**
+   * Open file links in a third-party editor (Cursor, VS Code, …) instead of
+   * the built-in editor. Off by default: files open inside T3 Code.
+   */
+  openFilesInExternalEditor: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /** Show the editor banner when the open file changed on disk under edits. */
   showFileConflictWarning: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
 });
@@ -773,6 +801,9 @@ export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 
 export const ClientSettingsPatch = Schema.Struct({
   autoOpenPlanSidebar: Schema.optionalKey(Schema.Boolean),
+  autoSaveEnabled: Schema.optionalKey(Schema.Boolean),
+  autoSaveMode: Schema.optionalKey(AutoSaveMode),
+  autoSaveDelayMs: Schema.optionalKey(AutoSaveDelayMs),
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
@@ -810,6 +841,7 @@ export const ClientSettingsPatch = Schema.Struct({
   timestampFormat: Schema.optionalKey(TimestampFormat),
   vimMode: Schema.optionalKey(Schema.Boolean),
   wordWrap: Schema.optionalKey(Schema.Boolean),
+  openFilesInExternalEditor: Schema.optionalKey(Schema.Boolean),
   showFileConflictWarning: Schema.optionalKey(Schema.Boolean),
 });
 export type ClientSettingsPatch = typeof ClientSettingsPatch.Type;

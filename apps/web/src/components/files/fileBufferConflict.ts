@@ -32,16 +32,24 @@ export function isStaleRevisionWriteFailure(result: AtomCommandResult<unknown, u
  * A dirty buffer conflicts with the disk when the disk revision moved away
  * from the revision the buffer's edits are based on. Clean buffers follow the
  * disk instead, and unknown revisions (older servers) never conflict.
+ *
+ * `isSelfWrittenRevision` filters out this editor's own saves: a
+ * watcher-triggered refresh can deliver the just-written disk revision before
+ * the write confirmation advances the base revision, which would otherwise
+ * read as an external change. Revisions are content hashes, so a self-written
+ * match means the disk holds exactly what this editor saved.
  */
 export function detectsExternalConflict(input: {
   readonly dirty: boolean;
   readonly baseRevision: string | null;
   readonly diskRevision: string | undefined;
+  readonly isSelfWrittenRevision?: (revision: string) => boolean;
 }): boolean {
   return (
     input.dirty &&
     input.baseRevision !== null &&
     input.diskRevision !== undefined &&
-    input.diskRevision !== input.baseRevision
+    input.diskRevision !== input.baseRevision &&
+    !(input.isSelfWrittenRevision?.(input.diskRevision) ?? false)
   );
 }

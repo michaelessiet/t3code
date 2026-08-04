@@ -35,6 +35,8 @@ import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { cn } from "~/lib/utils";
 import { type TerminalContextSelection } from "~/lib/terminalContext";
 import { useOpenInPreferredEditor } from "../editorPreferences";
+import { getClientSettings } from "../hooks/useSettings";
+import { openWorkspaceFilePrimaryAction } from "../openFileActions";
 import {
   collectWrappedTerminalLinkLine,
   extractTerminalLinks,
@@ -620,17 +622,25 @@ export function TerminalViewport({
               }
 
               const target = resolvePathLinkTarget(match.text, cwd);
-              void (async () => {
-                const result = await openTerminalPath(target);
-                if (result._tag === "Success" || isAtomCommandInterrupted(result)) {
-                  return;
-                }
-                const error = squashAtomCommandFailure(result);
-                writeSystemMessage(
-                  latestTerminal,
-                  error instanceof Error ? error.message : "Unable to open path",
-                );
-              })();
+              openWorkspaceFilePrimaryAction({
+                threadRef,
+                filePath: target,
+                workspaceRoot: worktreePath ?? cwd,
+                openFilesInExternalEditor: getClientSettings().openFilesInExternalEditor,
+                openInEditor: (targetPath) => {
+                  void (async () => {
+                    const result = await openTerminalPath(targetPath);
+                    if (result._tag === "Success" || isAtomCommandInterrupted(result)) {
+                      return;
+                    }
+                    const error = squashAtomCommandFailure(result);
+                    writeSystemMessage(
+                      latestTerminal,
+                      error instanceof Error ? error.message : "Unable to open path",
+                    );
+                  })();
+                },
+              });
             },
           })),
         );

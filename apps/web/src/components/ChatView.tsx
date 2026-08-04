@@ -178,6 +178,8 @@ import {
   isRightPanelFocused,
 } from "../lib/rightPanelFocus";
 import { requestEditorFocus } from "./files/editorFocusRequest";
+import { dispatchActiveFileSave } from "./files/fileSaveBus";
+import { UnsavedChangesDialog } from "./files/UnsavedChangesDialog";
 import { getTerminalFocusOwner } from "../lib/terminalFocus";
 import { subscribeAppCommand } from "./appCommandBus";
 import { dispatchFileTreeAction } from "./files/fileTreeActionBus";
@@ -1629,6 +1631,32 @@ function ChatViewContent(props: ChatViewProps) {
       });
     },
     [activeProjectKey],
+  );
+  // Closing file tabs with unsaved edits while autosave is off routes
+  // through a Save / Discard / Cancel prompt instead of dropping the edits.
+  const autoSaveEnabled = useClientSettings((settings) => settings.autoSaveEnabled);
+  const [unsavedCloseRequest, setUnsavedCloseRequest] = useState<{
+    dirtyFilePaths: string[];
+    proceed: () => void;
+  } | null>(null);
+  const guardUnsavedFileSurfaces = useCallback(
+    (surfaces: ReadonlyArray<RightPanelSurface>, proceed: () => void) => {
+      if (autoSaveEnabled) {
+        proceed();
+        return;
+      }
+      const dirtyFilePaths = surfaces.flatMap((surface) =>
+        surface.kind === "file" && pendingFileSurfaceIds.has(surface.id)
+          ? [surface.relativePath]
+          : [],
+      );
+      if (dirtyFilePaths.length === 0) {
+        proceed();
+        return;
+      }
+      setUnsavedCloseRequest({ dirtyFilePaths, proceed });
+    },
+    [autoSaveEnabled, pendingFileSurfaceIds],
   );
   const configuredPreviewUrls = useMemo(
     () => getConfiguredPreviewUrls(activeProject?.scripts),
@@ -3282,23 +3310,33 @@ function ChatViewContent(props: ChatViewProps) {
   const closeRightPanelSurface = useCallback(
     (surface: RightPanelSurface) => {
       if (!activeThreadRef) return;
-      cleanupRightPanelSurfaces([surface]);
-      useRightPanelStore.getState().closeSurface(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
+      guardUnsavedFileSurfaces([surface], () => {
+        cleanupRightPanelSurfaces([surface]);
+        useRightPanelStore.getState().closeSurface(activeThreadRef, surface.id);
+        syncActivePreviewSurface();
+      });
     },
-    [activeThreadRef, cleanupRightPanelSurfaces, syncActivePreviewSurface],
+    [
+      activeThreadRef,
+      cleanupRightPanelSurfaces,
+      guardUnsavedFileSurfaces,
+      syncActivePreviewSurface,
+    ],
   );
   const closeOtherRightPanelSurfaces = useCallback(
     (surface: RightPanelSurface) => {
       if (!activeThreadRef) return;
       const surfaces = rightPanelState.surfaces.filter((entry) => entry.id !== surface.id);
-      cleanupRightPanelSurfaces(surfaces);
-      useRightPanelStore.getState().closeOtherSurfaces(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
+      guardUnsavedFileSurfaces(surfaces, () => {
+        cleanupRightPanelSurfaces(surfaces);
+        useRightPanelStore.getState().closeOtherSurfaces(activeThreadRef, surface.id);
+        syncActivePreviewSurface();
+      });
     },
     [
       activeThreadRef,
       cleanupRightPanelSurfaces,
+      guardUnsavedFileSurfaces,
       rightPanelState.surfaces,
       syncActivePreviewSurface,
     ],
@@ -3309,22 +3347,32 @@ function ChatViewContent(props: ChatViewProps) {
       const surfaceIndex = rightPanelState.surfaces.findIndex((entry) => entry.id === surface.id);
       if (surfaceIndex < 0) return;
       const surfaces = rightPanelState.surfaces.slice(surfaceIndex + 1);
-      cleanupRightPanelSurfaces(surfaces);
-      useRightPanelStore.getState().closeSurfacesToRight(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
+      guardUnsavedFileSurfaces(surfaces, () => {
+        cleanupRightPanelSurfaces(surfaces);
+        useRightPanelStore.getState().closeSurfacesToRight(activeThreadRef, surface.id);
+        syncActivePreviewSurface();
+      });
     },
     [
       activeThreadRef,
       cleanupRightPanelSurfaces,
+      guardUnsavedFileSurfaces,
       rightPanelState.surfaces,
       syncActivePreviewSurface,
     ],
   );
   const closeAllRightPanelSurfaces = useCallback(() => {
     if (!activeThreadRef) return;
-    cleanupRightPanelSurfaces(rightPanelState.surfaces);
-    useRightPanelStore.getState().closeAllSurfaces(activeThreadRef);
-  }, [activeThreadRef, cleanupRightPanelSurfaces, rightPanelState.surfaces]);
+    guardUnsavedFileSurfaces(rightPanelState.surfaces, () => {
+      cleanupRightPanelSurfaces(rightPanelState.surfaces);
+      useRightPanelStore.getState().closeAllSurfaces(activeThreadRef);
+    });
+  }, [
+    activeThreadRef,
+    cleanupRightPanelSurfaces,
+    guardUnsavedFileSurfaces,
+    rightPanelState.surfaces,
+  ]);
   const copyRightPanelFilePath = useCallback((relativePath: string) => {
     if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
       toastManager.add(
@@ -4433,6 +4481,15 @@ function ChatViewContent(props: ChatViewProps) {
           window.requestAnimationFrame(() => dispatchFileTreeAction(action));
         });
         return true;
+      }
+
+      if (command === "file.save") {
+        const save = dispatchActiveFileSave();
+        if (save !== null) return true;
+        // Claim ⌘S while a file view is open even when nothing is editable
+        // (rendered markdown, truncated preview) so the browser's save-page
+        // dialog never appears over it.
+        return activeRightPanelSurface?.kind === "file";
       }
 
       if (command === "rightPanel.closeSurface") {
@@ -6261,6 +6318,21 @@ function ChatViewContent(props: ChatViewProps) {
             {rightPanelContent}
           </RightPanelTabs>
         </RightPanelSheet>
+      ) : null}
+
+      {unsavedCloseRequest && activeProject && activeWorkspaceRoot ? (
+        <UnsavedChangesDialog
+          environmentId={activeProject.environmentId}
+          cwd={activeWorkspaceRoot}
+          dirtyFilePaths={unsavedCloseRequest.dirtyFilePaths}
+          onResolvePending={(relativePath) => handleFilePendingChange(relativePath, false)}
+          onProceed={() => {
+            const { proceed } = unsavedCloseRequest;
+            setUnsavedCloseRequest(null);
+            proceed();
+          }}
+          onCancel={() => setUnsavedCloseRequest(null)}
+        />
       ) : null}
 
       {expandedImage && (

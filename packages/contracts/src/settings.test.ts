@@ -33,6 +33,47 @@ describe("ClientSettings word wrap", () => {
   });
 });
 
+describe("ClientSettings file opening", () => {
+  it("defaults to the built-in editor", () => {
+    expect(decodeClientSettings({}).openFilesInExternalEditor).toBe(false);
+  });
+
+  it("accepts an explicit external-editor opt-in via patch", () => {
+    expect(
+      decodeClientSettingsPatch({ openFilesInExternalEditor: true }).openFilesInExternalEditor,
+    ).toBe(true);
+  });
+});
+
+describe("ClientSettings auto save", () => {
+  it("defaults to autosave on, after a 500ms delay", () => {
+    const decoded = decodeClientSettings({});
+    expect(decoded.autoSaveEnabled).toBe(true);
+    expect(decoded.autoSaveMode).toBe("afterDelay");
+    expect(decoded.autoSaveDelayMs).toBe(500);
+  });
+
+  it("accepts explicit auto-save preferences via patch", () => {
+    const patch = decodeClientSettingsPatch({
+      autoSaveEnabled: false,
+      autoSaveMode: "onFocusChange",
+      autoSaveDelayMs: 2000,
+    });
+    expect(patch.autoSaveEnabled).toBe(false);
+    expect(patch.autoSaveMode).toBe("onFocusChange");
+    expect(patch.autoSaveDelayMs).toBe(2000);
+  });
+
+  it.each([99, 10_001, 750.5])("rejects an invalid auto-save delay: %s", (value) => {
+    expect(() => decodeClientSettings({ autoSaveDelayMs: value })).toThrow();
+    expect(() => decodeClientSettingsPatch({ autoSaveDelayMs: value })).toThrow();
+  });
+
+  it("rejects unknown auto-save modes", () => {
+    expect(() => decodeClientSettings({ autoSaveMode: "onWindowChange" })).toThrow();
+  });
+});
+
 describe("ClientSettings glass opacity", () => {
   it("defaults to a readable translucent surface", () => {
     expect(decodeClientSettings({}).glassOpacity).toBe(80);

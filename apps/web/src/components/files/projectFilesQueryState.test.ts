@@ -6,6 +6,7 @@ import {
   clearProjectFileQueryData,
   confirmProjectFileQueryData,
   getOptimisticProjectFileQueryData,
+  getUnsavedProjectFileBuffer,
   resolveProjectFileQueryData,
   setProjectFileQueryData,
 } from "./projectFilesQueryState";
@@ -47,5 +48,18 @@ describe("project files queries", () => {
     expect(
       confirmProjectFileQueryData(environmentId, "/repo", "convex.json", '{"nodeVersion":"22"}'),
     ).toBe(true);
+  });
+
+  it("reports an unconfirmed buffer as unsaved and a confirmed one as clean", () => {
+    vi.stubGlobal("window", {});
+    expect(getUnsavedProjectFileBuffer(environmentId, "/repo", "convex.json")).toBeNull();
+
+    setProjectFileQueryData(environmentId, "/repo", "convex.json", '{"nodeVersion":"22"}');
+    expect(getUnsavedProjectFileBuffer(environmentId, "/repo", "convex.json")).toBe(
+      '{"nodeVersion":"22"}',
+    );
+
+    confirmProjectFileQueryData(environmentId, "/repo", "convex.json", '{"nodeVersion":"22"}');
+    expect(getUnsavedProjectFileBuffer(environmentId, "/repo", "convex.json")).toBeNull();
   });
 });

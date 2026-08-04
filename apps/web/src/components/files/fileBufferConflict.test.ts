@@ -24,6 +24,28 @@ describe("detectsExternalConflict", () => {
     );
   });
 
+  it("ignores disk revisions this editor wrote itself", () => {
+    expect(
+      detectsExternalConflict({
+        dirty: true,
+        baseRevision: "1:a",
+        diskRevision: "2:b",
+        isSelfWrittenRevision: (revision) => revision === "2:b",
+      }),
+    ).toBe(false);
+  });
+
+  it("still flags foreign disk revisions when self-written ones exist", () => {
+    expect(
+      detectsExternalConflict({
+        dirty: true,
+        baseRevision: "1:a",
+        diskRevision: "3:c",
+        isSelfWrittenRevision: (revision) => revision === "2:b",
+      }),
+    ).toBe(true);
+  });
+
   it("never conflicts when a revision is unknown", () => {
     expect(detectsExternalConflict({ dirty: true, baseRevision: null, diskRevision: "2:b" })).toBe(
       false,

@@ -1,7 +1,30 @@
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 
+/**
+ * How pending edits reach disk. "debounce" persists automatically after the
+ * given quiet period (autosave after delay). "manual" only marks edits
+ * pending and waits for an explicit flush() — used both when autosave is off
+ * (⌘S / vim `:w`) and for focus-triggered autosave, where the focus loss is
+ * what calls flush().
+ */
+export type SaveScheduling =
+  | { readonly kind: "debounce"; readonly delayMs: number }
+  | { readonly kind: "manual" };
+
 export interface FileSaveCoordinatorOptions<A, E> {
-  readonly debounceMs: number;
+  /**
+   * Read live on every scheduling decision so a settings change mid-edit
+   * takes effect without recreating the coordinator (recreation would
+   * dispose, and disposing can flush or drop pending state).
+   */
+  readonly getScheduling: () => SaveScheduling;
+  /**
+   * Whether dispose() persists pending edits. Autosave modes flush on
+   * unmount; with autosave off the buffer intentionally stays unsaved (it
+   * survives in the optimistic file atom and feeds the unsaved-changes
+   * prompt).
+   */
+  readonly getFlushOnDispose: () => boolean;
   readonly persist: (contents: string) => Promise<AtomCommandResult<A, E>>;
   readonly onPendingChange: (pending: boolean) => void;
   readonly onConfirmed: (contents: string) => void;
@@ -14,6 +37,8 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
   private lastChangeAt = 0;
   private saving = false;
   private disposed = false;
+  private flushRequested = false;
+  private inflight: Promise<void> | null = null;
 
   constructor(private readonly options: FileSaveCoordinatorOptions<A, E>) {}
 
@@ -22,23 +47,33 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
     this.latestRevision += 1;
     this.lastChangeAt = Date.now();
     this.options.onPendingChange(true);
-    this.schedule(this.options.debounceMs);
+    const scheduling = this.options.getScheduling();
+    if (scheduling.kind === "debounce") {
+      this.schedule(scheduling.delayMs);
+    } else {
+      this.clearTimer();
+    }
   }
 
   dispose(): void {
     this.disposed = true;
     this.clearTimer();
-    if (this.latestRevision > 0) void this.persistLatest();
+    if (this.latestRevision > 0 && this.options.getFlushOnDispose()) void this.persistLatest();
   }
 
   /**
-   * Persist pending debounced edits now instead of waiting out the debounce
-   * (e.g. vim `:w`). No-ops when the buffer is clean or a save is in flight
-   * (the in-flight save already reschedules any trailing edits).
+   * Persist pending edits now instead of waiting out the debounce (manual
+   * save, vim `:w`, focus-lost autosave). Resolves once the buffer has been
+   * persisted; a flush while a save is already in flight persists any
+   * trailing edits as soon as that save settles rather than dropping them.
    */
-  flush(): void {
+  flush(): Promise<void> {
     this.clearTimer();
-    void this.persistLatest();
+    if (this.saving) {
+      this.flushRequested = true;
+      return this.inflight ?? Promise.resolve();
+    }
+    return this.persistLatest();
   }
 
   /**
@@ -50,6 +85,7 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
     this.clearTimer();
     this.latestContents = "";
     this.latestRevision = 0;
+    this.flushRequested = false;
     if (!this.saving) this.options.onPendingChange(false);
   }
 
@@ -67,37 +103,55 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
     this.timer = null;
   }
 
-  private async persistLatest(): Promise<void> {
-    if (this.saving || this.latestRevision === 0) return;
+  private persistLatest(): Promise<void> {
+    if (this.saving) return this.inflight ?? Promise.resolve();
+    if (this.latestRevision === 0) return Promise.resolve();
+    this.inflight = this.run().finally(() => {
+      this.inflight = null;
+    });
+    return this.inflight;
+  }
 
-    this.saving = true;
-    const contents = this.latestContents;
-    const revision = this.latestRevision;
-    const result = await this.options.persist(contents);
-    const succeeded = result._tag === "Success";
-    if (succeeded) {
-      this.options.onConfirmed(contents);
-    }
+  private async run(): Promise<void> {
+    for (;;) {
+      this.saving = true;
+      const contents = this.latestContents;
+      const revision = this.latestRevision;
+      const result = await this.options.persist(contents);
+      const succeeded = result._tag === "Success";
+      if (succeeded) {
+        this.options.onConfirmed(contents);
+      }
 
-    this.saving = false;
-    if (this.latestRevision === 0) {
-      // A reset() landed while this save was in flight; nothing left to persist.
-      this.options.onPendingChange(false);
+      this.saving = false;
+      if (this.latestRevision === 0) {
+        // A reset() landed while this save was in flight; nothing left to persist.
+        this.flushRequested = false;
+        this.options.onPendingChange(false);
+        return;
+      }
+      if (revision === this.latestRevision) {
+        this.flushRequested = false;
+        if (succeeded) this.options.onPendingChange(false);
+        return;
+      }
+
+      // Trailing edits landed while the save was in flight.
+      if (this.flushRequested) {
+        this.flushRequested = false;
+        continue;
+      }
+      if (this.disposed) {
+        if (this.options.getFlushOnDispose()) continue;
+        return;
+      }
+      const scheduling = this.options.getScheduling();
+      if (scheduling.kind === "manual") {
+        // Stay pending; the next explicit flush picks the edits up.
+        return;
+      }
+      this.schedule(Math.max(0, scheduling.delayMs - (Date.now() - this.lastChangeAt)));
       return;
-    }
-    if (revision === this.latestRevision) {
-      if (succeeded) this.options.onPendingChange(false);
-      return;
-    }
-
-    const remainingDebounce = Math.max(
-      0,
-      this.options.debounceMs - (Date.now() - this.lastChangeAt),
-    );
-    if (this.disposed) {
-      void this.persistLatest();
-    } else {
-      this.schedule(remainingDebounce);
     }
   }
 }
