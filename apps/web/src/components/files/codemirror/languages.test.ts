@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { editorLanguageIdForPath, languageExtensionForPath } from "./languages";
+import {
+  editorLanguageIdForPath,
+  languageExtensionForPath,
+  lazyLanguageDescriptionForPath,
+} from "./languages";
 
 describe("editorLanguageIdForPath", () => {
   it("maps common source extensions to their language ids", () => {
@@ -46,5 +50,31 @@ describe("languageExtensionForPath", () => {
 
   it("returns an empty extension for plain files", () => {
     expect(languageExtensionForPath("LICENSE")).toEqual([]);
+  });
+});
+
+describe("lazyLanguageDescriptionForPath", () => {
+  it("matches languages that lack bundled support", () => {
+    expect(lazyLanguageDescriptionForPath("cmd/main.go")?.name).toBe("Go");
+    expect(lazyLanguageDescriptionForPath("src/Main.java")?.name).toBe("Java");
+    expect(lazyLanguageDescriptionForPath("Cargo.toml")?.name).toBe("TOML");
+  });
+
+  it("matches case-sensitive registry filenames verbatim", () => {
+    expect(lazyLanguageDescriptionForPath("services/api/Dockerfile")?.name).toBe("Dockerfile");
+  });
+
+  it("falls back to the lowercased file name for uppercase extensions", () => {
+    expect(lazyLanguageDescriptionForPath("CMD/MAIN.GO")?.name).toBe("Go");
+  });
+
+  it("returns null for languages with bundled support", () => {
+    expect(lazyLanguageDescriptionForPath("src/index.ts")).toBeNull();
+    expect(lazyLanguageDescriptionForPath("notes.md")).toBeNull();
+  });
+
+  it("returns null when no registered language matches", () => {
+    expect(lazyLanguageDescriptionForPath("LICENSE")).toBeNull();
+    expect(lazyLanguageDescriptionForPath(".gitignore")).toBeNull();
   });
 });

@@ -27,6 +27,7 @@ import { languageExtensionForPath } from "./languages";
 import { goToLspDefinitionAtCursor, showLspHoverAtCursor } from "./lspBridge";
 import { revealEditorLine, revealLineExtension } from "./revealLine";
 import { editorTheme } from "./theme";
+import { useLazyHighlighting } from "./useLazyHighlighting";
 
 // `gh` in vim normal mode shows LSP hover info at the cursor (the VSCode-vim
 // convention). Registered once; no-ops in documents without an LSP bridge.
@@ -71,6 +72,7 @@ const externalContentsUpdate = Annotation.define<boolean>();
 
 interface EditorHandle {
   readonly view: EditorView;
+  readonly language: Compartment;
   readonly wrap: Compartment;
   readonly readOnly: Compartment;
   readonly vim: Compartment;
@@ -152,6 +154,7 @@ export function CodeMirrorFileEditor({
   const containerRef = useRef<HTMLDivElement>(null);
   const [editor, setEditor] = useState<EditorHandle | null>(null);
   const view = editor?.view ?? null;
+  useLazyHighlighting(view, editor?.language ?? null, relativePath);
   /** Contents last applied to or emitted from the document. */
   const syncedContentsRef = useRef<string | null>(null);
 
@@ -201,6 +204,7 @@ export function CodeMirrorFileEditor({
     syncedContentsRef.current = initial.contents;
     setEditor({
       view: editorView,
+      language: languageCompartment,
       wrap: wrapCompartment,
       readOnly: readOnlyCompartment,
       vim: vimCompartment,

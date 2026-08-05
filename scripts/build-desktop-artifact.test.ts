@@ -1,14 +1,20 @@
+import * as NodeModule from "node:module";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Option from "effect/Option";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import {
+  BUILDER_HOOKS_FILENAME,
+  BUILDER_HOOKS_SOURCE,
   BuildCommandFailedError,
   createStageWorkspaceConfig,
   createStagePatchedDependencies,
@@ -464,10 +470,19 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it.effect("adds passkey entitlements and both renderer protocols to signed macOS builds", () =>
     Effect.gen(function* () {
-      const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
-        entitlementsPath: "/tmp/entitlements.mac.plist",
-        provisioningProfilePath: "/tmp/t3code.provisionprofile",
-      });
+      const config = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "1.2.3",
+        true,
+        false,
+        undefined,
+        {
+          entitlementsPath: "/tmp/entitlements.mac.plist",
+          provisioningProfilePath: "/tmp/t3code.provisionprofile",
+        },
+        "/tmp/stage/electron-builder-hooks.cjs",
+      );
 
       const mac = config.mac as Record<string, unknown>;
       assert.equal(config.appId, "com.t3tools.t3code");
@@ -489,6 +504,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         false,
         undefined,
         undefined,
+        "/tmp/stage/electron-builder-hooks.cjs",
       );
 
       const win = config.win as Record<string, unknown>;
@@ -496,6 +512,56 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.equal(win.signAndEditExecutable, true);
       assert.notProperty(win, "azureSignOptions");
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect("keeps TypeScript's standard-library declarations in packaged builds", () =>
+    Effect.gen(function* () {
+      const config = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+        "/tmp/stage/electron-builder-hooks.cjs",
+      );
+
+      // onNodeModuleFile rescues typescript/lib/*.d.ts from electron-builder's
+      // default *.d.ts exclusion; without it the packaged vtsls loads zero
+      // default libs and flags every ambient global (Error, JSON, ...) as
+      // "Cannot find name". The hook is only honored alongside a files matcher.
+      assert.equal(config.onNodeModuleFile, "/tmp/stage/electron-builder-hooks.cjs");
+      assert.equal(config.afterPack, "/tmp/stage/electron-builder-hooks.cjs");
+      assert.deepStrictEqual(config.files, [{ filter: ["**/*"] }]);
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect("force-includes exactly typescript/lib declaration files", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const hooksDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-builder-hooks-" });
+      const hooksPath = path.join(hooksDir, BUILDER_HOOKS_FILENAME);
+      yield* fs.writeFileString(hooksPath, BUILDER_HOOKS_SOURCE);
+      // The hooks module is loaded exactly the way electron-builder loads it:
+      // a CommonJS require of the staged absolute path.
+      const hooks = NodeModule.createRequire(import.meta.url)(hooksPath) as {
+        onNodeModuleFile: (filePath: string) => boolean;
+      };
+
+      assert.isTrue(hooks.onNodeModuleFile("/stage/node_modules/typescript/lib/lib.es5.d.ts"));
+      assert.isTrue(
+        hooks.onNodeModuleFile(
+          "/stage/node_modules/@vtsls/language-service/node_modules/typescript/lib/lib.dom.d.ts",
+        ),
+      );
+      assert.isTrue(
+        hooks.onNodeModuleFile("C:\\stage\\node_modules\\typescript\\lib\\lib.es2020.d.ts"),
+      );
+      assert.isFalse(hooks.onNodeModuleFile("/stage/node_modules/typescript/lib/tsserver.js"));
+      assert.isFalse(hooks.onNodeModuleFile("/stage/node_modules/effect/dist/index.d.ts"));
+    }).pipe(Effect.scoped),
   );
 
   it("promotes target fff binaries to direct staged dependencies", () => {
