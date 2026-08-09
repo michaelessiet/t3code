@@ -95,7 +95,7 @@ import {
 import { ContextWindowMeter } from "./ContextWindowMeter";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { basenameOfPath } from "../../pierre-icons";
-import { useThreadShells } from "../../state/entities";
+import { useProjects, useThreadShells } from "../../state/entities";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { cn, randomUUID } from "~/lib/utils";
 import { Separator } from "../ui/separator";
@@ -1025,26 +1025,32 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     query: isPathTrigger ? pathTriggerQuery : null,
   });
   const threadShells = useThreadShells();
+  const projects = useProjects();
 
   const composerMenuItems = useMemo<ComposerCommandItem[]>(() => {
     if (!composerTrigger) return [];
     if (composerTrigger.kind === "thread") {
       const query = composerTrigger.query.trim().toLowerCase();
-      // Scope to the active thread's project when known; drafts fall back to
-      // every thread in the environment.
+      // Any thread in the environment is referencible; the server resolves
+      // references from the environment-wide projection store regardless of
+      // project. The active thread's project only affects ranking and labels.
       const activeShell =
         activeThreadId === null
           ? undefined
           : threadShells.find(
               (shell) => shell.environmentId === environmentId && shell.id === activeThreadId,
             );
+      const projectTitleById = new Map(
+        projects
+          .filter((project) => project.environmentId === environmentId)
+          .map((project) => [project.id, project.title]),
+      );
       return threadShells
         .filter(
           (shell) =>
             shell.environmentId === environmentId &&
             shell.id !== activeThreadId &&
             shell.archivedAt === null &&
-            (activeShell === undefined || shell.projectId === activeShell.projectId) &&
             (query.length === 0 || shell.title.toLowerCase().includes(query)),
         )
         .sort((left, right) => {
@@ -1053,17 +1059,31 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             const rightStarts = right.title.toLowerCase().startsWith(query) ? 0 : 1;
             if (leftStarts !== rightStarts) return leftStarts - rightStarts;
           }
+          if (activeShell !== undefined) {
+            const leftSameProject = left.projectId === activeShell.projectId ? 0 : 1;
+            const rightSameProject = right.projectId === activeShell.projectId ? 0 : 1;
+            if (leftSameProject !== rightSameProject) return leftSameProject - rightSameProject;
+          }
           return right.updatedAt.localeCompare(left.updatedAt);
         })
         .slice(0, 20)
-        .map((shell) => ({
-          id: `thread:${shell.environmentId}:${shell.id}`,
-          type: "thread" as const,
-          threadId: shell.id,
-          title: shell.title,
-          label: shell.title,
-          description: formatRelativeTimeLabel(shell.updatedAt),
-        }));
+        .map((shell) => {
+          const crossProjectTitle =
+            activeShell === undefined || shell.projectId === activeShell.projectId
+              ? undefined
+              : projectTitleById.get(shell.projectId);
+          const relativeTime = formatRelativeTimeLabel(shell.updatedAt);
+          return {
+            id: `thread:${shell.environmentId}:${shell.id}`,
+            type: "thread" as const,
+            threadId: shell.id,
+            title: shell.title,
+            label: shell.title,
+            description: crossProjectTitle
+              ? `${crossProjectTitle} · ${relativeTime}`
+              : relativeTime,
+          };
+        });
     }
     if (composerTrigger.kind === "path") {
       return workspaceEntries.entries.map((entry) => ({
@@ -1136,6 +1156,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeThreadId,
     composerTrigger,
     environmentId,
+    projects,
     selectedProvider,
     selectedProviderStatus,
     threadShells,
@@ -1211,7 +1232,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       return "No skills found. Try / to browse provider commands.";
     }
     if (composerTriggerKind === "thread") {
-      return "No matching chats in this project.";
+      return "No matching chats.";
     }
     return composerTriggerKind === "path"
       ? "No matching files or folders."
