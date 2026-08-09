@@ -477,16 +477,30 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
 
-  it("inlines referenced thread transcripts into the provider turn input", async () => {
+  it("inlines referenced thread transcripts into the provider turn input, including across projects", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
     await Effect.runPromise(
       harness.engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-project-create-referenced"),
+        projectId: asProjectId("project-2"),
+        title: "Other Project",
+        workspaceRoot: "/tmp/provider-project-other",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
         type: "thread.create",
         commandId: CommandId.make("cmd-thread-create-referenced"),
         threadId: ThreadId.make("thread-2"),
-        projectId: asProjectId("project-1"),
+        projectId: asProjectId("project-2"),
         title: "Auth fix",
         modelSelection: {
           instanceId: ProviderInstanceId.make("codex"),
