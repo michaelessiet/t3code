@@ -1,4 +1,4 @@
-export type ComposerTriggerKind = "path" | "slash-command" | "slash-model" | "skill";
+export type ComposerTriggerKind = "path" | "slash-command" | "slash-model" | "skill" | "thread";
 export type ComposerSlashCommand = "model" | "plan" | "default";
 
 export interface ComposerTrigger {
@@ -107,6 +107,20 @@ export function detectComposerTrigger(
   if (token.startsWith("$")) {
     return {
       kind: "skill",
+      query: token.slice(1),
+      rangeStart: tokenStart,
+      rangeEnd: cursor,
+    };
+  }
+  if (token.startsWith("#")) {
+    // A run of bare `#` at the start of a line is markdown heading syntax,
+    // not a thread reference; the trigger arms once a query character lands.
+    const isHeadingPrefix = tokenStart === lineStart && /^#+$/.test(token);
+    if (isHeadingPrefix) {
+      return null;
+    }
+    return {
+      kind: "thread",
       query: token.slice(1),
       rangeStart: tokenStart,
       rangeEnd: cursor,

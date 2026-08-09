@@ -159,6 +159,10 @@
       "types": "./src/composerInlineTokens.ts",
       "import": "./src/composerInlineTokens.ts"
     },
+    "./threadReferences": {
+      "types": "./src/threadReferences.ts",
+      "import": "./src/threadReferences.ts"
+    },
     "./terminalLabels": {
       "types": "./src/terminalLabels.ts",
       "import": "./src/terminalLabels.ts"

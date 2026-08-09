@@ -202,6 +202,24 @@ describe("ServerSettings auto-compact", () => {
   });
 });
 
+describe("ServerSettings thread references", () => {
+  it("defaults to 32k chars per referenced thread for legacy configs", () => {
+    expect(decodeServerSettings({}).threadReferenceMaxChars).toBe(32_000);
+  });
+
+  it("accepts in-range patches", () => {
+    expect(
+      decodeServerSettingsPatch({ threadReferenceMaxChars: 8_000 }).threadReferenceMaxChars,
+    ).toBe(8_000);
+  });
+
+  it("rejects budgets outside the 1k-100k range", () => {
+    expect(() => decodeServerSettingsPatch({ threadReferenceMaxChars: 500 })).toThrow();
+    expect(() => decodeServerSettingsPatch({ threadReferenceMaxChars: 200_000 })).toThrow();
+    expect(() => decodeServerSettingsPatch({ threadReferenceMaxChars: 32_000.5 })).toThrow();
+  });
+});
+
 describe("ServerSettingsPatch.providerInstances", () => {
   it("treats providerInstances as an optional whole-map replacement", () => {
     const patch = decodeServerSettingsPatch({});

@@ -603,12 +603,30 @@ export const AutoCompactThresholdTokens = Schema.Int.check(
 export type AutoCompactThresholdTokens = typeof AutoCompactThresholdTokens.Type;
 export const DEFAULT_AUTO_COMPACT_THRESHOLD_TOKENS: AutoCompactThresholdTokens = 200_000;
 
+// Per-referenced-thread budget for transcripts inlined into a provider turn
+// when a message mentions another chat with `#thread`. Characters rather than
+// tokens so the server can enforce it without a tokenizer; ~4 chars/token
+// makes the 32k default roughly 8k tokens per referenced conversation.
+export const MIN_THREAD_REFERENCE_MAX_CHARS = 1_000;
+export const MAX_THREAD_REFERENCE_MAX_CHARS = 100_000;
+export const ThreadReferenceMaxChars = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_THREAD_REFERENCE_MAX_CHARS,
+    maximum: MAX_THREAD_REFERENCE_MAX_CHARS,
+  }),
+);
+export type ThreadReferenceMaxChars = typeof ThreadReferenceMaxChars.Type;
+export const DEFAULT_THREAD_REFERENCE_MAX_CHARS: ThreadReferenceMaxChars = 32_000;
+
 export const ServerSettings = Schema.Struct({
   enableAssistantStreaming: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   autoCompactEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   autoCompactThresholdTokens: AutoCompactThresholdTokens.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_AUTO_COMPACT_THRESHOLD_TOKENS)),
+  ),
+  threadReferenceMaxChars: ThreadReferenceMaxChars.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_THREAD_REFERENCE_MAX_CHARS)),
   ),
   automaticGitFetchInterval: Schema.DurationFromMillis.pipe(
     Schema.withDecodingDefault(
@@ -759,6 +777,7 @@ export const ServerSettingsPatch = Schema.Struct({
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   autoCompactEnabled: Schema.optionalKey(Schema.Boolean),
   autoCompactThresholdTokens: Schema.optionalKey(AutoCompactThresholdTokens),
+  threadReferenceMaxChars: Schema.optionalKey(ThreadReferenceMaxChars),
   automaticGitFetchInterval: Schema.optionalKey(Schema.DurationFromMillis),
   defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
   newWorktreesStartFromOrigin: Schema.optionalKey(Schema.Boolean),
