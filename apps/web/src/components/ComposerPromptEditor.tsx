@@ -74,8 +74,11 @@ import {
   COMPOSER_INLINE_CHIP_ICON_CLASS_NAME,
   COMPOSER_INLINE_CHIP_LABEL_CLASS_NAME,
   COMPOSER_INLINE_SKILL_CHIP_CLASS_NAME,
+  COMPOSER_INLINE_THREAD_CHIP_CLASS_NAME,
   SKILL_CHIP_ICON_SVG,
+  THREAD_CHIP_ICON_SVG,
 } from "./composerInlineChip";
+import { serializeComposerThreadReference } from "@t3tools/shared/threadReferences";
 import { FILE_TAG_CHIP_CLASS_NAME, FileTagChipContent } from "./chat/FileTagChip";
 import { ComposerPendingTerminalContextChip } from "./chat/ComposerPendingTerminalContexts";
 import { formatProviderSkillDisplayName } from "~/providerSkillPresentation";
@@ -211,6 +214,104 @@ class ComposerMentionNode extends DecoratorNode<React.ReactElement> {
 
 function $createComposerMentionNode(path: string): ComposerMentionNode {
   return $applyNodeReplacement(new ComposerMentionNode(path));
+}
+
+type SerializedComposerThreadNode = Spread<
+  {
+    threadId: string;
+    title: string;
+    type: "composer-thread";
+    version: 1;
+  },
+  SerializedLexicalNode
+>;
+
+function ComposerThreadDecorator(props: { title: string }) {
+  const chip = (
+    <span
+      className={COMPOSER_INLINE_THREAD_CHIP_CLASS_NAME}
+      contentEditable={false}
+      spellCheck={false}
+      data-composer-thread-chip="true"
+    >
+      <span
+        aria-hidden="true"
+        className={COMPOSER_INLINE_CHIP_ICON_CLASS_NAME}
+        dangerouslySetInnerHTML={{ __html: THREAD_CHIP_ICON_SVG }}
+      />
+      <span className={COMPOSER_INLINE_CHIP_LABEL_CLASS_NAME}>{props.title}</span>
+    </span>
+  );
+
+  return (
+    <Tooltip>
+      <TooltipTrigger render={chip} />
+      <TooltipPopup side="top" className="max-w-120 whitespace-normal leading-tight">
+        Referenced conversation: {props.title}
+      </TooltipPopup>
+    </Tooltip>
+  );
+}
+
+class ComposerThreadNode extends DecoratorNode<React.ReactElement> {
+  __threadId: string;
+  __title: string;
+
+  static override getType(): string {
+    return "composer-thread";
+  }
+
+  static override clone(node: ComposerThreadNode): ComposerThreadNode {
+    return new ComposerThreadNode(node.__threadId, node.__title, node.__key);
+  }
+
+  static override importJSON(serializedNode: SerializedComposerThreadNode): ComposerThreadNode {
+    return $createComposerThreadNode(serializedNode.threadId, serializedNode.title).updateFromJSON(
+      serializedNode,
+    );
+  }
+
+  constructor(threadId: string, title: string, key?: NodeKey) {
+    super(key);
+    this.__threadId = threadId;
+    this.__title = title;
+  }
+
+  override exportJSON(): SerializedComposerThreadNode {
+    return {
+      ...super.exportJSON(),
+      threadId: this.__threadId,
+      title: this.__title,
+      type: "composer-thread",
+      version: 1,
+    };
+  }
+
+  override createDOM(): HTMLElement {
+    const dom = document.createElement("span");
+    dom.className = "composer-inline-chip relative inline-flex align-middle leading-none";
+    return dom;
+  }
+
+  override updateDOM(): false {
+    return false;
+  }
+
+  override getTextContent(): string {
+    return serializeComposerThreadReference({ threadId: this.__threadId, title: this.__title });
+  }
+
+  override isInline(): true {
+    return true;
+  }
+
+  override decorate(): React.ReactElement {
+    return <ComposerThreadDecorator title={this.__title} />;
+  }
+}
+
+function $createComposerThreadNode(threadId: string, title: string): ComposerThreadNode {
+  return $applyNodeReplacement(new ComposerThreadNode(threadId, title));
 }
 
 function resolveSkillDescription(
@@ -842,6 +943,10 @@ function $setComposerEditorPrompt(
           metadata?.description ?? null,
         ),
       );
+      continue;
+    }
+    if (segment.type === "thread") {
+      paragraph.append($createComposerThreadNode(segment.threadId, segment.title));
       continue;
     }
     if (segment.type === "terminal-context") {
@@ -1806,7 +1911,12 @@ export function ComposerPromptEditor({
     () => ({
       namespace: "t3tools-composer-editor",
       editable: true,
-      nodes: [ComposerMentionNode, ComposerSkillNode, ComposerTerminalContextNode],
+      nodes: [
+        ComposerMentionNode,
+        ComposerSkillNode,
+        ComposerThreadNode,
+        ComposerTerminalContextNode,
+      ],
       editorState: () => {
         $setComposerEditorPrompt(
           initialValueRef.current,

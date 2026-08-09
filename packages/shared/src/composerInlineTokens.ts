@@ -1,3 +1,5 @@
+import { collectThreadReferences } from "./threadReferences.ts";
+
 export type ComposerInlineToken =
   | {
       readonly type: "mention";
@@ -9,6 +11,15 @@ export type ComposerInlineToken =
   | {
       readonly type: "skill";
       readonly value: string;
+      readonly source: string;
+      readonly start: number;
+      readonly end: number;
+    }
+  | {
+      readonly type: "thread";
+      /** The referenced thread id. */
+      readonly value: string;
+      readonly title: string;
       readonly source: string;
       readonly start: number;
       readonly end: number;
@@ -85,6 +96,17 @@ export function collectComposerInlineTokens(
   options: CollectComposerInlineTokensOptions = {},
 ): ReadonlyArray<ComposerInlineToken> {
   const matches = collectMentionTokens(text);
+
+  for (const reference of collectThreadReferences(text)) {
+    matches.push({
+      type: "thread",
+      value: reference.threadId,
+      title: reference.title,
+      source: reference.source,
+      start: reference.start,
+      end: reference.end,
+    });
+  }
 
   for (const match of text.matchAll(SKILL_TOKEN_REGEX)) {
     const fullMatch = match[0];

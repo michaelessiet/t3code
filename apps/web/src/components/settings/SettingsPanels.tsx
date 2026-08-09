@@ -25,9 +25,11 @@ import {
   MAX_AUTO_COMPACT_THRESHOLD_TOKENS,
   MAX_AUTO_SAVE_DELAY_MS,
   MAX_GLASS_OPACITY,
+  MAX_THREAD_REFERENCE_MAX_CHARS,
   MIN_AUTO_COMPACT_THRESHOLD_TOKENS,
   MIN_AUTO_SAVE_DELAY_MS,
   MIN_GLASS_OPACITY,
+  MIN_THREAD_REFERENCE_MAX_CHARS,
 } from "@t3tools/contracts/settings";
 import { createModelSelection } from "@t3tools/shared/model";
 import * as Arr from "effect/Array";
@@ -156,6 +158,18 @@ function normalizeAutoCompactThresholdTokens(value: number | null): number {
   return Math.min(
     MAX_AUTO_COMPACT_THRESHOLD_TOKENS,
     Math.max(MIN_AUTO_COMPACT_THRESHOLD_TOKENS, Math.round(value)),
+  );
+}
+
+const THREAD_REFERENCE_MAX_CHARS_STEP = 1_000;
+
+function normalizeThreadReferenceMaxChars(value: number | null): number {
+  if (value === null || !Number.isFinite(value)) {
+    return DEFAULT_UNIFIED_SETTINGS.threadReferenceMaxChars;
+  }
+  return Math.min(
+    MAX_THREAD_REFERENCE_MAX_CHARS,
+    Math.max(MIN_THREAD_REFERENCE_MAX_CHARS, Math.round(value)),
   );
 }
 
@@ -481,6 +495,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       DEFAULT_UNIFIED_SETTINGS.autoCompactThresholdTokens
         ? ["Auto-compact threshold"]
         : []),
+      ...(settings.threadReferenceMaxChars !== DEFAULT_UNIFIED_SETTINGS.threadReferenceMaxChars
+        ? ["Chat reference size limit"]
+        : []),
       ...(settings.enableProviderUpdateChecks !==
       DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks
         ? ["Provider update checks"]
@@ -520,6 +537,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.automaticGitFetchInterval,
       settings.autoCompactEnabled,
       settings.autoCompactThresholdTokens,
+      settings.threadReferenceMaxChars,
       settings.enableAssistantStreaming,
       settings.enableProviderUpdateChecks,
       settings.sidebarProjectGroupingMode,
@@ -564,6 +582,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       enableAssistantStreaming: DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming,
       autoCompactEnabled: DEFAULT_UNIFIED_SETTINGS.autoCompactEnabled,
       autoCompactThresholdTokens: DEFAULT_UNIFIED_SETTINGS.autoCompactThresholdTokens,
+      threadReferenceMaxChars: DEFAULT_UNIFIED_SETTINGS.threadReferenceMaxChars,
       enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
       automaticGitFetchInterval: DEFAULT_UNIFIED_SETTINGS.automaticGitFetchInterval,
       defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
@@ -1115,6 +1134,48 @@ export function GeneralSettingsPanel() {
                 </NumberFieldGroup>
               </NumberField>
               <span className="text-xs text-muted-foreground">tokens</span>
+            </div>
+          }
+        />
+
+        <SettingsRow
+          title="Chat reference size limit"
+          description="Character budget for each conversation inlined via a #chat reference. Roughly 4 characters per token; the default 32,000 is about 8,000 tokens per referenced chat."
+          resetAction={
+            settings.threadReferenceMaxChars !==
+            DEFAULT_UNIFIED_SETTINGS.threadReferenceMaxChars ? (
+              <SettingResetButton
+                label="chat reference size limit"
+                onClick={() =>
+                  updateSettings({
+                    threadReferenceMaxChars: DEFAULT_UNIFIED_SETTINGS.threadReferenceMaxChars,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <div className="flex shrink-0 items-center gap-2">
+              <NumberField
+                value={settings.threadReferenceMaxChars}
+                min={MIN_THREAD_REFERENCE_MAX_CHARS}
+                max={MAX_THREAD_REFERENCE_MAX_CHARS}
+                step={THREAD_REFERENCE_MAX_CHARS_STEP}
+                size="sm"
+                className="w-32"
+                onValueChange={(value) =>
+                  updateSettings({
+                    threadReferenceMaxChars: normalizeThreadReferenceMaxChars(value),
+                  })
+                }
+              >
+                <NumberFieldGroup>
+                  <NumberFieldDecrement aria-label="Decrease chat reference size limit" />
+                  <NumberFieldInput aria-label="Chat reference size limit in characters" />
+                  <NumberFieldIncrement aria-label="Increase chat reference size limit" />
+                </NumberFieldGroup>
+              </NumberField>
+              <span className="text-xs text-muted-foreground">chars</span>
             </div>
           }
         />

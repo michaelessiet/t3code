@@ -9,7 +9,11 @@ import {
   Minimize2Icon,
   WrapTextIcon,
 } from "lucide-react";
-import type { ScopedThreadRef, ServerProviderSkill } from "@t3tools/contracts";
+import type { EnvironmentId, ScopedThreadRef, ServerProviderSkill } from "@t3tools/contracts";
+import { ThreadId } from "@t3tools/contracts";
+import { useNavigate } from "@tanstack/react-router";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { parseThreadReferenceUrl } from "@t3tools/shared/threadReferences";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -80,6 +84,12 @@ import {
 import { resolveWorkspaceFilePath, useWorkspaceFilePathIndex } from "../workspaceFilePathIndex";
 import { readLocalApi } from "../localApi";
 import { cn } from "../lib/utils";
+import { buildThreadRouteParams } from "../threadRoutes";
+import {
+  CHAT_INLINE_CHIP_LABEL_CLASS_NAME,
+  CHAT_INLINE_THREAD_CHIP_CLASS_NAME,
+  THREAD_CHIP_ICON_SVG,
+} from "./composerInlineChip";
 import { useRightPanelStore } from "../rightPanelStore";
 import { useActiveEnvironmentId } from "../state/entities";
 import { serverEnvironment } from "../state/server";
@@ -1014,6 +1024,55 @@ function MarkdownExternalLinkContent({
   );
 }
 
+const MarkdownThreadReferenceLink = memo(function MarkdownThreadReferenceLink(props: {
+  threadId: string;
+  environmentId: EnvironmentId | null;
+  label: string;
+}) {
+  const navigate = useNavigate();
+  const title = props.label.startsWith("#") ? props.label.slice(1) : props.label;
+  const canNavigate = props.environmentId !== null;
+  const chip = (
+    <a
+      className={cn(
+        CHAT_INLINE_THREAD_CHIP_CLASS_NAME,
+        "no-underline",
+        canNavigate && "cursor-pointer transition-colors hover:bg-sky-500/20",
+      )}
+      data-thread-reference-chip="true"
+      onClick={(event) => {
+        event.preventDefault();
+        const environmentId = props.environmentId;
+        if (environmentId === null) return;
+        void navigate({
+          to: "/$environmentId/$threadId",
+          params: buildThreadRouteParams(
+            scopeThreadRef(environmentId, ThreadId.make(props.threadId)),
+          ),
+        });
+      }}
+    >
+      <span
+        aria-hidden="true"
+        className="size-3.5 shrink-0 opacity-85"
+        dangerouslySetInnerHTML={{ __html: THREAD_CHIP_ICON_SVG }}
+      />
+      <span className={CHAT_INLINE_CHIP_LABEL_CLASS_NAME}>{title}</span>
+    </a>
+  );
+  if (!canNavigate) {
+    return chip;
+  }
+  return (
+    <Tooltip>
+      <TooltipTrigger render={chip} />
+      <TooltipPopup side="top" className="max-w-120 whitespace-normal leading-tight">
+        Open chat “{title}”
+      </TooltipPopup>
+    </Tooltip>
+  );
+});
+
 const MarkdownFileLink = memo(function MarkdownFileLink({
   href,
   targetPath,
@@ -1325,6 +1384,10 @@ function ChatMarkdown({
     return buildFileLinkParentSuffixByPath(filePaths);
   }, [markdownFileLinkMetaByHref]);
   const markdownUrlTransform = useCallback((href: string) => {
+    // In-app thread references must survive the default protocol allowlist.
+    if (parseThreadReferenceUrl(href) !== null) {
+      return href;
+    }
     return rewriteMarkdownFileUriHref(href) ?? defaultUrlTransform(href);
   }, []);
   // Re-emit highlighted content as markdown so copying out of the rendered
@@ -1424,6 +1487,16 @@ function ChatMarkdown({
       },
       a({ node, href, children, ...props }) {
         const normalizedHref = href ? normalizeMarkdownLinkHrefKey(href) : "";
+        const threadReferenceId = parseThreadReferenceUrl(normalizedHref || href);
+        if (threadReferenceId !== null) {
+          return (
+            <MarkdownThreadReferenceLink
+              threadId={threadReferenceId}
+              environmentId={threadRef?.environmentId ?? environmentId}
+              label={plainHastText(node) ?? "conversation"}
+            />
+          );
+        }
         // Autolinked paths never appear in the pre-scanned map, which only sees
         // explicit `[label](path)` destinations in the source text.
         const autolinkKind = autolinkedFilePathKind(node);
@@ -1585,6 +1658,7 @@ function ChatMarkdown({
     [
       cwd,
       diffThemeName,
+      environmentId,
       fileLinkParentSuffixByPath,
       isStreaming,
       markdownFileLinkMetaByHref,

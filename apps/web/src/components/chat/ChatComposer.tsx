@@ -20,6 +20,7 @@ import {
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
+import { serializeComposerThreadReference } from "@t3tools/shared/threadReferences";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
 import {
   memo,
@@ -94,6 +95,8 @@ import {
 import { ContextWindowMeter } from "./ContextWindowMeter";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { basenameOfPath } from "../../pierre-icons";
+import { useThreadShells } from "../../state/entities";
+import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { cn, randomUUID } from "~/lib/utils";
 import { Separator } from "../ui/separator";
 
@@ -1021,9 +1024,47 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     cwd: isPathTrigger ? gitCwd : null,
     query: isPathTrigger ? pathTriggerQuery : null,
   });
+  const threadShells = useThreadShells();
 
   const composerMenuItems = useMemo<ComposerCommandItem[]>(() => {
     if (!composerTrigger) return [];
+    if (composerTrigger.kind === "thread") {
+      const query = composerTrigger.query.trim().toLowerCase();
+      // Scope to the active thread's project when known; drafts fall back to
+      // every thread in the environment.
+      const activeShell =
+        activeThreadId === null
+          ? undefined
+          : threadShells.find(
+              (shell) => shell.environmentId === environmentId && shell.id === activeThreadId,
+            );
+      return threadShells
+        .filter(
+          (shell) =>
+            shell.environmentId === environmentId &&
+            shell.id !== activeThreadId &&
+            shell.archivedAt === null &&
+            (activeShell === undefined || shell.projectId === activeShell.projectId) &&
+            (query.length === 0 || shell.title.toLowerCase().includes(query)),
+        )
+        .sort((left, right) => {
+          if (query.length > 0) {
+            const leftStarts = left.title.toLowerCase().startsWith(query) ? 0 : 1;
+            const rightStarts = right.title.toLowerCase().startsWith(query) ? 0 : 1;
+            if (leftStarts !== rightStarts) return leftStarts - rightStarts;
+          }
+          return right.updatedAt.localeCompare(left.updatedAt);
+        })
+        .slice(0, 20)
+        .map((shell) => ({
+          id: `thread:${shell.environmentId}:${shell.id}`,
+          type: "thread" as const,
+          threadId: shell.id,
+          title: shell.title,
+          label: shell.title,
+          description: formatRelativeTimeLabel(shell.updatedAt),
+        }));
+    }
     if (composerTrigger.kind === "path") {
       return workspaceEntries.entries.map((entry) => ({
         id: `path:${entry.kind}:${entry.path}`,
@@ -1091,7 +1132,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       );
     }
     return [];
-  }, [composerTrigger, selectedProvider, selectedProviderStatus, workspaceEntries.entries]);
+  }, [
+    activeThreadId,
+    composerTrigger,
+    environmentId,
+    selectedProvider,
+    selectedProviderStatus,
+    threadShells,
+    workspaceEntries.entries,
+  ]);
 
   const composerMenuOpen = Boolean(composerTrigger);
   const composerMenuSearchKey = composerTrigger
@@ -1160,6 +1209,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerMenuEmptyState = useMemo(() => {
     if (composerTriggerKind === "skill") {
       return "No skills found. Try / to browse provider commands.";
+    }
+    if (composerTriggerKind === "thread") {
+      return "No matching chats in this project.";
     }
     return composerTriggerKind === "path"
       ? "No matching files or folders."
@@ -1706,6 +1758,27 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
       if (item.type === "skill") {
         const replacement = `$${item.skill.name} `;
+        const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
+          snapshot.value,
+          trigger.rangeEnd,
+          replacement,
+        );
+        const applied = applyPromptReplacement(
+          trigger.rangeStart,
+          replacementRangeEnd,
+          replacement,
+          { expectedText: snapshot.value.slice(trigger.rangeStart, replacementRangeEnd) },
+        );
+        if (applied) {
+          setComposerHighlightedItemId(null);
+        }
+        return;
+      }
+      if (item.type === "thread") {
+        const replacement = `${serializeComposerThreadReference({
+          threadId: item.threadId,
+          title: item.title,
+        })} `;
         const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
           snapshot.value,
           trigger.rangeEnd,

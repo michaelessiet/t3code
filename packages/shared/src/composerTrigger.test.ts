@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { serializeComposerFileLink, serializeComposerMentionPath } from "./composerTrigger.ts";
+import {
+  detectComposerTrigger,
+  serializeComposerFileLink,
+  serializeComposerMentionPath,
+} from "./composerTrigger.ts";
 
 describe("serializeComposerMentionPath", () => {
   it("keeps simple mention paths unquoted", () => {
@@ -39,5 +43,43 @@ describe("serializeComposerFileLink", () => {
     expect(serializeComposerFileLink("@scope/package.json")).toBe(
       "[package.json](@scope/package.json)",
     );
+  });
+});
+
+describe("detectComposerTrigger thread references", () => {
+  it("detects a # thread trigger mid-sentence", () => {
+    const text = "see #auth";
+    expect(detectComposerTrigger(text, text.length)).toEqual({
+      kind: "thread",
+      query: "auth",
+      rangeStart: 4,
+      rangeEnd: text.length,
+    });
+  });
+
+  it("opens the trigger on a bare # after other text", () => {
+    const text = "see #";
+    expect(detectComposerTrigger(text, text.length)).toEqual({
+      kind: "thread",
+      query: "",
+      rangeStart: 4,
+      rangeEnd: text.length,
+    });
+  });
+
+  it("does not treat markdown heading prefixes as thread triggers", () => {
+    expect(detectComposerTrigger("#", 1)).toBeNull();
+    expect(detectComposerTrigger("##", 2)).toBeNull();
+    expect(detectComposerTrigger("intro\n#", 7)).toBeNull();
+  });
+
+  it("arms the trigger once a heading-position # gains a query", () => {
+    const text = "#auth";
+    expect(detectComposerTrigger(text, text.length)).toEqual({
+      kind: "thread",
+      query: "auth",
+      rangeStart: 0,
+      rangeEnd: text.length,
+    });
   });
 });

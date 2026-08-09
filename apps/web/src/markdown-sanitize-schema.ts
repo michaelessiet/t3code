@@ -18,6 +18,7 @@ export const CHAT_MARKDOWN_SANITIZE_SCHEMA: NonNullable<Parameters<typeof rehype
   },
   protocols: {
     ...defaultSchema.protocols,
-    href: [...(defaultSchema.protocols?.href ?? []), "file"],
+    // `t3code` carries in-app thread references ([#Title](t3code://thread/id)).
+    href: [...(defaultSchema.protocols?.href ?? []), "file", "t3code"],
   },
 } satisfies Parameters<typeof rehypeSanitize>[0];
