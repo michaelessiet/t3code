@@ -58,6 +58,8 @@ export interface CodeMirrorFileEditorProps {
   readOnly?: boolean;
   /** Line to scroll to and highlight; retriggered by `revealRequestId`. */
   revealLine?: number | null;
+  /** Last line of a highlighted range starting at `revealLine`. */
+  revealEndLine?: number | null;
   revealRequestId?: number;
   /** Additional extensions (e.g. review comments); reconfigured on change. */
   extensions?: Extension;
@@ -145,6 +147,7 @@ export function CodeMirrorFileEditor({
   vimMode = false,
   readOnly = false,
   revealLine = null,
+  revealEndLine = null,
   revealRequestId,
   extensions,
   className,
@@ -258,8 +261,8 @@ export function CodeMirrorFileEditor({
 
   useEffect(() => {
     if (view === null || revealRequestId === undefined) return;
-    revealEditorLine(view, revealLine);
-  }, [view, revealLine, revealRequestId]);
+    revealEditorLine(view, revealLine, revealEndLine);
+  }, [view, revealLine, revealEndLine, revealRequestId]);
 
   // data-code-editor feeds the `editorFocus` keybinding when-context
   // (see lib/editorFocus.ts).

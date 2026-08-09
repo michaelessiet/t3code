@@ -3,9 +3,19 @@ import { trimLinkTrailingDelimiters } from "./terminal-links";
 /**
  * Marks anchors this plugin created, so the renderer can tell an agent's bare
  * prose mention from a link the author wrote by hand and keep copy round-trips
- * faithful to the original text.
+ * faithful to the original text. The value records where the token came from:
+ * `"true"` for prose text, `"inline-code"` for a backticked span whose whole
+ * content was the path — copying the latter must restore the backticks.
  */
 export const FILE_PATH_AUTOLINK_PROPERTY = "dataFilePathAutolink";
+export const FILE_PATH_AUTOLINK_PROSE = "true";
+export const FILE_PATH_AUTOLINK_INLINE_CODE = "inline-code";
+
+/**
+ * Optional position suffix: `:12`, `:12:4`, or a line range `:65-79` (agents
+ * occasionally emit an en-dash).
+ */
+const POSITION_SUFFIX = String.raw`(?::\d+(?:[-–]\d+|:\d+)?)?`;
 
 /**
  * Path-shaped tokens agents write in prose without markdown link syntax:
@@ -14,17 +24,24 @@ export const FILE_PATH_AUTOLINK_PROPERTY = "dataFilePathAutolink";
  * verified against the workspace file list before it becomes a link, so an
  * over-eager match costs nothing but a failed lookup.
  */
-const BARE_FILE_PATH_PATTERN = new RegExp(
-  [
-    // Absolute, home-relative, or dot-relative paths.
-    String.raw`(?:~\/|\.{1,2}\/|\/|[A-Za-z]:[\\/]|\\\\)[A-Za-z0-9._-]+(?:[\\/][A-Za-z0-9._-]+)*(?::\d+){0,2}`,
-    // Multi-segment relative paths.
-    String.raw`[A-Za-z0-9._-]+(?:[\\/][A-Za-z0-9._-]+)+(?::\d+){0,2}`,
-    // Bare filenames carrying an extension, which only resolve at the workspace root.
-    String.raw`[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+(?::\d+){0,2}`,
-  ].join("|"),
-  "g",
-);
+const BARE_FILE_PATH_ALTERNATIVES = [
+  // Absolute, home-relative, or dot-relative paths.
+  String.raw`(?:~\/|\.{1,2}\/|\/|[A-Za-z]:[\\/]|\\\\)[A-Za-z0-9._-]+(?:[\\/][A-Za-z0-9._-]+)*${POSITION_SUFFIX}`,
+  // Multi-segment relative paths.
+  String.raw`[A-Za-z0-9._-]+(?:[\\/][A-Za-z0-9._-]+)+${POSITION_SUFFIX}`,
+  // Bare filenames carrying an extension, which only resolve at the workspace root
+  // or through the unique-basename index.
+  String.raw`[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+${POSITION_SUFFIX}`,
+];
+
+const BARE_FILE_PATH_PATTERN = new RegExp(BARE_FILE_PATH_ALTERNATIVES.join("|"), "g");
+
+/**
+ * An inline code span only becomes a link when its entire content is one
+ * path-shaped token — `` `authStorage.ts:65-79` `` links, `` `see foo.ts` ``
+ * stays code.
+ */
+const WHOLE_FILE_PATH_PATTERN = new RegExp(`^(?:${BARE_FILE_PATH_ALTERNATIVES.join("|")})$`);
 
 /**
  * URLs are excluded wholesale: a repository link such as
@@ -108,7 +125,7 @@ function linkifyText(value: string, resolve: (candidate: string) => string | nul
       url: targetPath,
       // The path the agent wrote is the label — rewriting it would edit prose.
       children: [{ type: "text", value: candidate }],
-      data: { hProperties: { [FILE_PATH_AUTOLINK_PROPERTY]: "true" } },
+      data: { hProperties: { [FILE_PATH_AUTOLINK_PROPERTY]: FILE_PATH_AUTOLINK_PROSE } },
     });
     cursor = start + candidate.length;
   }
@@ -118,6 +135,26 @@ function linkifyText(value: string, resolve: (candidate: string) => string | nul
     nodes.push({ type: "text", value: value.slice(cursor) });
   }
   return nodes;
+}
+
+function linkifyInlineCode(
+  value: string,
+  resolve: (candidate: string) => string | null,
+): MarkdownAstNode | null {
+  const candidate = value.trim();
+  if (candidate.length === 0 || !WHOLE_FILE_PATH_PATTERN.test(candidate)) return null;
+
+  const targetPath = resolve(candidate);
+  if (!targetPath) return null;
+
+  return {
+    type: "link",
+    url: targetPath,
+    // A plain text child (not inlineCode) so the renderer's plain-text
+    // extraction still recovers the original label.
+    children: [{ type: "text", value: candidate }],
+    data: { hProperties: { [FILE_PATH_AUTOLINK_PROPERTY]: FILE_PATH_AUTOLINK_INLINE_CODE } },
+  };
 }
 
 /**
@@ -130,6 +167,9 @@ export function remarkLinkifyFilePaths({ resolve }: RemarkLinkifyFilePathsOption
   const transform = (node: MarkdownAstNode) => {
     if (!node.children) return;
     node.children = node.children.flatMap((child) => {
+      if (child.type === "inlineCode" && typeof child.value === "string") {
+        return [linkifyInlineCode(child.value, resolve) ?? child];
+      }
       if (SKIPPED_NODE_TYPES.has(child.type ?? "")) return [child];
       if (child.type === "text" && typeof child.value === "string") {
         return linkifyText(child.value, resolve) ?? [child];

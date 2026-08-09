@@ -106,6 +106,7 @@ interface FilePreviewPanelProps {
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
   revealLine: number | null;
+  revealEndLine: number | null;
   revealRequestId: number;
   onOpenFile: (relativePath: string, line?: number) => void;
   onPendingChange: (relativePath: string, pending: boolean) => void;
@@ -325,6 +326,7 @@ interface EditableFileSurfaceProps {
   contents: string;
   diskRevision: string | undefined;
   revealLine: number | null;
+  revealEndLine: number | null;
   revealRequestId: number;
   wordWrap: boolean;
   vimMode: boolean;
@@ -521,6 +523,7 @@ function EditableFileSurface({
   contents,
   diskRevision,
   revealLine,
+  revealEndLine,
   revealRequestId,
   wordWrap,
   vimMode,
@@ -990,6 +993,7 @@ function EditableFileSurface({
         wordWrap={wordWrap}
         vimMode={vimMode}
         revealLine={revealLine}
+        revealEndLine={revealEndLine}
         revealRequestId={revealRequestId}
         extensions={editorExtensions}
         onContentsChange={handleContentsChange}
@@ -1032,6 +1036,7 @@ function RenderedMarkdownSurface({
   EditableFileSurfaceProps,
   | "composerDraftTarget"
   | "revealLine"
+  | "revealEndLine"
   | "revealRequestId"
   | "wordWrap"
   | "vimMode"
@@ -1113,6 +1118,7 @@ export default function FilePreviewPanel({
   keybindings,
   availableEditors,
   revealLine,
+  revealEndLine,
   revealRequestId,
   onOpenFile,
   onPendingChange,
@@ -1383,6 +1389,7 @@ export default function FilePreviewPanel({
                 contents={file.data.contents}
                 diskRevision={diskRevision}
                 revealLine={revealLine}
+                revealEndLine={revealEndLine}
                 revealRequestId={revealRequestId}
                 wordWrap={wordWrap}
                 vimMode={vimMode}

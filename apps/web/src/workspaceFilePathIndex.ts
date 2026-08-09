@@ -29,6 +29,33 @@ export function workspaceFilePathSet(result: ProjectListEntriesResult): Readonly
   return filePaths;
 }
 
+const basenameIndexByEntriesResult = new WeakMap<
+  ProjectListEntriesResult,
+  ReadonlyMap<string, string | null>
+>();
+
+/**
+ * Basename → the single workspace-relative path bearing it, or null once a
+ * second file shares the name. The null sentinel is what keeps a mention of
+ * `index.ts` from linking to an arbitrary one of many.
+ */
+export function workspaceBasenameIndex(
+  result: ProjectListEntriesResult,
+): ReadonlyMap<string, string | null> {
+  const cached = basenameIndexByEntriesResult.get(result);
+  if (cached) return cached;
+
+  const pathsByBasename = new Map<string, string | null>();
+  for (const entry of result.entries) {
+    if (entry.kind !== "file") continue;
+    const separatorIndex = entry.path.lastIndexOf("/");
+    const basename = separatorIndex >= 0 ? entry.path.slice(separatorIndex + 1) : entry.path;
+    pathsByBasename.set(basename, pathsByBasename.has(basename) ? null : entry.path);
+  }
+  basenameIndexByEntriesResult.set(result, pathsByBasename);
+  return pathsByBasename;
+}
+
 function workspaceRelativeCandidate(path: string, cwd: string): string | null {
   const normalized = path.replaceAll("\\", "/");
   if (normalized.startsWith("./")) return normalized.slice(2);
@@ -58,16 +85,28 @@ export function resolveWorkspaceFilePath(
   candidate: string,
   workspaceFiles: ReadonlySet<string>,
   cwd: string,
+  basenames?: ReadonlyMap<string, string | null>,
 ): string | null {
-  const { path, line, column } = splitPathAndPosition(candidate);
+  const { path, line, column, endLine } = splitPathAndPosition(candidate);
   if (path.length === 0) return null;
 
   const relativePath = workspaceRelativeCandidate(path, cwd);
   if (relativePath === null || relativePath.length === 0) return null;
-  if (!workspaceFiles.has(relativePath)) return null;
 
-  const position = line ? `:${line}${column ? `:${column}` : ""}` : "";
-  return `${resolvePathLinkTarget(relativePath, cwd)}${position}`;
+  // The exact check runs first so a root-level `package.json` keeps meaning
+  // the root file even when nested ones make the basename ambiguous.
+  let resolvedRelativePath: string | null = workspaceFiles.has(relativePath) ? relativePath : null;
+  if (resolvedRelativePath === null && basenames && !/[\\/]/.test(path)) {
+    resolvedRelativePath = basenames.get(path) ?? null;
+  }
+  if (resolvedRelativePath === null) return null;
+
+  const position = line
+    ? endLine
+      ? `:${line}-${endLine}`
+      : `:${line}${column ? `:${column}` : ""}`
+    : "";
+  return `${resolvePathLinkTarget(resolvedRelativePath, cwd)}${position}`;
 }
 
 const EMPTY_PROJECT_ENTRIES_ATOM = Atom.make(
@@ -89,4 +128,40 @@ export function useWorkspaceFilePathSet(
   );
   const entries = Option.getOrNull(AsyncResult.value(result));
   return entries ? workspaceFilePathSet(entries) : null;
+}
+
+export interface WorkspaceFilePathIndex {
+  readonly files: ReadonlySet<string>;
+  readonly basenames: ReadonlyMap<string, string | null>;
+}
+
+/**
+ * The workspace's file paths plus a unique-basename lookup, or null while
+ * unknown. Both structures are cached per entries result, so the returned
+ * object is referentially stable across renders for the same listing.
+ */
+export function useWorkspaceFilePathIndex(
+  environmentId: EnvironmentId | null,
+  cwd: string | undefined,
+): WorkspaceFilePathIndex | null {
+  const result = useAtomValue(
+    environmentId && cwd
+      ? getProjectEntriesQueryAtom(environmentId, cwd)
+      : EMPTY_PROJECT_ENTRIES_ATOM,
+  );
+  const entries = Option.getOrNull(AsyncResult.value(result));
+  return entries ? workspaceFilePathIndexOf(entries) : null;
+}
+
+const indexByEntriesResult = new WeakMap<ProjectListEntriesResult, WorkspaceFilePathIndex>();
+
+function workspaceFilePathIndexOf(result: ProjectListEntriesResult): WorkspaceFilePathIndex {
+  const cached = indexByEntriesResult.get(result);
+  if (cached) return cached;
+  const index: WorkspaceFilePathIndex = {
+    files: workspaceFilePathSet(result),
+    basenames: workspaceBasenameIndex(result),
+  };
+  indexByEntriesResult.set(result, index);
+  return index;
 }

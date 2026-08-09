@@ -141,14 +141,27 @@ export function splitPathAndPosition(value: string): {
   path: string;
   line: string | undefined;
   column: string | undefined;
+  endLine: string | undefined;
 } {
   let path = value;
   let column: string | undefined;
   let line: string | undefined;
 
+  // A trailing line range (`:65-79`, or `:65–79` as agents sometimes write it)
+  // is mutually exclusive with a column suffix.
+  const rangeMatch = path.match(/:(\d+)[-–](\d+)$/);
+  if (rangeMatch?.[1] && rangeMatch[2]) {
+    return {
+      path: path.slice(0, -rangeMatch[0].length),
+      line: rangeMatch[1],
+      column: undefined,
+      endLine: rangeMatch[2],
+    };
+  }
+
   const columnMatch = path.match(/:(\d+)$/);
   if (!columnMatch?.[1]) {
-    return { path, line: undefined, column: undefined };
+    return { path, line: undefined, column: undefined, endLine: undefined };
   }
 
   column = columnMatch[1];
@@ -163,7 +176,7 @@ export function splitPathAndPosition(value: string): {
     column = undefined;
   }
 
-  return { path, line, column };
+  return { path, line, column, endLine: undefined };
 }
 
 export function extractTerminalLinks(line: string): TerminalLinkMatch[] {
@@ -267,7 +280,7 @@ export function isTerminalLinkActivation(
 }
 
 export function resolvePathLinkTarget(rawPath: string, cwd: string): string {
-  const { path, line, column } = splitPathAndPosition(rawPath);
+  const { path, line, column, endLine } = splitPathAndPosition(rawPath);
 
   let resolvedPath = path;
   if (path.startsWith("~/")) {
@@ -282,5 +295,6 @@ export function resolvePathLinkTarget(rawPath: string, cwd: string): string {
   }
 
   if (!line) return resolvedPath;
+  if (endLine) return `${resolvedPath}:${line}-${endLine}`;
   return `${resolvedPath}:${line}${column ? `:${column}` : ""}`;
 }

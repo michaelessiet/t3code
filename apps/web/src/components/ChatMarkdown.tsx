@@ -65,7 +65,9 @@ import {
   serializeTableElementToMarkdown,
 } from "../markdown-clipboard";
 import {
+  FILE_PATH_AUTOLINK_INLINE_CODE,
   FILE_PATH_AUTOLINK_PROPERTY,
+  FILE_PATH_AUTOLINK_PROSE,
   remarkLinkifyFilePaths,
 } from "../markdown-file-path-autolink";
 import { remarkNormalizeListItemIndentation } from "../markdown-list-indentation";
@@ -75,7 +77,7 @@ import {
   resolveMarkdownFileLinkMeta,
   rewriteMarkdownFileUriHref,
 } from "../markdown-links";
-import { resolveWorkspaceFilePath, useWorkspaceFilePathSet } from "../workspaceFilePathIndex";
+import { resolveWorkspaceFilePath, useWorkspaceFilePathIndex } from "../workspaceFilePathIndex";
 import { readLocalApi } from "../localApi";
 import { cn } from "../lib/utils";
 import { useRightPanelStore } from "../rightPanelStore";
@@ -736,6 +738,7 @@ interface MarkdownFileLinkProps {
   displayPath: string;
   workspaceRelativePath: string | null;
   line?: number | undefined;
+  endLine?: number | undefined;
   label: string;
   copyMarkdown: string;
   theme: "light" | "dark";
@@ -887,12 +890,18 @@ function plainHastText(node: unknown): string | null {
   return parts.every((part) => part !== null) ? parts.join("") : null;
 }
 
-/** True for anchors `remarkLinkifyFilePaths` created from a bare path in prose. */
-function isAutolinkedFilePathNode(node: unknown): boolean {
-  if (!node || typeof node !== "object" || !("properties" in node)) return false;
+/**
+ * The origin marker of an anchor `remarkLinkifyFilePaths` created — prose
+ * text or an inline code span — or null for author-written links.
+ */
+function autolinkedFilePathKind(node: unknown): string | null {
+  if (!node || typeof node !== "object" || !("properties" in node)) return null;
   const properties = node.properties;
-  if (!properties || typeof properties !== "object") return false;
-  return (properties as Record<string, unknown>)[FILE_PATH_AUTOLINK_PROPERTY] === "true";
+  if (!properties || typeof properties !== "object") return null;
+  const value = (properties as Record<string, unknown>)[FILE_PATH_AUTOLINK_PROPERTY];
+  return value === FILE_PATH_AUTOLINK_PROSE || value === FILE_PATH_AUTOLINK_INLINE_CODE
+    ? value
+    : null;
 }
 
 const SANITIZED_FRAGMENT_PREFIX = "user-content-";
@@ -1012,6 +1021,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   displayPath,
   workspaceRelativePath,
   line,
+  endLine,
   label,
   copyMarkdown,
   theme,
@@ -1060,8 +1070,8 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       handleOpenInEditor();
       return;
     }
-    useRightPanelStore.getState().openFile(threadRef, workspaceRelativePath, line);
-  }, [handleOpenInEditor, line, threadRef, workspaceRelativePath]);
+    useRightPanelStore.getState().openFile(threadRef, workspaceRelativePath, line, endLine);
+  }, [endLine, handleOpenInEditor, line, threadRef, workspaceRelativePath]);
 
   const handleOpenInBrowser = useCallback(() => {
     if (!onOpenInBrowser) {
@@ -1232,6 +1242,7 @@ function areMarkdownFileLinkPropsEqual(
     previous.displayPath === next.displayPath &&
     previous.workspaceRelativePath === next.workspaceRelativePath &&
     previous.line === next.line &&
+    previous.endLine === next.endLine &&
     previous.label === next.label &&
     previous.copyMarkdown === next.copyMarkdown &&
     previous.theme === next.theme &&
@@ -1267,7 +1278,7 @@ function ChatMarkdown({
     serverConfig?.availableEditors ?? [],
   );
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
-  const workspaceFilePaths = useWorkspaceFilePathSet(
+  const workspaceFilePathIndex = useWorkspaceFilePathIndex(
     threadRef?.environmentId ?? environmentId,
     cwd,
   );
@@ -1277,18 +1288,23 @@ function ChatMarkdown({
     const basePlugins = lineBreaks
       ? CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS
       : CHAT_MARKDOWN_REMARK_PLUGINS;
-    if (!workspaceFilePaths || !cwd) return basePlugins;
+    if (!workspaceFilePathIndex || !cwd) return basePlugins;
     return [
       ...basePlugins,
       [
         remarkLinkifyFilePaths,
         {
           resolve: (candidate: string) =>
-            resolveWorkspaceFilePath(candidate, workspaceFilePaths, cwd),
+            resolveWorkspaceFilePath(
+              candidate,
+              workspaceFilePathIndex.files,
+              cwd,
+              workspaceFilePathIndex.basenames,
+            ),
         },
       ],
     ];
-  }, [cwd, lineBreaks, workspaceFilePaths]);
+  }, [cwd, lineBreaks, workspaceFilePathIndex]);
   const markdownFileLinkMetaByHref = useMemo(() => {
     const metaByHref = new Map<
       string,
@@ -1410,7 +1426,8 @@ function ChatMarkdown({
         const normalizedHref = href ? normalizeMarkdownLinkHrefKey(href) : "";
         // Autolinked paths never appear in the pre-scanned map, which only sees
         // explicit `[label](path)` destinations in the source text.
-        const autolinkedPathText = isAutolinkedFilePathNode(node) ? plainHastText(node) : null;
+        const autolinkKind = autolinkedFilePathKind(node);
+        const autolinkedPathText = autolinkKind !== null ? plainHastText(node) : null;
         const fileLinkMeta = !normalizedHref
           ? null
           : (markdownFileLinkMetaByHref.get(normalizedHref) ??
@@ -1493,7 +1510,9 @@ function ChatMarkdown({
         }
         if (fileLinkMeta.line) {
           labelParts.push(
-            `L${fileLinkMeta.line}${fileLinkMeta.column ? `:C${fileLinkMeta.column}` : ""}`,
+            fileLinkMeta.endLine
+              ? `L${fileLinkMeta.line}-${fileLinkMeta.endLine}`
+              : `L${fileLinkMeta.line}${fileLinkMeta.column ? `:C${fileLinkMeta.column}` : ""}`,
           );
         }
 
@@ -1505,8 +1524,15 @@ function ChatMarkdown({
             displayPath={fileLinkMeta.displayPath}
             workspaceRelativePath={fileLinkMeta.workspaceRelativePath}
             line={fileLinkMeta.line}
+            endLine={fileLinkMeta.endLine}
             label={autolinkedPathText ?? labelParts.join(" · ")}
-            copyMarkdown={autolinkedPathText ?? `[${fileLinkMeta.basename}](${normalizedHref})`}
+            copyMarkdown={
+              autolinkedPathText === null
+                ? `[${fileLinkMeta.basename}](${normalizedHref})`
+                : autolinkKind === FILE_PATH_AUTOLINK_INLINE_CODE
+                  ? `\`${autolinkedPathText}\``
+                  : autolinkedPathText
+            }
             theme={resolvedTheme}
             threadRef={threadRef}
             onOpen={openInPreferredEditor}

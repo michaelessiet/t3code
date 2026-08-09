@@ -7,23 +7,31 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { remarkLinkifyFilePaths } from "./markdown-file-path-autolink";
 import { CHAT_MARKDOWN_SANITIZE_SCHEMA } from "./markdown-sanitize-schema";
+import { resolveWorkspaceFilePath } from "./workspaceFilePathIndex";
 
 const WORKSPACE_FILES = new Set([
   "apps/web/src/components/ChatMarkdown.tsx",
   "apps/web/src/markdown-links.ts",
   "package.json",
   "docs/README.md",
+  "apps/web/src/authStorage.ts",
+  "apps/mobile/index.ts",
+  "apps/web/index.ts",
+]);
+
+const BASENAMES = new Map<string, string | null>([
+  ["ChatMarkdown.tsx", "apps/web/src/components/ChatMarkdown.tsx"],
+  ["markdown-links.ts", "apps/web/src/markdown-links.ts"],
+  ["package.json", "package.json"],
+  ["README.md", "docs/README.md"],
+  ["authStorage.ts", "apps/web/src/authStorage.ts"],
+  ["index.ts", null],
 ]);
 
 const CWD = "/Users/julius/project";
 
 function resolve(candidate: string): string | null {
-  const match = candidate.match(/^(.*?)((?::\d+){0,2})$/);
-  const path = match?.[1] ?? candidate;
-  const position = match?.[2] ?? "";
-  const relativePath = path.startsWith(`${CWD}/`) ? path.slice(CWD.length + 1) : path;
-  if (!WORKSPACE_FILES.has(relativePath)) return null;
-  return `${CWD}/${relativePath}${position}`;
+  return resolveWorkspaceFilePath(candidate, WORKSPACE_FILES, CWD, BASENAMES);
 }
 
 function renderMarkdown(markdown: string): string {
@@ -68,6 +76,20 @@ describe("remarkLinkifyFilePaths", () => {
     expect(html).toContain('href="/Users/julius/project/package.json"');
   });
 
+  it("carries a line range suffix into the link target", () => {
+    const html = renderMarkdown("The cleanup spans apps/web/src/authStorage.ts:65-79 today.");
+
+    expect(html).toContain('href="/Users/julius/project/apps/web/src/authStorage.ts:65-79"');
+    expect(html).toContain(">apps/web/src/authStorage.ts:65-79</a>");
+  });
+
+  it("links a unique basename mentioned in prose", () => {
+    const html = renderMarkdown("The shim sits in authStorage.ts today.");
+
+    expect(html).toContain('href="/Users/julius/project/apps/web/src/authStorage.ts"');
+    expect(html).toContain(">authStorage.ts</a>");
+  });
+
   it("leaves paths the workspace cannot confirm as plain text", () => {
     const html = renderMarkdown("I changed apps/web/src/imaginary/Nope.tsx:4 for you.");
 
@@ -81,10 +103,61 @@ describe("remarkLinkifyFilePaths", () => {
     expect(html).not.toContain("<a");
   });
 
-  it("does not linkify inside inline code", () => {
+  it("links an inline code span whose whole content is a workspace path", () => {
+    const html = renderMarkdown("Confine the shim to `apps/web/src/authStorage.ts` for now.");
+
+    expect(html).toContain(
+      '<a href="/Users/julius/project/apps/web/src/authStorage.ts" data-file-path-autolink="inline-code">apps/web/src/authStorage.ts</a>',
+    );
+    expect(html).not.toContain("<code>");
+  });
+
+  it("links an inline code span carrying a line number", () => {
+    const html = renderMarkdown("The store lives at `apps/web/src/authStorage.ts:12`.");
+
+    expect(html).toContain('href="/Users/julius/project/apps/web/src/authStorage.ts:12"');
+    expect(html).toContain('data-file-path-autolink="inline-code"');
+  });
+
+  it("links an inline code span carrying a line range", () => {
+    const html = renderMarkdown("Both stores clear here (`apps/web/src/authStorage.ts:65-79`).");
+
+    expect(html).toContain('href="/Users/julius/project/apps/web/src/authStorage.ts:65-79"');
+    expect(html).toContain(">apps/web/src/authStorage.ts:65-79</a>");
+  });
+
+  it("normalizes an en-dash line range to a hyphen in the target", () => {
+    const html = renderMarkdown("See `apps/web/src/authStorage.ts:65–79` for the cleanup.");
+
+    expect(html).toContain('href="/Users/julius/project/apps/web/src/authStorage.ts:65-79"');
+  });
+
+  it("links an inline code basename that is unique in the workspace", () => {
+    const html = renderMarkdown("Confining the shim to `authStorage.ts` matches the surface.");
+
+    expect(html).toContain(
+      '<a href="/Users/julius/project/apps/web/src/authStorage.ts" data-file-path-autolink="inline-code">authStorage.ts</a>',
+    );
+  });
+
+  it("leaves an ambiguous inline code basename as plain code", () => {
+    const html = renderMarkdown("Start from `index.ts` and follow the imports.");
+
+    expect(html).toContain("<code>index.ts</code>");
+    expect(html).not.toContain("<a");
+  });
+
+  it("leaves inline code that is not just a path alone", () => {
     const html = renderMarkdown("Run `pnpm test apps/web/src/markdown-links.ts` locally.");
 
     expect(html).toContain("<code>pnpm test apps/web/src/markdown-links.ts</code>");
+    expect(html).not.toContain("<a");
+  });
+
+  it("leaves code-shaped inline spans that name no workspace file alone", () => {
+    const html = renderMarkdown("Wrap it in `Promise.all` before returning.");
+
+    expect(html).toContain("<code>Promise.all</code>");
     expect(html).not.toContain("<a");
   });
 
@@ -165,5 +238,14 @@ describe("remarkLinkifyFilePaths through the chat sanitize pipeline", () => {
 
     expect(html).toContain('data-file-path-autolink="true"');
     expect(html).toContain('href="/Users/julius/project/apps/web/src/markdown-links.ts:12"');
+  });
+
+  it("keeps the inline-code marker after sanitizing", () => {
+    const html = renderSanitizedMarkdown(
+      "Both stores clear in `apps/web/src/authStorage.ts:65-79`.",
+    );
+
+    expect(html).toContain('data-file-path-autolink="inline-code"');
+    expect(html).toContain('href="/Users/julius/project/apps/web/src/authStorage.ts:65-79"');
   });
 });
