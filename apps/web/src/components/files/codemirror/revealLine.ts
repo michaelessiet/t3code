@@ -2,22 +2,30 @@ import type { Extension } from "@codemirror/state";
 import { StateEffect, StateField } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView } from "@codemirror/view";
 
-const setRevealedLineEffect = StateEffect.define<number | null>();
+const setRevealedLinesEffect = StateEffect.define<{ start: number; end: number } | null>();
 
 const revealedLineDecoration = Decoration.line({ class: "cm-reveal-line" });
+
+/** Highlighting an enormous range would only bury the start the user jumped to. */
+const MAX_REVEALED_LINES = 500;
 
 const revealedLineField = StateField.define<DecorationSet>({
   create: () => Decoration.none,
   update: (decorations, transaction) => {
     let next = decorations.map(transaction.changes);
     for (const effect of transaction.effects) {
-      if (!effect.is(setRevealedLineEffect)) continue;
-      next =
-        effect.value === null
-          ? Decoration.none
-          : Decoration.set([
-              revealedLineDecoration.range(transaction.state.doc.line(effect.value).from),
-            ]);
+      if (!effect.is(setRevealedLinesEffect)) continue;
+      if (effect.value === null) {
+        next = Decoration.none;
+        continue;
+      }
+      const { start, end } = effect.value;
+      const lastLine = Math.min(end, start + MAX_REVEALED_LINES - 1);
+      const ranges = [];
+      for (let lineNumber = start; lineNumber <= lastLine; lineNumber += 1) {
+        ranges.push(revealedLineDecoration.range(transaction.state.doc.line(lineNumber).from));
+      }
+      next = Decoration.set(ranges);
     }
     return next;
   },
@@ -37,18 +45,33 @@ function clampLineNumber(view: EditorView, line: number): number {
  * anchored to the revealed line — a reveal always comes from an explicit
  * jump (search match, go-to-definition, file link), where typing or vim
  * motions should continue from the target, not from line 1.
+ *
+ * With `endLine`, every line of the range is highlighted and the selection
+ * spans it, anchored at the start so the viewport and subsequent motions
+ * stay on the line the link named first.
  */
-export function revealEditorLine(view: EditorView, line: number | null): void {
+export function revealEditorLine(
+  view: EditorView,
+  line: number | null,
+  endLine?: number | null,
+): void {
   if (line === null) {
-    view.dispatch({ effects: setRevealedLineEffect.of(null) });
+    view.dispatch({ effects: setRevealedLinesEffect.of(null) });
     return;
   }
   const clampedLine = clampLineNumber(view, line);
+  const clampedEndLine =
+    endLine !== undefined && endLine !== null
+      ? Math.max(clampLineNumber(view, endLine), clampedLine)
+      : clampedLine;
   const lineStart = view.state.doc.line(clampedLine).from;
   view.dispatch({
-    selection: { anchor: lineStart },
+    selection: {
+      anchor: lineStart,
+      head: clampedEndLine > clampedLine ? view.state.doc.line(clampedEndLine).to : lineStart,
+    },
     effects: [
-      setRevealedLineEffect.of(clampedLine),
+      setRevealedLinesEffect.of({ start: clampedLine, end: clampedEndLine }),
       EditorView.scrollIntoView(lineStart, { y: "center" }),
     ],
   });

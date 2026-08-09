@@ -6,6 +6,7 @@ import {
   isTerminalLinkActivation,
   resolvePathLinkTarget,
   resolveWrappedTerminalLinkRange,
+  splitPathAndPosition,
   wrappedTerminalLinkRangeIntersectsBufferLine,
   type TerminalBufferLineLike,
 } from "./terminal-links";
@@ -195,6 +196,71 @@ describe("resolvePathLinkTarget", () => {
     expect(
       resolvePathLinkTarget("C:/Users/julius/project/src/main.ts:12", "C:\\Users\\julius\\project"),
     ).toBe("C:/Users/julius/project/src/main.ts:12");
+  });
+
+  it("round-trips a line range, normalizing an en-dash", () => {
+    expect(resolvePathLinkTarget("src/main.ts:65-79", "/Users/julius/project")).toBe(
+      "/Users/julius/project/src/main.ts:65-79",
+    );
+    expect(resolvePathLinkTarget("src/main.ts:65–79", "/Users/julius/project")).toBe(
+      "/Users/julius/project/src/main.ts:65-79",
+    );
+  });
+});
+
+describe("splitPathAndPosition", () => {
+  it("parses a bare path", () => {
+    expect(splitPathAndPosition("src/main.ts")).toEqual({
+      path: "src/main.ts",
+      line: undefined,
+      column: undefined,
+      endLine: undefined,
+    });
+  });
+
+  it("parses a line suffix", () => {
+    expect(splitPathAndPosition("src/main.ts:42")).toEqual({
+      path: "src/main.ts",
+      line: "42",
+      column: undefined,
+      endLine: undefined,
+    });
+  });
+
+  it("parses a line and column suffix", () => {
+    expect(splitPathAndPosition("src/main.ts:42:7")).toEqual({
+      path: "src/main.ts",
+      line: "42",
+      column: "7",
+      endLine: undefined,
+    });
+  });
+
+  it("parses a hyphen line range", () => {
+    expect(splitPathAndPosition("src/main.ts:65-79")).toEqual({
+      path: "src/main.ts",
+      line: "65",
+      column: undefined,
+      endLine: "79",
+    });
+  });
+
+  it("parses an en-dash line range", () => {
+    expect(splitPathAndPosition("src/main.ts:65–79")).toEqual({
+      path: "src/main.ts",
+      line: "65",
+      column: undefined,
+      endLine: "79",
+    });
+  });
+
+  it("keeps a hyphen inside a filename out of the range", () => {
+    expect(splitPathAndPosition("src/foo-2.ts:12")).toEqual({
+      path: "src/foo-2.ts",
+      line: "12",
+      column: undefined,
+      endLine: undefined,
+    });
   });
 });
 

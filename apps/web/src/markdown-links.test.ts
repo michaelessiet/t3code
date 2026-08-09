@@ -107,6 +107,37 @@ describe("resolveMarkdownFileLinkTarget", () => {
     });
   });
 
+  it("parses a line range into start and end lines", () => {
+    expect(
+      resolveMarkdownFileLinkMeta("/repo/project/src/authStorage.ts:65-79", "/repo/project"),
+    ).toMatchObject({
+      workspaceRelativePath: "src/authStorage.ts",
+      displayPath: "project/src/authStorage.ts:65-79",
+      line: 65,
+      endLine: 79,
+    });
+  });
+
+  it("resolves a relative path candidate carrying a line range", () => {
+    expect(resolveMarkdownFileLinkMeta("src/authStorage.ts:65-79", "/repo/project")).toMatchObject({
+      workspaceRelativePath: "src/authStorage.ts",
+      line: 65,
+      endLine: 79,
+    });
+  });
+
+  it("drops an inverted or empty line range", () => {
+    expect(
+      resolveMarkdownFileLinkMeta("/repo/project/src/authStorage.ts:79-65", "/repo/project"),
+    ).toMatchObject({ line: 79 });
+    expect(
+      resolveMarkdownFileLinkMeta("/repo/project/src/authStorage.ts:79-65", "/repo/project"),
+    ).not.toHaveProperty("endLine");
+    expect(
+      resolveMarkdownFileLinkMeta("/repo/project/src/authStorage.ts:65-65", "/repo/project"),
+    ).not.toHaveProperty("endLine");
+  });
+
   it("normalizes slash-prefixed windows drive paths before resolving", () => {
     expect(
       resolveMarkdownFileLinkTarget(

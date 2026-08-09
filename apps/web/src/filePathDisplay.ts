@@ -25,7 +25,7 @@ export function formatWorkspaceRelativePath(
   pathWithPosition: string,
   workspaceRoot: string | undefined,
 ): string {
-  const { path, line, column } = splitPathAndPosition(pathWithPosition);
+  const { path, line, column, endLine } = splitPathAndPosition(pathWithPosition);
   const normalizedPath = canonicalizeWindowsDrivePath(normalizePathSeparators(path));
 
   let displayPath = normalizedPath;
@@ -53,5 +53,6 @@ export function formatWorkspaceRelativePath(
   }
 
   if (!line) return displayPath;
+  if (endLine) return `${displayPath}:${line}-${endLine}`;
   return `${displayPath}:${line}${column ? `:${column}` : ""}`;
 }

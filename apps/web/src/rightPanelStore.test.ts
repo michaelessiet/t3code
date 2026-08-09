@@ -94,6 +94,7 @@ describe("rightPanelStore", () => {
               kind: "file",
               relativePath: "src/index.ts",
               revealLine: null,
+              revealEndLine: null,
               revealRequestId: 0,
             },
           ],
@@ -180,6 +181,7 @@ describe("rightPanelStore", () => {
           kind: "file",
           relativePath: "src/index.ts",
           revealLine: null,
+          revealEndLine: null,
           revealRequestId: 2,
         },
         {
@@ -187,6 +189,7 @@ describe("rightPanelStore", () => {
           kind: "file",
           relativePath: "README.md",
           revealLine: null,
+          revealEndLine: null,
           revealRequestId: 1,
         },
       ],
@@ -206,6 +209,7 @@ describe("rightPanelStore", () => {
           kind: "file",
           relativePath: "src/index.ts",
           revealLine: 87,
+          revealEndLine: null,
           revealRequestId: 2,
         },
       ],
@@ -222,10 +226,43 @@ describe("rightPanelStore", () => {
           kind: "file",
           relativePath: "src/index.ts",
           revealLine: null,
+          revealEndLine: null,
           revealRequestId: 3,
         },
       ],
     });
+  });
+
+  it("keeps a line range only when it extends past the start line", () => {
+    useRightPanelStore.getState().openFile(refA, "src/index.ts", 65, 79);
+
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA).surfaces,
+    ).toEqual([
+      {
+        id: "file:src/index.ts",
+        kind: "file",
+        relativePath: "src/index.ts",
+        revealLine: 65,
+        revealEndLine: 79,
+        revealRequestId: 1,
+      },
+    ]);
+
+    useRightPanelStore.getState().openFile(refA, "src/index.ts", 79, 65);
+
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA).surfaces,
+    ).toEqual([
+      {
+        id: "file:src/index.ts",
+        kind: "file",
+        relativePath: "src/index.ts",
+        revealLine: 79,
+        revealEndLine: null,
+        revealRequestId: 2,
+      },
+    ]);
   });
 
   it("removes persisted file surfaces when their workspace no longer exists", () => {
@@ -424,6 +461,7 @@ describe("rightPanelStore", () => {
           kind: "file",
           relativePath: "src/index.ts",
           revealLine: null,
+          revealEndLine: null,
           revealRequestId: 1,
         },
       ],

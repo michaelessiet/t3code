@@ -5,9 +5,10 @@ const WINDOWS_DRIVE_PATH_PATTERN = /^[A-Za-z]:[\\/]/;
 const WINDOWS_UNC_PATH_PATTERN = /^\\\\/;
 const EXTERNAL_SCHEME_PATTERN = /^([A-Za-z][A-Za-z0-9+.-]*):(.*)$/;
 const RELATIVE_PATH_PREFIX_PATTERN = /^(~\/|\.{1,2}\/)/;
-const RELATIVE_FILE_PATH_PATTERN = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+(?::\d+){0,2}$/;
-const RELATIVE_FILE_NAME_PATTERN = /^[A-Za-z0-9._-]+\.[A-Za-z0-9_-]+(?::\d+){0,2}$/;
-const POSITION_SUFFIX_PATTERN = /:\d+(?::\d+)?$/;
+const RELATIVE_FILE_PATH_PATTERN =
+  /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+(?::\d+(?:[-–]\d+|:\d+)?)?$/;
+const RELATIVE_FILE_NAME_PATTERN = /^[A-Za-z0-9._-]+\.[A-Za-z0-9_-]+(?::\d+(?:[-–]\d+|:\d+)?)?$/;
+const POSITION_SUFFIX_PATTERN = /:\d+(?:[-–]\d+|:\d+)?$/;
 const POSITION_ONLY_PATTERN = /^\d+(?::\d+)?$/;
 const POSIX_FILE_ROOT_PREFIXES = [
   "/Users/",
@@ -30,6 +31,7 @@ export interface MarkdownFileLinkMeta {
   basename: string;
   line?: number;
   column?: number;
+  endLine?: number;
 }
 
 function safeDecode(value: string): string {
@@ -198,11 +200,18 @@ export function resolveMarkdownFileLinkMeta(
   const targetPath = resolveMarkdownFileLinkTarget(href, cwd);
   if (!targetPath) return null;
 
-  const { path, line, column } = splitPathAndPosition(targetPath);
+  const { path, line, column, endLine } = splitPathAndPosition(targetPath);
   const parsedLine = line ? Number.parseInt(line, 10) : Number.NaN;
   const parsedColumn = column ? Number.parseInt(column, 10) : Number.NaN;
+  const parsedEndLine = endLine ? Number.parseInt(endLine, 10) : Number.NaN;
   const lineNumber = Number.isFinite(parsedLine) ? parsedLine : undefined;
   const columnNumber = Number.isFinite(parsedColumn) ? parsedColumn : undefined;
+  // A degenerate range (`:79-65`, `:65-65`) collapses to its start line so
+  // downstream reveal logic never sees end <= start.
+  const endLineNumber =
+    Number.isFinite(parsedEndLine) && lineNumber !== undefined && parsedEndLine > lineNumber
+      ? parsedEndLine
+      : undefined;
 
   return {
     filePath: path,
@@ -212,5 +221,6 @@ export function resolveMarkdownFileLinkMeta(
     basename: basenameOfPath(path),
     ...(lineNumber !== undefined ? { line: lineNumber } : {}),
     ...(columnNumber !== undefined ? { column: columnNumber } : {}),
+    ...(endLineNumber !== undefined ? { endLine: endLineNumber } : {}),
   };
 }

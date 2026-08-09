@@ -29,13 +29,19 @@ export function openWorkspaceFilePrimaryAction({
   const targetPath = workspaceRoot ? resolvePathLinkTarget(filePath, workspaceRoot) : filePath;
 
   if (!openFilesInExternalEditor && threadRef && workspaceRoot) {
-    const { path, line } = splitPathAndPosition(targetPath);
+    const { path, line, endLine } = splitPathAndPosition(targetPath);
     const relativePath = workspaceRelativePath(path, workspaceRoot);
     if (relativePath) {
       const parsedLine = line === undefined ? Number.NaN : Number.parseInt(line, 10);
+      const parsedEndLine = endLine === undefined ? Number.NaN : Number.parseInt(endLine, 10);
       useRightPanelStore
         .getState()
-        .openFile(threadRef, relativePath, Number.isFinite(parsedLine) ? parsedLine : undefined);
+        .openFile(
+          threadRef,
+          relativePath,
+          Number.isFinite(parsedLine) ? parsedLine : undefined,
+          Number.isFinite(parsedEndLine) ? parsedEndLine : undefined,
+        );
       return;
     }
   }
