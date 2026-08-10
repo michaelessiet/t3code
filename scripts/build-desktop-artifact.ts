@@ -616,21 +616,32 @@ exports.afterPack = async (context) => {
           "Resources",
         )
       : path.join(context.appOutDir, "resources");
-  const probe = path.join(
-    resourcesDir,
-    "app.asar.unpacked",
-    "node_modules",
-    "typescript",
-    "lib",
-    "lib.es5.d.ts",
-  );
-  if (!fs.existsSync(probe)) {
-    throw new Error(
-      "TypeScript standard library missing from packaged app (" +
-        probe +
-        "). electron-builder stripped node_modules *.d.ts files, so the " +
-        'packaged vtsls would report every JS/TS global (Error, JSON, ...) as "Cannot find name".',
-    );
+  // Probe both TypeScript copies: the top-level one from apps/server, and the
+  // nested one under @vtsls/language-service, which is the copy vtsls actually
+  // forks tsserver from at runtime.
+  const probes = [
+    path.join(resourcesDir, "app.asar.unpacked", "node_modules", "typescript", "lib", "lib.es5.d.ts"),
+    path.join(
+      resourcesDir,
+      "app.asar.unpacked",
+      "node_modules",
+      "@vtsls",
+      "language-service",
+      "node_modules",
+      "typescript",
+      "lib",
+      "lib.es5.d.ts",
+    ),
+  ];
+  for (const probe of probes) {
+    if (!fs.existsSync(probe)) {
+      throw new Error(
+        "TypeScript standard library missing from packaged app (" +
+          probe +
+          "). electron-builder stripped node_modules *.d.ts files, so the " +
+          'packaged vtsls would report every JS/TS global (Error, JSON, ...) as "Cannot find name".',
+      );
+    }
   }
 };
 `;

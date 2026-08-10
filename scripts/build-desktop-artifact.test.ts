@@ -564,6 +564,51 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("afterPack asserts both packaged TypeScript standard-library copies", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const hooksDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-builder-hooks-" });
+      const hooksPath = path.join(hooksDir, BUILDER_HOOKS_FILENAME);
+      yield* fs.writeFileString(hooksPath, BUILDER_HOOKS_SOURCE);
+      const hooks = NodeModule.createRequire(import.meta.url)(hooksPath) as {
+        afterPack: (context: unknown) => Promise<void>;
+      };
+
+      const appOutDir = path.join(hooksDir, "out");
+      const libDir = path.join(appOutDir, "resources", "app.asar.unpacked", "node_modules");
+      const topLevelLib = path.join(libDir, "typescript", "lib", "lib.es5.d.ts");
+      // The nested copy is the one vtsls actually forks tsserver from at runtime.
+      const nestedLib = path.join(
+        libDir,
+        "@vtsls",
+        "language-service",
+        "node_modules",
+        "typescript",
+        "lib",
+        "lib.es5.d.ts",
+      );
+      const context = { electronPlatformName: "linux", appOutDir };
+
+      yield* fs.makeDirectory(path.dirname(topLevelLib), { recursive: true });
+      yield* fs.writeFileString(topLevelLib, "declare interface Object {}");
+      // Top-level copy alone is not enough: the build must fail while the
+      // nested copy is still missing.
+      const missingNested = yield* Effect.promise(() =>
+        hooks.afterPack(context).then(
+          () => "resolved",
+          (error: unknown) => String(error),
+        ),
+      );
+      assert.include(missingNested, "TypeScript standard library missing");
+      assert.include(missingNested, "@vtsls");
+
+      yield* fs.makeDirectory(path.dirname(nestedLib), { recursive: true });
+      yield* fs.writeFileString(nestedLib, "declare interface Object {}");
+      yield* Effect.promise(() => hooks.afterPack(context));
+    }).pipe(Effect.scoped),
+  );
+
   it("promotes target fff binaries to direct staged dependencies", () => {
     assert.deepStrictEqual(resolveFffNativeDependencies("mac", "arm64", "0.9.4"), {
       "@ff-labs/fff-bin-darwin-arm64": "0.9.4",
