@@ -15,6 +15,7 @@
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeModule from "node:module";
+import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
 import {
@@ -73,6 +74,23 @@ function withTimeout<A>(promise: Promise<A>, timeoutMs: number): Promise<A> {
   });
 }
 
+/**
+ * Rewrite a path resolved through Electron's app.asar to its app.asar.unpacked
+ * twin. Child processes must not run from inside the archive: tsserver sets
+ * `process.noAsar = true` before serving requests, after which every fs call
+ * on an app.asar path reports "not found" — its default-lib directory (derived
+ * from its own __filename) turns up empty and every ambient global (Pick,
+ * JSON, Error, ...) becomes "Cannot find name". asarUnpack ships all of
+ * node_modules on the real filesystem, so the unpacked twin always exists.
+ * Outside a packaged build the path contains no app.asar and passes through.
+ */
+export function rewriteAsarPath(resolvedPath: string): string {
+  return resolvedPath.replace(
+    `${NodePath.sep}app.asar${NodePath.sep}`,
+    `${NodePath.sep}app.asar.unpacked${NodePath.sep}`,
+  );
+}
+
 function resolveSpawn(config: LanguageServerConfig): {
   readonly command: string;
   readonly args: ReadonlyArray<string>;
@@ -83,7 +101,7 @@ function resolveSpawn(config: LanguageServerConfig): {
   // bundles its own TypeScript, so unlike a bare typescript-language-server it
   // needs no separately-shipped tsserver to drive.
   const require = NodeModule.createRequire(import.meta.url);
-  const cliPath = require.resolve("@vtsls/language-server/bin/vtsls.js");
+  const cliPath = rewriteAsarPath(require.resolve("@vtsls/language-server/bin/vtsls.js"));
   return { command: process.execPath, args: [cliPath, ...config.args] };
 }
 
