@@ -40,6 +40,7 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
     environmentId,
     projectId,
     title: "Thread",
+    additionalRoots: [],
     modelSelection: {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5.4",

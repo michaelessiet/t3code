@@ -39,6 +39,7 @@ function makeProject(overrides: Partial<Project> = {}): Project {
     title: "shared-repo",
     workspaceRoot: "/tmp/shared-repo",
     repositoryIdentity: null,
+    additionalRoots: [],
     defaultModelSelection: {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5-codex",

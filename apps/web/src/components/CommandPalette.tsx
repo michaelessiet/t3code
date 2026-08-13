@@ -1287,6 +1287,20 @@ function OpenCommandPaletteDialog(props: {
         icon: <FolderTreeIcon className={ITEM_ICON_CLASS} />,
       },
       {
+        value: "action:manage-workspace-roots",
+        command: "workspaceRoots.manage",
+        title: "Manage workspace roots",
+        searchTerms: [
+          "workspace roots",
+          "add repo",
+          "attach repository",
+          "add folder",
+          "multi root",
+          "repositories",
+        ],
+        icon: <FolderTreeIcon className={ITEM_ICON_CLASS} />,
+      },
+      {
         value: "action:new-file",
         command: "fileTree.newFile",
         title: "New file",

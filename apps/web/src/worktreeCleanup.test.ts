@@ -12,6 +12,7 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
     environmentId: localEnvironmentId,
     projectId: ProjectId.make("project-1"),
     title: "Thread",
+    additionalRoots: [],
     modelSelection: {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5.3-codex",
