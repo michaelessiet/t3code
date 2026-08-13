@@ -29,8 +29,10 @@ import { cn } from "~/lib/utils";
 import { useProject, useThreadShells } from "~/state/entities";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { projectEnvironment } from "~/state/projects";
+import { useMultiRootComposerPathSearch } from "~/state/queries";
 import { useEnvironmentQuery } from "~/state/query";
 import { primaryServerKeybindingsAtom } from "~/state/server";
+import { composeThreadRoots } from "~/state/threadRoots";
 
 import { CodeMirrorFileEditor } from "./files/codemirror/CodeMirrorFileEditor";
 import { requestEditorFocus } from "./files/editorFocusRequest";
@@ -53,6 +55,10 @@ type QuickSearchItem =
       readonly key: string;
       readonly kind: "file";
       readonly path: string;
+      /** Absolute path of the containing workspace root; null = primary. */
+      readonly rootPath: string | null;
+      /** Shown on rows only when more than one root is searched. */
+      readonly rootLabel: string | null;
       readonly ignored: boolean;
     }
   | { readonly key: string; readonly kind: "file-match"; readonly match: ProjectSearchContentMatch }
@@ -168,6 +174,15 @@ export function QuickSearch() {
   const cwd = activeThread
     ? (activeThread.worktreePath ?? project?.workspaceRoot ?? null)
     : (activeDraftThread?.worktreePath ?? project?.workspaceRoot ?? null);
+  const threadRoots = useMemo(
+    () =>
+      composeThreadRoots({
+        primaryPath: cwd,
+        projectRoots: project?.resolvedAdditionalRoots,
+        threadRoots: activeThread?.resolvedAdditionalRoots,
+      }),
+    [activeThread?.resolvedAdditionalRoots, cwd, project?.resolvedAdditionalRoots],
+  );
 
   const [mode, setMode] = useState<QuickSearchMode | null>(null);
   const [query, setQuery] = useState("");
@@ -241,14 +256,11 @@ export function QuickSearch() {
   const trimmedQuery = query.trim();
   const debouncedQuery = useDebouncedValue(trimmedQuery, QUERY_DEBOUNCE_MS);
 
-  const fileNameResults = useEnvironmentQuery(
-    mode === "open" && environmentId !== null && cwd !== null && debouncedQuery.length > 0
-      ? projectEnvironment.searchEntries({
-          environmentId,
-          input: { cwd, query: debouncedQuery, limit: FILE_NAME_RESULT_LIMIT },
-        })
-      : null,
-  );
+  const fileNameResults = useMultiRootComposerPathSearch({
+    environmentId,
+    roots: mode === "open" ? threadRoots.all : [],
+    query: mode === "open" ? debouncedQuery : null,
+  });
   const fileContentResults = useEnvironmentQuery(
     mode === "content" && environmentId !== null && cwd !== null && debouncedQuery.length >= 2
       ? projectEnvironment.searchContent({
@@ -276,13 +288,23 @@ export function QuickSearch() {
           thread,
         }),
       );
-      const fileItems = (fileNameResults.data?.entries ?? [])
-        .filter((entry) => entry.kind === "file")
+      const showRootLabels = threadRoots.all.length > 1;
+      const perRootCounts = new Map<string, number>();
+      const fileItems = fileNameResults.entries
+        .filter(({ entry }) => entry.kind === "file")
+        .filter(({ root }) => {
+          const count = perRootCounts.get(root.path) ?? 0;
+          if (count >= FILE_NAME_RESULT_LIMIT) return false;
+          perRootCounts.set(root.path, count + 1);
+          return true;
+        })
         .map(
-          (entry): QuickSearchItem => ({
-            key: `file:${entry.path}`,
+          ({ entry, root }): QuickSearchItem => ({
+            key: `file:${root.path}:${entry.path}`,
             kind: "file",
             path: entry.path,
+            rootPath: root.isPrimary ? null : root.path,
+            rootLabel: showRootLabels ? root.label : null,
             ignored: entry.ignored === true,
           }),
         );
@@ -314,9 +336,10 @@ export function QuickSearch() {
   }, [
     debouncedQuery,
     fileContentResults.data,
-    fileNameResults.data,
+    fileNameResults.entries,
     messageResults.data,
     mode,
+    threadRoots.all,
     threads,
   ]);
 
@@ -368,7 +391,15 @@ export function QuickSearch() {
       activatedFileRef.current = true;
       requestEditorFocus("quick-search");
       if (item.kind === "file") {
-        useRightPanelStore.getState().openFile(fileThreadRef, item.path);
+        useRightPanelStore
+          .getState()
+          .openFile(
+            fileThreadRef,
+            item.path,
+            undefined,
+            undefined,
+            item.rootPath !== null ? { rootPath: item.rootPath } : undefined,
+          );
         return;
       }
       useRightPanelStore.getState().openFile(fileThreadRef, item.match.path, item.match.line);
@@ -400,9 +431,9 @@ export function QuickSearch() {
     selectedItem === null
       ? null
       : selectedItem.kind === "file"
-        ? { path: selectedItem.path, line: null }
+        ? { path: selectedItem.path, line: null, rootPath: selectedItem.rootPath }
         : selectedItem.kind === "file-match"
-          ? { path: selectedItem.match.path, line: selectedItem.match.line }
+          ? { path: selectedItem.match.path, line: selectedItem.match.line, rootPath: null }
           : null;
 
   // Surface query failures instead of letting them masquerade as an empty
@@ -552,6 +583,7 @@ export function QuickSearch() {
                                   path={item.path}
                                   query={debouncedQuery}
                                   ignored={item.ignored}
+                                  rootLabel={item.rootLabel}
                                 />
                               ) : item.kind === "file-match" ? (
                                 <FileMatchRowContent match={item.match} />
@@ -590,7 +622,7 @@ export function QuickSearch() {
                 ) : previewFile !== null && environmentId !== null && cwd !== null ? (
                   <FilePreview
                     environmentId={environmentId}
-                    cwd={cwd}
+                    cwd={previewFile.rootPath ?? cwd}
                     relativePath={previewFile.path}
                     revealLine={previewFile.line}
                   />
@@ -612,10 +644,12 @@ function FileRowContent({
   path,
   query,
   ignored = false,
+  rootLabel = null,
 }: {
   path: string;
   query: string;
   ignored?: boolean;
+  rootLabel?: string | null;
 }) {
   const { name, directory } = splitSearchResultPath(path);
   return (
@@ -623,6 +657,9 @@ function FileRowContent({
       <HighlightedName text={name} query={query} />
       {directory.length > 0 ? (
         <span className="truncate text-[10px] text-muted-foreground">{directory}</span>
+      ) : null}
+      {rootLabel !== null ? (
+        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{rootLabel}</span>
       ) : null}
     </span>
   );

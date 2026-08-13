@@ -118,6 +118,7 @@ import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
 import {
+  fileSurfaceId,
   selectActiveRightPanel,
   selectActiveRightPanelSurface,
   selectThreadRightPanelState,
@@ -232,6 +233,7 @@ import {
   useThreadRefs,
   useThreadShell,
 } from "../state/entities";
+import { useThreadRoots } from "../state/threadRoots";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
@@ -636,6 +638,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
   const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, "terminal close");
   const serverThread = useThread(threadRef);
+  const threadRoots = useThreadRoots(threadRef);
   const draftThread = useComposerDraftStore((store) => store.getDraftThreadByRef(threadRef));
   const projectRef = serverThread
     ? scopeProjectRef(serverThread.environmentId, serverThread.projectId)
@@ -835,34 +838,42 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
     threadRef,
   ]);
 
-  const createNewTerminal = useCallback(() => {
-    if (!cwd) {
-      return;
-    }
-    const terminalId = nextTerminalId(serverOrderedTerminalIds);
-    storeNewTerminal(threadRef, terminalId);
-    bumpFocusRequestId();
-    void openTerminal({
-      environmentId: threadRef.environmentId,
-      input: {
-        threadId,
-        terminalId,
-        cwd,
-        ...(effectiveWorktreePath != null ? { worktreePath: effectiveWorktreePath } : {}),
-        env: runtimeEnv,
-      },
-    });
-  }, [
-    bumpFocusRequestId,
-    cwd,
-    effectiveWorktreePath,
-    runtimeEnv,
-    serverOrderedTerminalIds,
-    storeNewTerminal,
-    threadId,
-    threadRef,
-    openTerminal,
-  ]);
+  const createNewTerminal = useCallback(
+    (rootPath?: string) => {
+      const launchCwd = rootPath ?? cwd;
+      if (!launchCwd) {
+        return;
+      }
+      const terminalId = nextTerminalId(serverOrderedTerminalIds);
+      storeNewTerminal(threadRef, terminalId);
+      bumpFocusRequestId();
+      // Attached-root launches skip the primary repo's worktree path: it
+      // describes the primary checkout, not the attached repository.
+      void openTerminal({
+        environmentId: threadRef.environmentId,
+        input: {
+          threadId,
+          terminalId,
+          cwd: launchCwd,
+          ...(rootPath === undefined && effectiveWorktreePath != null
+            ? { worktreePath: effectiveWorktreePath }
+            : {}),
+          env: runtimeEnv,
+        },
+      });
+    },
+    [
+      bumpFocusRequestId,
+      cwd,
+      effectiveWorktreePath,
+      runtimeEnv,
+      serverOrderedTerminalIds,
+      storeNewTerminal,
+      threadId,
+      threadRef,
+      openTerminal,
+    ],
+  );
 
   const activateTerminal = useCallback(
     (terminalId: string) => {
@@ -940,6 +951,7 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
         onSplitTerminal={splitTerminal}
         onSplitTerminalVertical={splitTerminalVertical}
         onNewTerminal={createNewTerminal}
+        launchRoots={threadRoots.all}
         splitShortcutLabel={visible ? splitShortcutLabel : undefined}
         splitVerticalShortcutLabel={visible ? splitVerticalShortcutLabel : undefined}
         newShortcutLabel={visible ? newShortcutLabel : undefined}
@@ -965,7 +977,7 @@ interface PersistentThreadTerminalPanelProps {
   onAddTerminalContext: (selection: TerminalContextSelection) => void;
   onSplitTerminal: () => void;
   onSplitTerminalVertical: () => void;
-  onNewTerminal: () => void;
+  onNewTerminal: (rootPath?: string) => void;
   onActiveTerminalChange: (terminalId: string) => void;
   onCloseTerminal: (terminalId: string) => void;
   splitShortcutLabel?: string | undefined;
@@ -992,6 +1004,7 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
   closeShortcutLabel,
 }: PersistentThreadTerminalPanelProps) {
   const serverThread = useThread(threadRef);
+  const threadRoots = useThreadRoots(threadRef);
   const draftThread = useComposerDraftStore((store) => store.getDraftThreadByRef(threadRef));
   const projectRef = serverThread
     ? scopeProjectRef(serverThread.environmentId, serverThread.projectId)
@@ -1110,6 +1123,7 @@ const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPane
       onSplitTerminal={onSplitTerminal}
       onSplitTerminalVertical={onSplitTerminalVertical}
       onNewTerminal={onNewTerminal}
+      launchRoots={threadRoots.all}
       splitShortcutLabel={splitShortcutLabel}
       splitVerticalShortcutLabel={splitVerticalShortcutLabel}
       newShortcutLabel={newShortcutLabel}
@@ -1615,11 +1629,11 @@ function ChatViewContent(props: ChatViewProps) {
     ? (pendingFileSurfaceIdsByProject.get(activeProjectKey) ?? EMPTY_PENDING_FILE_SURFACE_IDS)
     : EMPTY_PENDING_FILE_SURFACE_IDS;
   const handleFilePendingChange = useCallback(
-    (relativePath: string, pending: boolean) => {
+    (relativePath: string, pending: boolean, options?: { readonly rootPath?: string | null }) => {
       if (!activeProjectKey) return;
       setPendingFileSurfaceIdsByProject((currentByProject) => {
         const current = currentByProject.get(activeProjectKey) ?? EMPTY_PENDING_FILE_SURFACE_IDS;
-        const surfaceId = `file:${relativePath}`;
+        const surfaceId = fileSurfaceId(options?.rootPath ?? null, relativePath);
         if (current.has(surfaceId) === pending) return currentByProject;
         const next = new Set(current);
         if (pending) next.add(surfaceId);
@@ -1636,7 +1650,8 @@ function ChatViewContent(props: ChatViewProps) {
   // through a Save / Discard / Cancel prompt instead of dropping the edits.
   const autoSaveEnabled = useClientSettings((settings) => settings.autoSaveEnabled);
   const [unsavedCloseRequest, setUnsavedCloseRequest] = useState<{
-    dirtyFilePaths: string[];
+    /** cwd is resolved at the dialog render site (primary root for null). */
+    dirtyFiles: Array<{ relativePath: string; rootPath: string | null }>;
     proceed: () => void;
   } | null>(null);
   const guardUnsavedFileSurfaces = useCallback(
@@ -1645,16 +1660,16 @@ function ChatViewContent(props: ChatViewProps) {
         proceed();
         return;
       }
-      const dirtyFilePaths = surfaces.flatMap((surface) =>
+      const dirtyFiles = surfaces.flatMap((surface) =>
         surface.kind === "file" && pendingFileSurfaceIds.has(surface.id)
-          ? [surface.relativePath]
+          ? [{ relativePath: surface.relativePath, rootPath: surface.rootPath }]
           : [],
       );
-      if (dirtyFilePaths.length === 0) {
+      if (dirtyFiles.length === 0) {
         proceed();
         return;
       }
-      setUnsavedCloseRequest({ dirtyFilePaths, proceed });
+      setUnsavedCloseRequest({ dirtyFiles, proceed });
     },
     [autoSaveEnabled, pendingFileSurfaceIds],
   );
@@ -2385,6 +2400,10 @@ function ChatViewContent(props: ChatViewProps) {
     return byUserMessageId;
   }, [inferredCheckpointTurnCountByTurnId, timelineEntries, turnDiffSummaryByAssistantMessageId]);
 
+  // Effective workspace roots for this thread (primary + attached). The
+  // primary equals gitCwd today; surfaces that later fan out across roots
+  // read from this seam instead of recomputing worktree/workspace fallbacks.
+  const threadRoots = useThreadRoots(routeThreadRef, draftId ?? undefined);
   const gitCwd = activeProject
     ? projectScriptCwd({
         project: { cwd: activeProject.workspaceRoot },
@@ -2586,7 +2605,7 @@ function ChatViewContent(props: ChatViewProps) {
       if (!activeThreadId || !activeProject) {
         return;
       }
-      const cwdForOpen = gitCwd ?? activeProject.workspaceRoot;
+      const cwdForOpen = threadRoots.primary?.path ?? gitCwd ?? activeProject.workspaceRoot;
       if (!cwdForOpen) {
         return;
       }
@@ -2616,6 +2635,7 @@ function ChatViewContent(props: ChatViewProps) {
     activeThreadWorktreePath,
     environmentId,
     gitCwd,
+    threadRoots,
     openTerminal,
     panelTerminalIds,
     setTerminalOpen,
@@ -2628,7 +2648,7 @@ function ChatViewContent(props: ChatViewProps) {
       if (!activeThreadRef || hasReachedSplitLimit || !activeThreadId || !activeProject) {
         return;
       }
-      const cwdForOpen = gitCwd ?? activeProject.workspaceRoot;
+      const cwdForOpen = threadRoots.primary?.path ?? gitCwd ?? activeProject.workspaceRoot;
       if (!cwdForOpen) {
         return;
       }
@@ -2662,6 +2682,7 @@ function ChatViewContent(props: ChatViewProps) {
       activeThreadWorktreePath,
       environmentId,
       gitCwd,
+      threadRoots,
       hasReachedSplitLimit,
       storeSplitTerminal,
       storeSplitTerminalVertical,
@@ -2671,7 +2692,7 @@ function ChatViewContent(props: ChatViewProps) {
     if (!activeThreadRef || !activeThreadId || !activeProject) {
       return;
     }
-    const cwdForOpen = gitCwd ?? activeProject.workspaceRoot;
+    const cwdForOpen = threadRoots.primary?.path ?? gitCwd ?? activeProject.workspaceRoot;
     if (!cwdForOpen) {
       return;
     }
@@ -2700,6 +2721,7 @@ function ChatViewContent(props: ChatViewProps) {
     activeThreadWorktreePath,
     environmentId,
     gitCwd,
+    threadRoots,
     storeNewTerminal,
   ]);
   const closeTerminal = useCallback(
@@ -2753,7 +2775,8 @@ function ChatViewContent(props: ChatViewProps) {
           return { ...current, [activeProject.id]: script.id };
         });
       }
-      const targetCwd = options?.cwd ?? gitCwd ?? activeProject.workspaceRoot;
+      const targetCwd =
+        options?.cwd ?? threadRoots.primary?.path ?? gitCwd ?? activeProject.workspaceRoot;
       const baseTerminalId =
         terminalUiState.activeTerminalId || activeKnownTerminalIds[0] || DEFAULT_THREAD_TERMINAL_ID;
       const isBaseTerminalBusy = runningTerminalIds.includes(baseTerminalId);
@@ -2840,6 +2863,7 @@ function ChatViewContent(props: ChatViewProps) {
       activeThreadId,
       activeThreadRef,
       gitCwd,
+      threadRoots,
       setTerminalOpen,
       setThreadError,
       storeNewTerminal,
@@ -3097,9 +3121,11 @@ function ChatViewContent(props: ChatViewProps) {
     });
   }, [activeProject, activeWorkspaceRoot, knowledgeGraphEnabled, runGraphBuild]);
   const openFileSurface = useCallback(
-    (relativePath: string, line?: number) => {
+    (relativePath: string, line?: number, options?: { readonly rootPath?: string | null }) => {
       if (!activeThreadRef || !activeProject) return;
-      useRightPanelStore.getState().openFile(activeThreadRef, relativePath, line);
+      useRightPanelStore
+        .getState()
+        .openFile(activeThreadRef, relativePath, line, undefined, options);
     },
     [activeProject, activeThreadRef],
   );
@@ -3122,35 +3148,41 @@ function ChatViewContent(props: ChatViewProps) {
       useRightPanelStore.getState().close(activeThreadRef);
     }
   }, [activeThreadRef]);
-  const addTerminalSurface = useCallback(() => {
-    if (!activeThreadRef || !activeThreadId || !activeProject) return;
-    const cwd = gitCwd ?? activeProject.workspaceRoot;
-    const terminalId = nextTerminalId([...activeKnownTerminalIds, ...panelTerminalIds]);
-    useRightPanelStore.getState().openTerminal(activeThreadRef, terminalId);
-    setTerminalFocusRequestId((value) => value + 1);
-    void openTerminal({
-      environmentId: activeThreadRef.environmentId,
-      input: {
-        threadId: activeThreadId,
-        terminalId,
-        cwd,
-        ...(activeThreadWorktreePath != null ? { worktreePath: activeThreadWorktreePath } : {}),
-        env: projectScriptRuntimeEnv({
-          project: { cwd: activeProject.workspaceRoot },
-          worktreePath: activeThreadWorktreePath,
-        }),
-      },
-    });
-  }, [
-    activeKnownTerminalIds,
-    activeProject,
-    activeThreadId,
-    activeThreadRef,
-    activeThreadWorktreePath,
-    gitCwd,
-    openTerminal,
-    panelTerminalIds,
-  ]);
+  const addTerminalSurface = useCallback(
+    (rootPath?: string) => {
+      if (!activeThreadRef || !activeThreadId || !activeProject) return;
+      const cwd = rootPath ?? threadRoots.primary?.path ?? gitCwd ?? activeProject.workspaceRoot;
+      const terminalId = nextTerminalId([...activeKnownTerminalIds, ...panelTerminalIds]);
+      useRightPanelStore.getState().openTerminal(activeThreadRef, terminalId);
+      setTerminalFocusRequestId((value) => value + 1);
+      void openTerminal({
+        environmentId: activeThreadRef.environmentId,
+        input: {
+          threadId: activeThreadId,
+          terminalId,
+          cwd,
+          ...(rootPath === undefined && activeThreadWorktreePath != null
+            ? { worktreePath: activeThreadWorktreePath }
+            : {}),
+          env: projectScriptRuntimeEnv({
+            project: { cwd: activeProject.workspaceRoot },
+            worktreePath: activeThreadWorktreePath,
+          }),
+        },
+      });
+    },
+    [
+      activeKnownTerminalIds,
+      activeProject,
+      activeThreadId,
+      activeThreadRef,
+      activeThreadWorktreePath,
+      gitCwd,
+      threadRoots,
+      openTerminal,
+      panelTerminalIds,
+    ],
+  );
   const splitPanelTerminal = useCallback(
     (direction: "horizontal" | "vertical" = "horizontal") => {
       if (
@@ -3163,7 +3195,7 @@ function ChatViewContent(props: ChatViewProps) {
         return;
       }
       const terminalId = nextTerminalId([...activeKnownTerminalIds, ...panelTerminalIds]);
-      const cwd = gitCwd ?? activeProject.workspaceRoot;
+      const cwd = threadRoots.primary?.path ?? gitCwd ?? activeProject.workspaceRoot;
       useRightPanelStore
         .getState()
         .splitTerminal(activeThreadRef, activeRightPanelSurface.id, terminalId, direction);
@@ -3190,6 +3222,7 @@ function ChatViewContent(props: ChatViewProps) {
       activeThreadRef,
       activeThreadWorktreePath,
       gitCwd,
+      threadRoots,
       openTerminal,
       panelTerminalIds,
     ],
@@ -5860,6 +5893,8 @@ function ChatViewContent(props: ChatViewProps) {
           relativePath={
             activeRightPanelSurface.kind === "file" ? activeRightPanelSurface.relativePath : null
           }
+          roots={threadRoots.all}
+          activeRootPath={activeFileSurface?.rootPath ?? null}
           revealLine={activeFileSurface?.revealLine ?? null}
           revealEndLine={activeFileSurface?.revealEndLine ?? null}
           revealRequestId={activeFileSurface?.revealRequestId ?? 0}
@@ -6095,6 +6130,7 @@ function ChatViewContent(props: ChatViewProps) {
                             keybindings={keybindings}
                             terminalOpen={Boolean(terminalUiState.terminalOpen)}
                             gitCwd={gitCwd}
+                            threadRoots={threadRoots.all}
                             promptRef={promptRef}
                             composerImagesRef={composerImagesRef}
                             composerTerminalContextsRef={composerTerminalContextsRef}
@@ -6273,7 +6309,7 @@ function ChatViewContent(props: ChatViewProps) {
             onCloseAllSurfaces={closeAllRightPanelSurfaces}
             onCopyFilePath={copyRightPanelFilePath}
             onAddBrowser={createBrowserSurface}
-            onAddTerminal={addTerminalSurface}
+            onAddTerminal={() => addTerminalSurface()}
             onAddDiff={addDiffSurface}
             onAddFiles={addFilesSurface}
             onAddSearch={addSearchSurface}
@@ -6305,7 +6341,7 @@ function ChatViewContent(props: ChatViewProps) {
             onCloseAllSurfaces={closeAllRightPanelSurfaces}
             onCopyFilePath={copyRightPanelFilePath}
             onAddBrowser={createBrowserSurface}
-            onAddTerminal={addTerminalSurface}
+            onAddTerminal={() => addTerminalSurface()}
             onAddDiff={addDiffSurface}
             onAddFiles={addFilesSurface}
             onAddSearch={addSearchSurface}
@@ -6324,9 +6360,13 @@ function ChatViewContent(props: ChatViewProps) {
       {unsavedCloseRequest && activeProject && activeWorkspaceRoot ? (
         <UnsavedChangesDialog
           environmentId={activeProject.environmentId}
-          cwd={activeWorkspaceRoot}
-          dirtyFilePaths={unsavedCloseRequest.dirtyFilePaths}
-          onResolvePending={(relativePath) => handleFilePendingChange(relativePath, false)}
+          dirtyFiles={unsavedCloseRequest.dirtyFiles.map((file) => ({
+            ...file,
+            cwd: file.rootPath ?? activeWorkspaceRoot,
+          }))}
+          onResolvePending={(relativePath, rootPath) =>
+            handleFilePendingChange(relativePath, false, { rootPath })
+          }
           onProceed={() => {
             const { proceed } = unsavedCloseRequest;
             setUnsavedCloseRequest(null);
