@@ -28,7 +28,10 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
-import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
+import {
+  resolveThreadWorkspaceCwd,
+  resolveThreadWorkspaceRoots,
+} from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
@@ -126,6 +129,20 @@ function mapProviderSessionStatusToOrchestrationStatus(
 
 const turnStartKeyForEvent = (event: ProviderIntentEvent): string =>
   event.commandId !== null ? `command:${event.commandId}` : `event:${event.eventId}`;
+
+function areSameStringSets(left: ReadonlyArray<string>, right: ReadonlyArray<string>): boolean {
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  if (leftSet.size !== rightSet.size) {
+    return false;
+  }
+  for (const value of leftSet) {
+    if (!rightSet.has(value)) {
+      return false;
+    }
+  }
+  return true;
+}
 
 const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
@@ -532,10 +549,12 @@ const make = Effect.gen(function* () {
       }
     }
     const project = yield* resolveProject(thread.projectId);
-    const effectiveCwd = resolveThreadWorkspaceCwd({
+    const workspaceRoots = resolveThreadWorkspaceRoots({
       thread,
       projects: project ? [project] : [],
     });
+    const effectiveCwd = workspaceRoots.primary;
+    const additionalDirectories = workspaceRoots.additional;
 
     const startProviderSession = (input?: {
       readonly resumeCursor?: unknown;
@@ -546,6 +565,7 @@ const make = Effect.gen(function* () {
         ...(preferredProvider ? { provider: preferredProvider } : {}),
         providerInstanceId: desiredInstanceId,
         ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
+        ...(additionalDirectories.length > 0 ? { additionalDirectories } : {}),
         modelSelection: desiredModelSelection,
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
         runtimeMode: desiredRuntimeMode,
@@ -585,6 +605,13 @@ const make = Effect.gen(function* () {
     if (existingSessionThreadId) {
       const runtimeModeChanged = thread.runtimeMode !== thread.session?.runtimeMode;
       const cwdChanged = effectiveCwd !== activeSession?.cwd;
+      // Sessions echo the reactor-computed additionalDirectories verbatim
+      // (see ProviderService.startSession), so a set comparison here never
+      // oscillates against adapter-side path normalization.
+      const rootsChanged = !areSameStringSets(
+        additionalDirectories,
+        activeSession?.additionalDirectories ?? [],
+      );
       const sessionModelSwitch = (yield* providerService.getCapabilities(desiredInstanceId))
         .sessionModelSwitch;
       const modelChanged =
@@ -603,6 +630,7 @@ const make = Effect.gen(function* () {
       if (
         !runtimeModeChanged &&
         !cwdChanged &&
+        !rootsChanged &&
         !instanceChanged &&
         !shouldRestartForModelChange &&
         !shouldRestartForModelSelectionChange
@@ -626,6 +654,9 @@ const make = Effect.gen(function* () {
         previousCwd: activeSession?.cwd,
         desiredCwd: effectiveCwd,
         cwdChanged,
+        previousAdditionalDirectories: activeSession?.additionalDirectories,
+        desiredAdditionalDirectories: additionalDirectories,
+        rootsChanged,
         modelChanged,
         instanceChanged,
         shouldRestartForModelChange,
@@ -731,6 +762,40 @@ const make = Effect.gen(function* () {
     return [input.messageText, THREAD_REFERENCE_PREAMBLE, ...sections].join("\n\n");
   });
 
+  /**
+   * Providers without native multi-root support still learn about attached
+   * workspace roots through a plain-text section appended to the outgoing
+   * turn input. Best-effort: resolution failures degrade to the original
+   * message rather than failing the turn.
+   */
+  const appendAttachedWorkspacesSection = Effect.fnUntraced(function* (input: {
+    readonly thread: OrchestrationThread;
+    readonly messageText: string;
+  }) {
+    const project = yield* resolveProject(input.thread.projectId).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning(
+          "provider command reactor failed to resolve project for attached workspaces note",
+          { threadId: input.thread.id, cause: String(cause) },
+        ).pipe(Effect.as(undefined)),
+      ),
+    );
+    const roots = resolveThreadWorkspaceRoots({
+      thread: input.thread,
+      projects: project ? [project] : [],
+    });
+    if (roots.additional.length === 0) {
+      return input.messageText;
+    }
+    return [
+      input.messageText,
+      [
+        "Additional repositories attached to this conversation (read and edit files there using absolute paths):",
+        ...roots.additional.map((path) => `- ${path}`),
+      ].join("\n"),
+    ].join("\n\n");
+  });
+
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
     readonly messageText: string;
@@ -766,17 +831,25 @@ const make = Effect.gen(function* () {
       .pipe(
         Effect.map((sessions) => sessions.find((session) => session.threadId === input.threadId)),
       );
-    const sessionModelSwitch =
+    const sessionCapabilities =
       activeSession === undefined
-        ? "in-session"
+        ? undefined
         : activeSession.providerInstanceId === undefined
           ? yield* new ProviderAdapterRequestError({
               provider: providerErrorLabel(activeSession.provider),
               method: "thread.turn.start",
               detail: `Active provider session '${activeSession.threadId}' is missing a provider instance id.`,
             })
-          : (yield* providerService.getCapabilities(activeSession.providerInstanceId))
-              .sessionModelSwitch;
+          : yield* providerService.getCapabilities(activeSession.providerInstanceId);
+    const sessionModelSwitch = sessionCapabilities?.sessionModelSwitch ?? "in-session";
+    const inputWithWorkspaceSections =
+      inputWithThreadReferences !== undefined &&
+      sessionCapabilities?.additionalDirectories === "unsupported"
+        ? yield* appendAttachedWorkspacesSection({
+            thread,
+            messageText: inputWithThreadReferences,
+          })
+        : inputWithThreadReferences;
     const requestedModelSelection =
       input.modelSelection ?? threadModelSelections.get(input.threadId) ?? thread.modelSelection;
     const modelForTurn =
@@ -791,7 +864,7 @@ const make = Effect.gen(function* () {
 
     return {
       threadId: input.threadId,
-      ...(inputWithThreadReferences ? { input: inputWithThreadReferences } : {}),
+      ...(inputWithWorkspaceSections ? { input: inputWithWorkspaceSections } : {}),
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       ...(modelForTurn !== undefined ? { modelSelection: modelForTurn } : {}),
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),

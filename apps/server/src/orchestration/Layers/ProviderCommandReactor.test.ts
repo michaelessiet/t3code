@@ -145,6 +145,7 @@ describe("ProviderCommandReactor", () => {
     readonly baseDir?: string;
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
+    readonly additionalDirectories?: "supported" | "unsupported";
     readonly requiresNewThreadForModelChange?: boolean;
     readonly startSessionEffect?: (
       session: ProviderSession,
@@ -315,6 +316,7 @@ describe("ProviderCommandReactor", () => {
       getCapabilities: (_provider) =>
         Effect.succeed({
           sessionModelSwitch: input?.sessionModelSwitch ?? "in-session",
+          additionalDirectories: input?.additionalDirectories ?? "supported",
         }),
       getInstanceInfo: (instanceId) => {
         const raw = String(instanceId);

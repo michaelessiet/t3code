@@ -1420,6 +1420,25 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const now = yield* Clock.currentTimeMillis;
       return knowledgeGraphNote({ ...available, now });
     }).pipe(Effect.orElseSucceed(() => null));
+
+  /**
+   * A short note telling the model which extra workspace roots ride along
+   * with this conversation, or null when there are none. The directories are
+   * already granted via `additionalDirectories`; the note exists so the model
+   * knows they are intentional, trusted workspaces rather than incidental
+   * paths.
+   */
+  const attachedWorkspacesNoteFor = (
+    additionalDirectories: ReadonlyArray<string> | undefined,
+  ): string | null => {
+    if (additionalDirectories === undefined || additionalDirectories.length === 0) {
+      return null;
+    }
+    return [
+      "Additional repositories attached to this conversation (readable and editable workspace roots):",
+      ...additionalDirectories.map((directory) => `- ${directory}`),
+    ].join("\n");
+  };
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, options?.environment).pipe(
     Effect.provideService(Path.Path, path),
   );
@@ -3619,6 +3638,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       // Null unless a graph has actually been built for this checkout, so the
       // overwhelmingly common case appends nothing and costs nothing.
       const graphNote = yield* knowledgeGraphNoteFor(input.cwd);
+      const additionalDirectories = [
+        ...new Set([...(input.cwd ? [input.cwd] : []), ...(input.additionalDirectories ?? [])]),
+      ];
+      const workspacesNote = attachedWorkspacesNoteFor(input.additionalDirectories);
+      const systemPromptAppend = [graphNote, workspacesNote]
+        .filter((note): note is string => note !== null)
+        .join("\n\n");
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
@@ -3626,7 +3652,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         systemPrompt: {
           type: "preset",
           preset: "claude_code",
-          ...(graphNote === null ? {} : { append: graphNote }),
+          ...(systemPromptAppend.length === 0 ? {} : { append: systemPromptAppend }),
         },
         settingSources: [...CLAUDE_SETTING_SOURCES],
         // `ultracode` is a Claude Code setting, not an API effort level. It is
@@ -3646,7 +3672,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         includePartialMessages: true,
         canUseTool,
         env: claudeEnvironment,
-        ...(input.cwd ? { additionalDirectories: [input.cwd] } : {}),
+        ...(additionalDirectories.length > 0 ? { additionalDirectories } : {}),
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
         ...(mcpSession
           ? {
@@ -3681,7 +3707,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.resume": existingResumeSessionId ?? "",
         "claude.query.session_id": newSessionId ?? "",
         "claude.query.include_partial_messages": true,
-        "claude.query.additional_directories": input.cwd ? [input.cwd] : [],
+        "claude.query.additional_directories": additionalDirectories,
         "claude.query.setting_sources": [...CLAUDE_SETTING_SOURCES],
         "claude.query.settings_json": encodeJsonStringForDiagnostics(settings) ?? "",
         "claude.query.extra_args_json": encodeJsonStringForDiagnostics(extraArgs) ?? "",
@@ -4033,6 +4059,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     provider: PROVIDER,
     capabilities: {
       sessionModelSwitch: "in-session",
+      additionalDirectories: "supported",
     },
     startSession,
     sendTurn,
