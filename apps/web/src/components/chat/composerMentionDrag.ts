@@ -7,12 +7,20 @@ import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
  */
 export const COMPOSER_MENTION_DRAG_TYPE = "application/x-t3code-composer-mention";
 
-export function composerMentionFromTreePath(treePath: string): string | null {
+export function composerMentionFromTreePath(
+  treePath: string,
+  options?: { readonly rootPath?: string | null },
+): string | null {
   const relativePath = treePath.replace(/\/+$/, "");
   if (relativePath.length === 0) {
     return null;
   }
-  return serializeComposerFileLink(relativePath);
+  // Entries from an attached (non-primary) workspace root serialize as
+  // absolute paths; primary-root entries keep the legacy relative form.
+  const rootPath = options?.rootPath ?? null;
+  return serializeComposerFileLink(
+    rootPath === null ? relativePath : `${rootPath.replace(/\/+$/, "")}/${relativePath}`,
+  );
 }
 
 export function dataTransferHasComposerMention(types: ReadonlyArray<string>): boolean {

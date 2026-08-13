@@ -26,6 +26,9 @@ export type ComposerCommandItem =
       type: "path";
       path: string;
       pathKind: ProjectEntry["kind"];
+      /** Absolute path of the workspace root the entry belongs to; null when
+          it is the thread's primary root (relative mention serialization). */
+      rootPath: string | null;
       label: string;
       description: string;
     }

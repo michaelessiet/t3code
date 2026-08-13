@@ -30,7 +30,7 @@ describe("openWorkspaceFilePrimaryAction", () => {
       selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, THREAD_REF),
     ).toMatchObject({
       isOpen: true,
-      activeSurfaceId: "file:src/main.ts",
+      activeSurfaceId: "file::src/main.ts",
     });
     expect(openInEditor).not.toHaveBeenCalled();
   });
@@ -48,7 +48,7 @@ describe("openWorkspaceFilePrimaryAction", () => {
       useRightPanelStore.getState().byThreadKey,
       THREAD_REF,
     );
-    expect(panelState.activeSurfaceId).toBe("file:src/main.ts");
+    expect(panelState.activeSurfaceId).toBe("file::src/main.ts");
     expect(panelState.surfaces[0]).toMatchObject({ revealLine: 42 });
   });
 
@@ -64,7 +64,7 @@ describe("openWorkspaceFilePrimaryAction", () => {
     expect(
       selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, THREAD_REF)
         .activeSurfaceId,
-    ).toBe("file:src/main.ts");
+    ).toBe("file::src/main.ts");
   });
 
   it("opens externally when the user opted into an external editor", () => {

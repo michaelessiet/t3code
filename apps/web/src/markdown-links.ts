@@ -23,11 +23,22 @@ const POSIX_FILE_ROOT_PREFIXES = [
   "/root/",
 ] as const;
 
+/** Structural subset of a thread workspace root (see `state/threadRoots.ts`);
+    kept structural so this leaf module stays free of store imports. */
+export interface WorkspaceRootLike {
+  readonly path: string;
+  readonly label: string;
+  readonly isPrimary: boolean;
+}
+
 export interface MarkdownFileLinkMeta {
   filePath: string;
   targetPath: string;
   displayPath: string;
   workspaceRelativePath: string | null;
+  /** Absolute path of the (non-primary) workspace root containing the file;
+      null when the file resolves against the primary root or no root at all. */
+  rootPath: string | null;
   basename: string;
   line?: number;
   column?: number;
@@ -196,6 +207,7 @@ export function workspaceRelativePath(
 export function resolveMarkdownFileLinkMeta(
   href: string | undefined,
   cwd?: string,
+  roots?: ReadonlyArray<WorkspaceRootLike>,
 ): MarkdownFileLinkMeta | null {
   const targetPath = resolveMarkdownFileLinkTarget(href, cwd);
   if (!targetPath) return null;
@@ -213,11 +225,32 @@ export function resolveMarkdownFileLinkMeta(
       ? parsedEndLine
       : undefined;
 
+  // Absolute paths inside an attached (non-primary) root resolve to that
+  // root: the display path is label-qualified and the relative path opens in
+  // the built-in editor scoped via `rootPath`. Primary matches keep the
+  // legacy single-root shape below.
+  const attachedRoot =
+    roots?.find((root) => !root.isPrimary && workspaceRelativePath(path, root.path) !== null) ??
+    null;
+  const attachedRelativePath =
+    attachedRoot !== null ? workspaceRelativePath(path, attachedRoot.path) : null;
+  const positionSuffix =
+    lineNumber === undefined
+      ? ""
+      : endLineNumber !== undefined
+        ? `:${lineNumber}-${endLineNumber}`
+        : `:${lineNumber}${columnNumber !== undefined ? `:${columnNumber}` : ""}`;
+
   return {
     filePath: path,
     targetPath,
-    displayPath: formatWorkspaceRelativePath(targetPath, cwd),
-    workspaceRelativePath: workspaceRelativePath(path, cwd),
+    displayPath:
+      attachedRoot !== null && attachedRelativePath !== null
+        ? `${attachedRoot.label}/${attachedRelativePath}${positionSuffix}`
+        : formatWorkspaceRelativePath(targetPath, cwd),
+    workspaceRelativePath:
+      attachedRoot !== null ? attachedRelativePath : workspaceRelativePath(path, cwd),
+    rootPath: attachedRoot !== null && attachedRelativePath !== null ? attachedRoot.path : null,
     basename: basenameOfPath(path),
     ...(lineNumber !== undefined ? { line: lineNumber } : {}),
     ...(columnNumber !== undefined ? { column: columnNumber } : {}),
