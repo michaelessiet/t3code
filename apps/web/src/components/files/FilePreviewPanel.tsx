@@ -45,7 +45,9 @@ import { projectEnvironment } from "~/state/projects";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
-import FileBrowserPanel from "./FileBrowserPanel";
+import type { ThreadRoot } from "~/state/threadRoots";
+
+import MultiRootFileBrowser from "./MultiRootFileBrowser";
 import { FileConflictCompareDialog } from "./FileConflictCompareDialog";
 import { consumeEditorFocusRequest } from "./editorFocusRequest";
 import { CodeMirrorFileEditor } from "./codemirror/CodeMirrorFileEditor";
@@ -98,9 +100,15 @@ import {
 
 interface FilePreviewPanelProps {
   environmentId: EnvironmentId;
+  /** The thread's primary workspace root. */
   cwd: string;
   projectName: string;
   relativePath: string | null;
+  /** Effective thread roots, primary first; falls back to `[cwd]` semantics
+      when empty (version-skew safe). */
+  roots: ReadonlyArray<ThreadRoot>;
+  /** Root of the open file surface; null means the primary root. */
+  activeRootPath: string | null;
   threadRef: ScopedThreadRef;
   composerDraftTarget: ScopedThreadRef | DraftId;
   keybindings: ResolvedKeybindingsConfig;
@@ -108,8 +116,16 @@ interface FilePreviewPanelProps {
   revealLine: number | null;
   revealEndLine: number | null;
   revealRequestId: number;
-  onOpenFile: (relativePath: string, line?: number) => void;
-  onPendingChange: (relativePath: string, pending: boolean) => void;
+  onOpenFile: (
+    relativePath: string,
+    line?: number,
+    options?: { readonly rootPath?: string | null },
+  ) => void;
+  onPendingChange: (
+    relativePath: string,
+    pending: boolean,
+    options?: { readonly rootPath?: string | null },
+  ) => void;
 }
 
 const FILE_EXPLORER_STORAGE_KEY = "t3code.fileExplorerOpen";
@@ -1113,6 +1129,8 @@ export default function FilePreviewPanel({
   cwd,
   projectName,
   relativePath,
+  roots,
+  activeRootPath,
   threadRef,
   composerDraftTarget,
   keybindings,
@@ -1134,10 +1152,17 @@ export default function FilePreviewPanel({
   const openPreview = useAtomCommand(previewEnvironment.open, {
     reportFailure: false,
   });
+  // The open file lives in its surface's root; the explorer below still
+  // shows every root. Everything file-scoped keys off this cwd.
+  const activeFileCwd = activeRootPath ?? cwd;
+  const activeRoot =
+    roots.find((root) =>
+      activeRootPath === null ? root.isPrimary : root.path === activeRootPath,
+    ) ?? null;
   const isImage = relativePath !== null && isWorkspaceImagePreviewPath(relativePath);
-  const file = useProjectFileQuery(environmentId, cwd, relativePath, !isImage);
-  const diskRevision = useProjectFileDiskRevision(environmentId, cwd, relativePath);
-  useWorkspaceFileWatch(environmentId, cwd, relativePath, file.refresh);
+  const file = useProjectFileQuery(environmentId, activeFileCwd, relativePath, !isImage);
+  const diskRevision = useProjectFileDiskRevision(environmentId, activeFileCwd, relativePath);
+  useWorkspaceFileWatch(environmentId, activeFileCwd, relativePath, file.refresh);
   const [explorerOpen, setExplorerOpen] = useState(initialExplorerOpen);
   const [markdownView, setMarkdownView] = useState<{
     path: string | null;
@@ -1151,12 +1176,25 @@ export default function FilePreviewPanel({
     (revealLine === null || markdownView.revealRequestId === revealRequestId);
   const canOpenInBrowser =
     relativePath !== null && isPreviewSupportedInRuntime() && isBrowserPreviewFile(relativePath);
-  const absolutePath = relativePath ? resolvePathLinkTarget(relativePath, cwd) : null;
+  const absolutePath = relativePath ? resolvePathLinkTarget(relativePath, activeFileCwd) : null;
+  const breadcrumbRootName =
+    activeRoot !== null && !activeRoot.isPrimary ? activeRoot.label : projectName;
   const breadcrumbs = useMemo(
-    () => (relativePath ? fileBreadcrumbs(projectName, relativePath) : []),
-    [projectName, relativePath],
+    () => (relativePath ? fileBreadcrumbs(breadcrumbRootName, relativePath) : []),
+    [breadcrumbRootName, relativePath],
   );
   const onFilePostRender = useFileLineReveal(relativePath, revealLine, revealRequestId);
+  // Inner editors only know relative paths; stamp the open file's root on
+  // pending-state changes so dirty-tab tracking keys the right surface.
+  const handlePendingChange = useCallback(
+    (targetRelativePath: string, pending: boolean) =>
+      onPendingChange(
+        targetRelativePath,
+        pending,
+        activeRootPath !== null ? { rootPath: activeRootPath } : undefined,
+      ),
+    [activeRootPath, onPendingChange],
+  );
 
   useEffect(() => {
     const currentCrumb = breadcrumbRef.current?.querySelector<HTMLElement>(
@@ -1229,7 +1267,7 @@ export default function FilePreviewPanel({
                         ? "font-medium text-foreground"
                         : "text-muted-foreground",
                     )}
-                    title={crumb.path || projectName}
+                    title={crumb.path || breadcrumbRootName}
                   >
                     {crumb.label}
                   </span>
@@ -1345,17 +1383,17 @@ export default function FilePreviewPanel({
             isMarkdown && renderMarkdown ? (
               <RenderedMarkdownSurface
                 environmentId={environmentId}
-                cwd={cwd}
+                cwd={activeFileCwd}
                 relativePath={relativePath}
                 threadRef={threadRef}
                 contents={file.data.contents}
                 diskRevision={diskRevision}
-                onPendingChange={onPendingChange}
+                onPendingChange={handlePendingChange}
                 onRefreshFile={file.refresh}
               />
             ) : file.data.truncated ? (
               <Virtualizer
-                key={`${relativePath}:${resolvedTheme}:${file.data.byteLength}`}
+                key={`${activeFileCwd}:${relativePath}:${resolvedTheme}:${file.data.byteLength}`}
                 className="file-preview-virtualizer min-h-0 flex-1 overflow-auto"
                 config={{
                   overscrollSize: 600,
@@ -1366,7 +1404,7 @@ export default function FilePreviewPanel({
                   file={{
                     name: relativePath,
                     contents: file.data.contents,
-                    cacheKey: projectFileCacheKey(cwd, relativePath, file.data.contents),
+                    cacheKey: projectFileCacheKey(activeFileCwd, relativePath, file.data.contents),
                   }}
                   options={{
                     disableFileHeader: true,
@@ -1381,9 +1419,9 @@ export default function FilePreviewPanel({
               </Virtualizer>
             ) : (
               <EditableFileSurface
-                key={relativePath}
+                key={`${activeFileCwd}:${relativePath}`}
                 environmentId={environmentId}
-                cwd={cwd}
+                cwd={activeFileCwd}
                 relativePath={relativePath}
                 composerDraftTarget={composerDraftTarget}
                 contents={file.data.contents}
@@ -1394,9 +1432,17 @@ export default function FilePreviewPanel({
                 wordWrap={wordWrap}
                 vimMode={vimMode}
                 keybindings={keybindings}
-                onPendingChange={onPendingChange}
+                onPendingChange={handlePendingChange}
                 onRefreshFile={file.refresh}
-                onOpenFile={onOpenFile}
+                onOpenFile={(targetRelativePath, line) =>
+                  // In-editor jumps (e.g. markdown links) stay in the open
+                  // file's root.
+                  onOpenFile(
+                    targetRelativePath,
+                    line,
+                    activeRootPath !== null ? { rootPath: activeRootPath } : undefined,
+                  )
+                }
               />
             )
           ) : null}
@@ -1410,13 +1456,17 @@ export default function FilePreviewPanel({
                 : "min-w-0 flex-1",
             )}
           >
-            <FileBrowserPanel
-              key={`${environmentId}:${cwd}`}
+            <MultiRootFileBrowser
               environmentId={environmentId}
-              cwd={cwd}
+              roots={
+                roots.length > 0
+                  ? roots
+                  : [{ path: cwd, label: projectName, isPrimary: true, source: "primary" }]
+              }
               projectName={projectName}
               threadRef={threadRef}
               openRelativePath={relativePath}
+              activeRootPath={activeRootPath}
               revealRequestId={revealRequestId}
               onOpenFile={onOpenFile}
             />

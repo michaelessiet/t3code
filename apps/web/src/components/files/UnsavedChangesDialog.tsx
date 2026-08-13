@@ -18,13 +18,20 @@ import { getActiveFileSave } from "./fileSaveBus";
 import { persistUnsavedBuffer } from "./fileSaveState";
 import { clearProjectFileQueryData } from "./projectFilesQueryState";
 
+export interface UnsavedDirtyFile {
+  readonly relativePath: string;
+  /** Workspace root the file lives in (primary or an attached root). */
+  readonly cwd: string;
+  /** Null when the file belongs to the thread's primary root. */
+  readonly rootPath: string | null;
+}
+
 interface UnsavedChangesDialogProps {
   environmentId: EnvironmentId;
-  cwd: string;
   /** Dirty files among the tabs being closed. */
-  dirtyFilePaths: ReadonlyArray<string>;
+  dirtyFiles: ReadonlyArray<UnsavedDirtyFile>;
   /** Clear a file's dirty-tab indicator after it was saved or discarded. */
-  onResolvePending: (relativePath: string) => void;
+  onResolvePending: (relativePath: string, rootPath: string | null) => void;
   /** Run the close that was intercepted. */
   onProceed: () => void;
   onCancel: () => void;
@@ -38,8 +45,7 @@ interface UnsavedChangesDialogProps {
  */
 export function UnsavedChangesDialog({
   environmentId,
-  cwd,
-  dirtyFilePaths,
+  dirtyFiles,
   onResolvePending,
   onProceed,
   onCancel,
@@ -63,7 +69,7 @@ export function UnsavedChangesDialog({
   const handleSave = async () => {
     setBusy(true);
     try {
-      for (const relativePath of dirtyFilePaths) {
+      for (const { relativePath, cwd, rootPath } of dirtyFiles) {
         const mounted = getActiveFileSave();
         if (mounted?.relativePath === relativePath) {
           await mounted.flush();
@@ -78,7 +84,7 @@ export function UnsavedChangesDialog({
           failClose(relativePath, outcome === "stale");
           return;
         }
-        onResolvePending(relativePath);
+        onResolvePending(relativePath, rootPath);
       }
       onProceed();
     } finally {
@@ -87,9 +93,9 @@ export function UnsavedChangesDialog({
   };
 
   const handleDiscard = () => {
-    for (const relativePath of dirtyFilePaths) {
+    for (const { relativePath, cwd, rootPath } of dirtyFiles) {
       clearProjectFileQueryData(environmentId, cwd, relativePath);
-      onResolvePending(relativePath);
+      onResolvePending(relativePath, rootPath);
     }
     onProceed();
   };
@@ -99,20 +105,20 @@ export function UnsavedChangesDialog({
       <AlertDialogPopup>
         <AlertDialogHeader>
           <AlertDialogTitle>
-            {dirtyFilePaths.length === 1 ? "Unsaved changes" : "Unsaved changes in multiple files"}
+            {dirtyFiles.length === 1 ? "Unsaved changes" : "Unsaved changes in multiple files"}
           </AlertDialogTitle>
           <AlertDialogDescription>
-            {dirtyFilePaths.length === 1 ? (
+            {dirtyFiles.length === 1 ? (
               <>
-                <code className="font-medium">{dirtyFilePaths[0]}</code> has unsaved changes that
-                will be lost if you close it without saving.
+                <code className="font-medium">{dirtyFiles[0]?.relativePath}</code> has unsaved
+                changes that will be lost if you close it without saving.
               </>
             ) : (
               <>
                 These files have unsaved changes that will be lost if you close them without saving:
                 <span className="mt-1.5 block space-y-0.5">
-                  {dirtyFilePaths.map((relativePath) => (
-                    <code key={relativePath} className="block font-medium">
+                  {dirtyFiles.map(({ relativePath, rootPath }) => (
+                    <code key={`${rootPath ?? ""}:${relativePath}`} className="block font-medium">
                       {relativePath}
                     </code>
                   ))}

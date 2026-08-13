@@ -17,6 +17,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -231,6 +232,18 @@ function RightPanelEmptyState(props: {
   );
 }
 
+function pathBasename(path: string): string {
+  return path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
+}
+
+/** Root-qualified path for a file surface: absolute for files in attached
+    (non-primary) roots, relative for primary-root files. */
+function fileSurfaceCopyPath(surface: Extract<RightPanelSurface, { kind: "file" }>): string {
+  return surface.rootPath === null
+    ? surface.relativePath
+    : `${surface.rootPath.replace(/[\\/]+$/, "")}/${surface.relativePath}`;
+}
+
 function surfaceTitle(
   surface: RightPanelSurface,
   sessions: Readonly<Record<string, PreviewSessionSnapshot>>,
@@ -244,7 +257,7 @@ function surfaceTitle(
     case "search":
       return "Search";
     case "file":
-      return surface.relativePath.slice(surface.relativePath.lastIndexOf("/") + 1);
+      return pathBasename(surface.relativePath);
     case "terminal":
       return (
         terminalLabelsById.get(surface.activeTerminalId) ??
@@ -364,7 +377,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       const action = await api.contextMenu.show(items, { x: event.clientX, y: event.clientY });
       switch (action) {
         case "copy-path":
-          if (surface.kind === "file") props.onCopyFilePath(surface.relativePath);
+          if (surface.kind === "file") props.onCopyFilePath(fileSurfaceCopyPath(surface));
           break;
         case "close":
           props.onCloseSurface(surface);
@@ -403,6 +416,18 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
     activeTab?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [props.activeSurfaceId]);
 
+  // When two open files share a basename (typically across workspace roots),
+  // suffix non-primary tabs with their root's name to tell them apart.
+  const collidingFileBasenames = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const surface of props.surfaces) {
+      if (surface.kind !== "file") continue;
+      const key = pathBasename(surface.relativePath).toLowerCase();
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return new Set([...counts.entries()].filter(([, count]) => count > 1).map(([key]) => key));
+  }, [props.surfaces]);
+
   return (
     <PreviewPanelShell
       mode={props.mode}
@@ -428,7 +453,17 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             {props.surfaces.map((surface) => {
               const active = surface.id === props.activeSurfaceId;
               const pending = props.pendingSurfaceIds.has(surface.id);
-              const title = surfaceTitle(surface, props.previewSessions, props.terminalLabelsById);
+              const baseTitle = surfaceTitle(
+                surface,
+                props.previewSessions,
+                props.terminalLabelsById,
+              );
+              const title =
+                surface.kind === "file" &&
+                surface.rootPath !== null &&
+                collidingFileBasenames.has(pathBasename(surface.relativePath).toLowerCase())
+                  ? `${baseTitle} · ${pathBasename(surface.rootPath)}`
+                  : baseTitle;
               return (
                 <div
                   key={surface.id}

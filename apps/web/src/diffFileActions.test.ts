@@ -29,7 +29,27 @@ describe("openDiffFilePrimaryAction", () => {
       selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, THREAD_REF),
     ).toMatchObject({
       isOpen: true,
-      activeSurfaceId: "file:apps/web/src/components/DiffPanel.tsx",
+      activeSurfaceId: "file::apps/web/src/components/DiffPanel.tsx",
+    });
+    expect(openInEditor).not.toHaveBeenCalled();
+  });
+
+  it("opens diff files from an attached root scoped to that root", () => {
+    const openInEditor = vi.fn();
+
+    openDiffFilePrimaryAction({
+      threadRef: THREAD_REF,
+      filePath: "src/app.ts",
+      activeCwd: "/repos/frontend",
+      rootPath: "/repos/frontend",
+      openInEditor,
+    });
+
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, THREAD_REF),
+    ).toMatchObject({
+      isOpen: true,
+      activeSurfaceId: "file:/repos/frontend:src/app.ts",
     });
     expect(openInEditor).not.toHaveBeenCalled();
   });
