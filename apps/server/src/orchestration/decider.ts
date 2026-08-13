@@ -11,6 +11,7 @@ import type * as PlatformError from "effect/PlatformError";
 
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
 import {
+  findProjectById,
   listThreadsByProjectId,
   requireActiveProjectWorkspaceRootAbsent,
   requireProject,
@@ -19,6 +20,7 @@ import {
   requireThreadArchived,
   requireThreadAbsent,
   requireThreadNotArchived,
+  requireValidAdditionalRoots,
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
 
@@ -236,6 +238,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         workspaceRoot: command.workspaceRoot,
         exceptProjectId: command.projectId,
       });
+      if (command.additionalRoots !== undefined) {
+        yield* requireValidAdditionalRoots({
+          readModel,
+          command,
+          additionalRoots: command.additionalRoots,
+          primaryWorkspaceRoot: command.workspaceRoot,
+          ownerProjectId: command.projectId,
+        });
+      }
 
       return {
         ...(yield* withEventBase({
@@ -249,6 +260,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           projectId: command.projectId,
           title: command.title,
           workspaceRoot: command.workspaceRoot,
+          additionalRoots: command.additionalRoots ?? [],
           defaultModelSelection: command.defaultModelSelection ?? null,
           scripts: [],
           createdAt: command.createdAt,
@@ -258,7 +270,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "project.meta.update": {
-      yield* requireProject({
+      const project = yield* requireProject({
         readModel,
         command,
         projectId: command.projectId,
@@ -269,6 +281,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           command,
           workspaceRoot: command.workspaceRoot,
           exceptProjectId: command.projectId,
+        });
+      }
+      if (command.additionalRoots !== undefined) {
+        yield* requireValidAdditionalRoots({
+          readModel,
+          command,
+          additionalRoots: command.additionalRoots,
+          primaryWorkspaceRoot: command.workspaceRoot ?? project.workspaceRoot,
+          ownerProjectId: command.projectId,
         });
       }
       const occurredAt = yield* nowIso;
@@ -288,6 +309,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             ? { defaultModelSelection: command.defaultModelSelection }
             : {}),
           ...(command.scripts !== undefined ? { scripts: command.scripts } : {}),
+          ...(command.additionalRoots !== undefined
+            ? { additionalRoots: command.additionalRoots }
+            : {}),
           updatedAt: occurredAt,
         },
       };
@@ -345,7 +369,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.create": {
-      yield* requireProject({
+      const project = yield* requireProject({
         readModel,
         command,
         projectId: command.projectId,
@@ -355,6 +379,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (command.additionalRoots !== undefined) {
+        yield* requireValidAdditionalRoots({
+          readModel,
+          command,
+          additionalRoots: command.additionalRoots,
+          primaryWorkspaceRoot: command.worktreePath ?? project.workspaceRoot,
+          ownerProjectId: command.projectId,
+        });
+      }
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -372,6 +405,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           interactionMode: command.interactionMode,
           branch: command.branch,
           worktreePath: command.worktreePath,
+          additionalRoots: command.additionalRoots ?? [],
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
@@ -642,6 +676,18 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         thread.branch !== command.expectedBranch
           ? thread.branch
           : command.branch;
+      if (command.additionalRoots !== undefined) {
+        const threadProject = findProjectById(readModel, thread.projectId);
+        const worktreePath =
+          command.worktreePath !== undefined ? command.worktreePath : thread.worktreePath;
+        yield* requireValidAdditionalRoots({
+          readModel,
+          command,
+          additionalRoots: command.additionalRoots,
+          primaryWorkspaceRoot: worktreePath ?? threadProject?.workspaceRoot ?? "",
+          ownerProjectId: thread.projectId,
+        });
+      }
       const occurredAt = yield* nowIso;
       return {
         ...(yield* withEventBase({
@@ -659,6 +705,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             : {}),
           ...(branch !== undefined ? { branch } : {}),
           ...(command.worktreePath !== undefined ? { worktreePath: command.worktreePath } : {}),
+          ...(command.additionalRoots !== undefined
+            ? { additionalRoots: command.additionalRoots }
+            : {}),
           updatedAt: occurredAt,
         },
       };

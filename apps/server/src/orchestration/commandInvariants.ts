@@ -1,10 +1,12 @@
-import type {
-  OrchestrationCommand,
-  OrchestrationProject,
-  OrchestrationReadModel,
-  OrchestrationThread,
-  ProjectId,
-  ThreadId,
+import {
+  MAX_ADDITIONAL_WORKSPACE_ROOTS,
+  type OrchestrationCommand,
+  type OrchestrationProject,
+  type OrchestrationReadModel,
+  type OrchestrationThread,
+  type ProjectId,
+  type ThreadId,
+  type WorkspaceRootRef,
 } from "@t3tools/contracts";
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import * as Effect from "effect/Effect";
@@ -165,6 +167,99 @@ export function requireThreadAbsent(input: {
       `Thread '${input.threadId}' already exists and cannot be created twice.`,
     ),
   );
+}
+
+function isNestedPath(childNormalized: string, parentNormalized: string): boolean {
+  return (
+    childNormalized.startsWith(`${parentNormalized}/`) ||
+    childNormalized.startsWith(`${parentNormalized}\\`)
+  );
+}
+
+/**
+ * Validates a full-replacement `additionalRoots` list for a project or
+ * thread. Project refs must point at existing, non-deleted projects and may
+ * not reference the owner itself; effective paths (path refs plus
+ * dereferenced project roots) must be unique, must not equal the primary
+ * workspace root, and must not nest inside one another or the primary.
+ *
+ * Dangling project refs are rejected here (on attach) but tolerated at read
+ * and session time when the referenced project is deleted later.
+ */
+export function requireValidAdditionalRoots(input: {
+  readonly readModel: OrchestrationReadModel;
+  readonly command: OrchestrationCommand;
+  readonly additionalRoots: ReadonlyArray<WorkspaceRootRef>;
+  readonly primaryWorkspaceRoot: string;
+  readonly ownerProjectId?: ProjectId;
+}): Effect.Effect<void, OrchestrationCommandInvariantError> {
+  const fail = (detail: string) => Effect.fail(invariantError(input.command.type, detail));
+
+  if (input.additionalRoots.length > MAX_ADDITIONAL_WORKSPACE_ROOTS) {
+    return fail(
+      `At most ${MAX_ADDITIONAL_WORKSPACE_ROOTS} additional workspace roots are allowed (received ${input.additionalRoots.length}).`,
+    );
+  }
+
+  const primaryNormalized = normalizeProjectPathForComparison(input.primaryWorkspaceRoot);
+  const seenProjectIds = new Set<ProjectId>();
+  const effectivePaths: Array<{ readonly normalized: string; readonly label: string }> = [];
+
+  for (const root of input.additionalRoots) {
+    if (root.kind === "project") {
+      if (input.ownerProjectId !== undefined && root.projectId === input.ownerProjectId) {
+        return fail(
+          `Additional roots cannot reference the project '${root.projectId}' they belong to.`,
+        );
+      }
+      if (seenProjectIds.has(root.projectId)) {
+        return fail(`Duplicate additional root for project '${root.projectId}'.`);
+      }
+      seenProjectIds.add(root.projectId);
+      const referenced = findProjectById(input.readModel, root.projectId);
+      if (referenced === undefined || referenced.deletedAt !== null) {
+        return fail(`Additional root references missing or deleted project '${root.projectId}'.`);
+      }
+      effectivePaths.push({
+        normalized: normalizeProjectPathForComparison(referenced.workspaceRoot),
+        label: `project '${root.projectId}'`,
+      });
+      continue;
+    }
+    effectivePaths.push({
+      normalized: normalizeProjectPathForComparison(root.path),
+      label: `path '${root.path}'`,
+    });
+  }
+
+  for (const [index, entry] of effectivePaths.entries()) {
+    if (entry.normalized === primaryNormalized) {
+      return fail(`Additional root ${entry.label} duplicates the primary workspace root.`);
+    }
+    if (
+      isNestedPath(entry.normalized, primaryNormalized) ||
+      isNestedPath(primaryNormalized, entry.normalized)
+    ) {
+      return fail(`Additional root ${entry.label} is nested with the primary workspace root.`);
+    }
+    for (const other of effectivePaths.slice(index + 1)) {
+      if (entry.normalized === other.normalized) {
+        return fail(
+          `Additional roots ${entry.label} and ${other.label} resolve to the same directory.`,
+        );
+      }
+      if (
+        isNestedPath(entry.normalized, other.normalized) ||
+        isNestedPath(other.normalized, entry.normalized)
+      ) {
+        return fail(
+          `Additional roots ${entry.label} and ${other.label} are nested within each other.`,
+        );
+      }
+    }
+  }
+
+  return Effect.void;
 }
 
 export function requireNonNegativeInteger(input: {

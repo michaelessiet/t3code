@@ -25,6 +25,8 @@ import {
   ModelSelection,
   ProjectId,
   ThreadId,
+  WorkspaceRootRef,
+  type ResolvedWorkspaceRoot,
 } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
@@ -67,6 +69,7 @@ const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
   Struct.assign({
     defaultModelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
     scripts: Schema.fromJsonString(Schema.Array(ProjectScript)),
+    additionalRoots: Schema.fromJsonString(Schema.Array(WorkspaceRootRef)),
   }),
 );
 const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
@@ -79,6 +82,7 @@ const ProjectionThreadProposedPlanDbRowSchema = ProjectionThreadProposedPlan;
 const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
+    additionalRoots: Schema.fromJsonString(Schema.Array(WorkspaceRootRef)),
   }),
 );
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
@@ -253,11 +257,14 @@ function mapSessionRow(
 function mapProjectShellRow(
   row: Schema.Schema.Type<typeof ProjectionProjectDbRowSchema>,
   repositoryIdentity: OrchestrationProject["repositoryIdentity"],
+  resolvedAdditionalRoots?: ReadonlyArray<ResolvedWorkspaceRoot>,
 ): OrchestrationProjectShell {
   return {
     id: row.projectId,
     title: row.title,
     workspaceRoot: row.workspaceRoot,
+    additionalRoots: row.additionalRoots,
+    ...(resolvedAdditionalRoots !== undefined ? { resolvedAdditionalRoots } : {}),
     repositoryIdentity,
     defaultModelSelection: row.defaultModelSelection,
     scripts: row.scripts,
@@ -323,6 +330,69 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     );
   });
 
+  /**
+   * Builds a resolver for additional workspace roots: dereferences project
+   * refs against the given project rows, resolves repository identities for
+   * every distinct effective path (same concurrency/cache as primary roots),
+   * and returns a pure mapping function. Dangling project refs resolve to
+   * `status: "missing-project"` with no path.
+   */
+  const makeAdditionalRootsResolver = Effect.fn(
+    "ProjectionSnapshotQuery.makeAdditionalRootsResolver",
+  )(function* (
+    owners: ReadonlyArray<{ readonly additionalRoots: ReadonlyArray<WorkspaceRootRef> }>,
+    projectRows: ReadonlyArray<{
+      readonly projectId: string;
+      readonly workspaceRoot: string;
+      readonly deletedAt: string | null;
+    }>,
+  ) {
+    const projectRowById = new Map(projectRows.map((row) => [row.projectId, row] as const));
+    const effectivePathOf = (ref: WorkspaceRootRef): string | null => {
+      if (ref.kind === "path") {
+        return ref.path;
+      }
+      const project = projectRowById.get(ref.projectId);
+      return project !== undefined && project.deletedAt === null ? project.workspaceRoot : null;
+    };
+
+    const uniquePaths = new Set<string>();
+    for (const owner of owners) {
+      for (const ref of owner.additionalRoots) {
+        const path = effectivePathOf(ref);
+        if (path !== null) {
+          uniquePaths.add(path);
+        }
+      }
+    }
+    const identityByPath = new Map(
+      yield* Effect.forEach(
+        [...uniquePaths],
+        (path) =>
+          repositoryIdentityResolver
+            .resolve(path)
+            .pipe(Effect.map((identity) => [path, identity] as const)),
+        { concurrency: repositoryIdentityResolutionConcurrency },
+      ),
+    );
+
+    return (
+      additionalRoots: ReadonlyArray<WorkspaceRootRef>,
+    ): ReadonlyArray<ResolvedWorkspaceRoot> =>
+      additionalRoots.map((ref) => {
+        const path = effectivePathOf(ref);
+        if (path === null) {
+          return { ref, status: "missing-project" as const };
+        }
+        return {
+          ref,
+          path,
+          repositoryIdentity: identityByPath.get(path) ?? null,
+          status: "ok" as const,
+        };
+      });
+  });
+
   const listProjectRows = SqlSchema.findAll({
     Request: Schema.Void,
     Result: ProjectionProjectDbRowSchema,
@@ -332,6 +402,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           workspace_root AS "workspaceRoot",
+          additional_roots_json AS "additionalRoots",
           default_model_selection_json AS "defaultModelSelection",
           scripts_json AS "scripts",
           created_at AS "createdAt",
@@ -356,6 +427,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          additional_roots_json AS "additionalRoots",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -388,6 +460,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          additional_roots_json AS "additionalRoots",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -422,6 +495,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          additional_roots_json AS "additionalRoots",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -705,6 +779,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           workspace_root AS "workspaceRoot",
+          additional_roots_json AS "additionalRoots",
           default_model_selection_json AS "defaultModelSelection",
           scripts_json AS "scripts",
           created_at AS "createdAt",
@@ -727,6 +802,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           workspace_root AS "workspaceRoot",
+          additional_roots_json AS "additionalRoots",
           default_model_selection_json AS "defaultModelSelection",
           scripts_json AS "scripts",
           created_at AS "createdAt",
@@ -788,6 +864,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          additional_roots_json AS "additionalRoots",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -1202,11 +1279,17 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 projectRows,
                 { includeDeleted: true },
               );
+              const resolveAdditionalRoots = yield* makeAdditionalRootsResolver(
+                [...projectRows, ...threadRows],
+                projectRows,
+              );
 
               const projects: ReadonlyArray<OrchestrationProject> = projectRows.map((row) => ({
                 id: row.projectId,
                 title: row.title,
                 workspaceRoot: row.workspaceRoot,
+                additionalRoots: row.additionalRoots,
+                resolvedAdditionalRoots: resolveAdditionalRoots(row.additionalRoots),
                 repositoryIdentity: repositoryIdentities.get(row.projectId) ?? null,
                 defaultModelSelection: row.defaultModelSelection,
                 scripts: row.scripts,
@@ -1224,6 +1307,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 interactionMode: row.interactionMode,
                 branch: row.branch,
                 worktreePath: row.worktreePath,
+                additionalRoots: row.additionalRoots,
+                resolvedAdditionalRoots: resolveAdditionalRoots(row.additionalRoots),
                 latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                 createdAt: row.createdAt,
                 updatedAt: row.updatedAt,
@@ -1334,6 +1419,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   id: row.projectId,
                   title: row.title,
                   workspaceRoot: row.workspaceRoot,
+                  additionalRoots: row.additionalRoots,
                   defaultModelSelection: row.defaultModelSelection,
                   scripts: row.scripts,
                   createdAt: row.createdAt,
@@ -1426,6 +1512,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   interactionMode: row.interactionMode,
                   branch: row.branch,
                   worktreePath: row.worktreePath,
+                  additionalRoots: row.additionalRoots,
                   latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -1532,6 +1619,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             }
 
             const repositoryIdentities = yield* resolveRepositoryIdentitiesForProjects(projectRows);
+            const resolveAdditionalRoots = yield* makeAdditionalRootsResolver(
+              [...projectRows, ...threadRows],
+              projectRows,
+            );
             const latestTurnByThread = new Map(
               latestTurnRows.map((row) => [row.threadId, mapLatestTurn(row)] as const),
             );
@@ -1544,7 +1635,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               projects: Arr.filterMap(projectRows, (row) =>
                 row.deletedAt === null
                   ? Result.succeed(
-                      mapProjectShellRow(row, repositoryIdentities.get(row.projectId) ?? null),
+                      mapProjectShellRow(
+                        row,
+                        repositoryIdentities.get(row.projectId) ?? null,
+                        resolveAdditionalRoots(row.additionalRoots),
+                      ),
                     )
                   : Result.failVoid,
               ),
@@ -1559,6 +1654,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                       interactionMode: row.interactionMode,
                       branch: row.branch,
                       worktreePath: row.worktreePath,
+                      additionalRoots: row.additionalRoots,
+                      resolvedAdditionalRoots: resolveAdditionalRoots(row.additionalRoots),
                       latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                       createdAt: row.createdAt,
                       updatedAt: row.updatedAt,
@@ -1671,6 +1768,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             const repositoryIdentities = yield* resolveRepositoryIdentitiesForProjects(
               projectRows.filter((row) => activeProjectIds.has(row.projectId)),
             );
+            const resolveAdditionalRoots = yield* makeAdditionalRootsResolver(
+              threadRows,
+              projectRows,
+            );
             const latestTurnByThread = new Map(
               latestTurnRows.map((row) => [row.threadId, mapLatestTurn(row)] as const),
             );
@@ -1697,6 +1798,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   interactionMode: row.interactionMode,
                   branch: row.branch,
                   worktreePath: row.worktreePath,
+                  additionalRoots: row.additionalRoots,
+                  resolvedAdditionalRoots: resolveAdditionalRoots(row.additionalRoots),
                   latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -1781,6 +1884,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                     id: option.value.projectId,
                     title: option.value.title,
                     workspaceRoot: option.value.workspaceRoot,
+                    additionalRoots: option.value.additionalRoots,
                     repositoryIdentity,
                     defaultModelSelection: option.value.defaultModelSelection,
                     scripts: option.value.scripts,
@@ -1793,6 +1897,26 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ),
       );
 
+  // Loads the full (small) project table only when the shell actually has
+  // additional roots to dereference; single-root shells skip the extra query.
+  const resolveAdditionalRootsForSingleOwner = Effect.fn(
+    "ProjectionSnapshotQuery.resolveAdditionalRootsForSingleOwner",
+  )(function* (additionalRoots: ReadonlyArray<WorkspaceRootRef>) {
+    if (additionalRoots.length === 0) {
+      return [] as ReadonlyArray<ResolvedWorkspaceRoot>;
+    }
+    const projectRows = yield* listProjectRows(undefined).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.resolveAdditionalRootsForSingleOwner:listProjects:query",
+          "ProjectionSnapshotQuery.resolveAdditionalRootsForSingleOwner:listProjects:decodeRows",
+        ),
+      ),
+    );
+    const resolve = yield* makeAdditionalRootsResolver([{ additionalRoots }], projectRows);
+    return resolve(additionalRoots);
+  });
+
   const getProjectShellById: ProjectionSnapshotQueryShape["getProjectShellById"] = (projectId) =>
     getActiveProjectRowById({ projectId }).pipe(
       Effect.mapError(
@@ -1804,13 +1928,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       Effect.flatMap((option) =>
         Option.isNone(option)
           ? Effect.succeed(Option.none<OrchestrationProjectShell>())
-          : repositoryIdentityResolver
-              .resolve(option.value.workspaceRoot)
-              .pipe(
-                Effect.map((repositoryIdentity) =>
-                  Option.some(mapProjectShellRow(option.value, repositoryIdentity)),
+          : Effect.all([
+              repositoryIdentityResolver.resolve(option.value.workspaceRoot),
+              resolveAdditionalRootsForSingleOwner(option.value.additionalRoots),
+            ]).pipe(
+              Effect.map(([repositoryIdentity, resolvedAdditionalRoots]) =>
+                Option.some(
+                  mapProjectShellRow(option.value, repositoryIdentity, resolvedAdditionalRoots),
                 ),
               ),
+            ),
       ),
     );
 
@@ -1932,6 +2059,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         return Option.none<OrchestrationThreadShell>();
       }
 
+      const resolvedAdditionalRoots = yield* resolveAdditionalRootsForSingleOwner(
+        threadRow.value.additionalRoots,
+      );
+
       return Option.some({
         id: threadRow.value.threadId,
         projectId: threadRow.value.projectId,
@@ -1941,6 +2072,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         interactionMode: threadRow.value.interactionMode,
         branch: threadRow.value.branch,
         worktreePath: threadRow.value.worktreePath,
+        additionalRoots: threadRow.value.additionalRoots,
+        resolvedAdditionalRoots,
         latestTurn: Option.isSome(latestTurnRow) ? mapLatestTurn(latestTurnRow.value) : null,
         createdAt: threadRow.value.createdAt,
         updatedAt: threadRow.value.updatedAt,
@@ -2030,6 +2163,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         return Option.none<OrchestrationThread>();
       }
 
+      const resolvedAdditionalRoots = yield* resolveAdditionalRootsForSingleOwner(
+        threadRow.value.additionalRoots,
+      );
+
       const thread = {
         id: threadRow.value.threadId,
         projectId: threadRow.value.projectId,
@@ -2039,6 +2176,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         interactionMode: threadRow.value.interactionMode,
         branch: threadRow.value.branch,
         worktreePath: threadRow.value.worktreePath,
+        additionalRoots: threadRow.value.additionalRoots,
+        resolvedAdditionalRoots,
         latestTurn: Option.isSome(latestTurnRow) ? mapLatestTurn(latestTurnRow.value) : null,
         createdAt: threadRow.value.createdAt,
         updatedAt: threadRow.value.updatedAt,

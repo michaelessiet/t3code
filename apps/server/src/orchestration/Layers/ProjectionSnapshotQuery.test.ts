@@ -261,6 +261,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           id: asProjectId("project-1"),
           title: "Project 1",
           workspaceRoot: "/tmp/project-1",
+          additionalRoots: [],
+          resolvedAdditionalRoots: [],
           repositoryIdentity: null,
           defaultModelSelection: {
             instanceId: ProviderInstanceId.make("codex"),
@@ -293,6 +295,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
+          additionalRoots: [],
+          resolvedAdditionalRoots: [],
           latestTurn: {
             turnId: asTurnId("turn-1"),
             state: "completed",
@@ -376,6 +380,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           id: asProjectId("project-1"),
           title: "Project 1",
           workspaceRoot: "/tmp/project-1",
+          additionalRoots: [],
+          resolvedAdditionalRoots: [],
           repositoryIdentity: null,
           defaultModelSelection: {
             instanceId: ProviderInstanceId.make("codex"),
@@ -407,6 +413,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
+          additionalRoots: [],
+          resolvedAdditionalRoots: [],
           latestTurn: {
             turnId: asTurnId("turn-1"),
             state: "completed",
@@ -445,7 +453,10 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const threadDetail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-1"));
       assert.equal(threadDetail._tag, "Some");
       if (threadDetail._tag === "Some") {
-        assert.deepEqual(threadDetail.value, snapshot.threads[0]);
+        assert.deepEqual(threadDetail.value, {
+          ...snapshot.threads[0]!,
+          resolvedAdditionalRoots: [],
+        });
       }
     }),
   );
