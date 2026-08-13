@@ -235,10 +235,44 @@ export const ProjectScript = Schema.Struct({
 });
 export type ProjectScript = typeof ProjectScript.Type;
 
+/**
+ * A reference to an additional workspace root attached to a project or
+ * thread. `project` refs dereference to that project's `workspaceRoot` at
+ * read/session time (never persisted as a path, so a moved project follows);
+ * `path` refs pin an arbitrary directory on disk.
+ */
+export const WorkspaceRootRef = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("project"), projectId: ProjectId }),
+  Schema.Struct({ kind: Schema.Literal("path"), path: TrimmedNonEmptyString }),
+]);
+export type WorkspaceRootRef = typeof WorkspaceRootRef.Type;
+
+/**
+ * Read-time resolution of a `WorkspaceRootRef`: the concrete path plus the
+ * repository identity for UI labels. `path` is absent when a `project` ref
+ * dangles (the referenced project was deleted) — such roots are excluded
+ * from sessions but still surfaced so the UI can render "repo unavailable".
+ */
+export const ResolvedWorkspaceRoot = Schema.Struct({
+  ref: WorkspaceRootRef,
+  path: Schema.optional(TrimmedNonEmptyString),
+  repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
+  status: Schema.Literals(["ok", "missing-project"]),
+});
+export type ResolvedWorkspaceRoot = typeof ResolvedWorkspaceRoot.Type;
+
+export const MAX_ADDITIONAL_WORKSPACE_ROOTS = 8;
+
+const AdditionalRootsField = Schema.Array(WorkspaceRootRef).pipe(
+  Schema.withDecodingDefault(Effect.succeed([])),
+);
+
 export const OrchestrationProject = Schema.Struct({
   id: ProjectId,
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
+  additionalRoots: AdditionalRootsField,
+  resolvedAdditionalRoots: Schema.optional(Schema.Array(ResolvedWorkspaceRoot)),
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
   defaultModelSelection: Schema.NullOr(ModelSelection),
   scripts: Schema.Array(ProjectScript),
@@ -379,6 +413,8 @@ export const OrchestrationThread = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  additionalRoots: AdditionalRootsField,
+  resolvedAdditionalRoots: Schema.optional(Schema.Array(ResolvedWorkspaceRoot)),
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -416,6 +452,8 @@ export const OrchestrationProjectShell = Schema.Struct({
   id: ProjectId,
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
+  additionalRoots: AdditionalRootsField,
+  resolvedAdditionalRoots: Schema.optional(Schema.Array(ResolvedWorkspaceRoot)),
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
   defaultModelSelection: Schema.NullOr(ModelSelection),
   scripts: Schema.Array(ProjectScript),
@@ -435,6 +473,8 @@ export const OrchestrationThreadShell = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  additionalRoots: AdditionalRootsField,
+  resolvedAdditionalRoots: Schema.optional(Schema.Array(ResolvedWorkspaceRoot)),
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -547,6 +587,8 @@ export const ProjectCreateCommand = Schema.Struct({
   workspaceRoot: TrimmedNonEmptyString,
   createWorkspaceRootIfMissing: Schema.optional(Schema.Boolean),
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
+  // Present ⇒ full replacement of the attached-roots list (mirrors scripts).
+  additionalRoots: Schema.optional(Schema.Array(WorkspaceRootRef)),
   createdAt: IsoDateTime,
 });
 
@@ -558,6 +600,7 @@ const ProjectMetaUpdateCommand = Schema.Struct({
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
   scripts: Schema.optional(Schema.Array(ProjectScript)),
+  additionalRoots: Schema.optional(Schema.Array(WorkspaceRootRef)),
 });
 
 const ProjectDeleteCommand = Schema.Struct({
@@ -580,6 +623,7 @@ const ThreadCreateCommand = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  additionalRoots: Schema.optional(Schema.Array(WorkspaceRootRef)),
   createdAt: IsoDateTime,
 });
 
@@ -647,6 +691,7 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  additionalRoots: Schema.optional(Schema.Array(WorkspaceRootRef)),
 });
 
 const ThreadRuntimeModeSetCommand = Schema.Struct({
@@ -673,6 +718,7 @@ const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  additionalRoots: Schema.optional(Schema.Array(WorkspaceRootRef)),
   createdAt: IsoDateTime,
 });
 
@@ -941,6 +987,7 @@ export const ProjectCreatedPayload = Schema.Struct({
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
+  additionalRoots: AdditionalRootsField,
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
   defaultModelSelection: Schema.NullOr(ModelSelection),
   scripts: Schema.Array(ProjectScript),
@@ -955,6 +1002,7 @@ export const ProjectMetaUpdatedPayload = Schema.Struct({
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
   scripts: Schema.optional(Schema.Array(ProjectScript)),
+  additionalRoots: Schema.optional(Schema.Array(WorkspaceRootRef)),
   updatedAt: IsoDateTime,
 });
 
@@ -974,6 +1022,7 @@ export const ThreadCreatedPayload = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  additionalRoots: AdditionalRootsField,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1029,6 +1078,7 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  additionalRoots: Schema.optional(Schema.Array(WorkspaceRootRef)),
   updatedAt: IsoDateTime,
 });
 
