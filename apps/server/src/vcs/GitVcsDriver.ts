@@ -20,6 +20,8 @@ import {
   type VcsCreateWorktreeResult,
   type ReviewDiffPreviewInput,
   type ReviewDiffPreviewResult,
+  type VcsFileBaselineInput,
+  type VcsFileBaselineResult,
   type VcsInitInput,
   type VcsListRefsInput,
   type VcsListRefsResult,
@@ -221,6 +223,9 @@ export class GitVcsDriver extends Context.Service<
     readonly getReviewDiffPreview: (
       input: ReviewDiffPreviewInput,
     ) => Effect.Effect<ReviewDiffPreviewResult, GitCommandError>;
+    readonly getFileBaseline: (
+      input: VcsFileBaselineInput,
+    ) => Effect.Effect<VcsFileBaselineResult, GitCommandError>;
     readonly readConfigValue: (
       cwd: string,
       key: string,

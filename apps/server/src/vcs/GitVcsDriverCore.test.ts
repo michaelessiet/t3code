@@ -318,6 +318,167 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
     );
   });
 
+  describe("file baselines", () => {
+    it.effect("returns HEAD contents for a tracked file with dirty working tree", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "README.md", "# dirty edit\n");
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const baseline = yield* driver.getFileBaseline({ cwd, relativePath: "README.md" });
+
+        assert.equal(baseline.repository, "ok");
+        assert.equal(baseline.head.status, "ok");
+        assert.equal(baseline.head.contents, "# test\n");
+        assert.isNotNull(baseline.head.oid);
+        // Nothing staged: the index blob matches HEAD.
+        assert.equal(baseline.index.status, "ok");
+        assert.equal(baseline.index.oid, baseline.head.oid);
+        assert.isNull(baseline.renamedFrom);
+      }),
+    );
+
+    it.effect("returns staged contents in the index blob", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "README.md", "# staged\n");
+        yield* git(cwd, ["add", "README.md"]);
+        yield* writeTextFile(cwd, "README.md", "# staged then edited\n");
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const baseline = yield* driver.getFileBaseline({ cwd, relativePath: "README.md" });
+
+        assert.equal(baseline.head.contents, "# test\n");
+        assert.equal(baseline.index.status, "ok");
+        assert.equal(baseline.index.contents, "# staged\n");
+        assert.notEqual(baseline.index.oid, baseline.head.oid);
+      }),
+    );
+
+    it.effect("reports untracked files as absent", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "new-file.ts", "export const value = 1;\n");
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const baseline = yield* driver.getFileBaseline({ cwd, relativePath: "new-file.ts" });
+
+        assert.equal(baseline.head.status, "absent");
+        assert.isNull(baseline.head.oid);
+        assert.equal(baseline.index.status, "absent");
+        assert.isNull(baseline.renamedFrom);
+      }),
+    );
+
+    it.effect("follows a staged rename to the original HEAD blob", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["mv", "README.md", "RENAMED.md"]);
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const baseline = yield* driver.getFileBaseline({ cwd, relativePath: "RENAMED.md" });
+
+        assert.equal(baseline.head.status, "ok");
+        assert.equal(baseline.head.contents, "# test\n");
+        assert.equal(baseline.renamedFrom, "README.md");
+      }),
+    );
+
+    it.effect("round-trips CRLF contents byte-exact", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const crlfContents = "line one\r\nline two\r\n";
+        yield* writeTextFile(cwd, "crlf.txt", crlfContents);
+        yield* git(cwd, ["add", "crlf.txt"]);
+        yield* git(cwd, ["commit", "-m", "add crlf file"]);
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const baseline = yield* driver.getFileBaseline({ cwd, relativePath: "crlf.txt" });
+
+        assert.equal(baseline.head.status, "ok");
+        assert.equal(baseline.head.contents, crlfContents);
+      }),
+    );
+
+    it.effect("reports binary blobs without contents", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const fileSystem = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+        yield* fileSystem.writeFile(
+          pathService.join(cwd, "blob.bin"),
+          new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02, 0x03]),
+        );
+        yield* git(cwd, ["add", "blob.bin"]);
+        yield* git(cwd, ["commit", "-m", "add binary"]);
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const baseline = yield* driver.getFileBaseline({ cwd, relativePath: "blob.bin" });
+
+        assert.equal(baseline.head.status, "binary");
+        assert.isNotNull(baseline.head.oid);
+        assert.isNull(baseline.head.contents);
+      }),
+    );
+
+    it.effect("refuses oversized blobs instead of truncating", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "big.txt", "x".repeat(2 * 1024 * 1024 + 1));
+        yield* git(cwd, ["add", "big.txt"]);
+        yield* git(cwd, ["commit", "-m", "add big file"]);
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const baseline = yield* driver.getFileBaseline({ cwd, relativePath: "big.txt" });
+
+        assert.equal(baseline.head.status, "too-large");
+        assert.isNotNull(baseline.head.oid);
+        assert.isNull(baseline.head.contents);
+      }),
+    );
+
+    it.effect("resolves paths from a subdirectory workspace root", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "packages/app/index.ts", "export const app = true;\n");
+        yield* git(cwd, ["add", "."]);
+        yield* git(cwd, ["commit", "-m", "add nested file"]);
+        const pathService = yield* Path.Path;
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const baseline = yield* driver.getFileBaseline({
+          cwd: pathService.join(cwd, "packages"),
+          relativePath: "app/index.ts",
+        });
+
+        assert.equal(baseline.head.status, "ok");
+        assert.equal(baseline.head.contents, "export const app = true;\n");
+      }),
+    );
+
+    it.effect("rejects paths that escape the workspace root", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const failure = yield* driver
+          .getFileBaseline({ cwd, relativePath: "../outside.txt" })
+          .pipe(Effect.flip);
+
+        assert.instanceOf(failure, GitCommandError);
+      }),
+    );
+  });
+
   describe("repository status", () => {
     it.effect("reports non-repository directories without failing", () =>
       Effect.gen(function* () {

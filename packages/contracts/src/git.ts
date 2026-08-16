@@ -187,6 +187,12 @@ export const VcsInitInput = Schema.Struct({
 });
 export type VcsInitInput = typeof VcsInitInput.Type;
 
+export const VcsFileBaselineInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  relativePath: TrimmedNonEmptyStringSchema,
+});
+export type VcsFileBaselineInput = typeof VcsFileBaselineInput.Type;
+
 // RPC Results
 
 const VcsStatusChangeRequest = Schema.Struct({
@@ -318,6 +324,30 @@ export const VcsPullResult = Schema.Struct({
   upstreamRef: TrimmedNonEmptyStringSchema.pipe(Schema.NullOr),
 });
 export type VcsPullResult = typeof VcsPullResult.Type;
+
+export const VcsBaselineBlobStatus = Schema.Literals(["ok", "absent", "binary", "too-large"]);
+export type VcsBaselineBlobStatus = typeof VcsBaselineBlobStatus.Type;
+
+/**
+ * One resolved baseline blob (HEAD or index). `contents` is non-null only
+ * when `status` is "ok"; `oid` is set whenever the blob exists ("ok",
+ * "binary", "too-large") so clients can cheaply detect unchanged baselines.
+ */
+export const VcsBaselineBlob = Schema.Struct({
+  status: VcsBaselineBlobStatus,
+  oid: Schema.NullOr(Schema.String),
+  contents: Schema.NullOr(Schema.String),
+});
+export type VcsBaselineBlob = typeof VcsBaselineBlob.Type;
+
+export const VcsFileBaselineResult = Schema.Struct({
+  repository: Schema.Literals(["ok", "no-repository"]),
+  head: VcsBaselineBlob,
+  index: VcsBaselineBlob,
+  /** Repo-root-relative original path when a staged rename was followed. */
+  renamedFrom: Schema.NullOr(Schema.String),
+});
+export type VcsFileBaselineResult = typeof VcsFileBaselineResult.Type;
 
 // RPC / domain errors
 export class GitCommandError extends Schema.TaggedErrorClass<GitCommandError>()("GitCommandError", {

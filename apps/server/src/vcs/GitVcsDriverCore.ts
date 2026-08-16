@@ -23,6 +23,7 @@ import {
   GitCommandError,
   type ReviewDiffPreviewInput,
   type ReviewDiffPreviewSource,
+  type VcsBaselineBlob,
   type VcsRef,
 } from "@t3tools/contracts";
 import { dedupeRemoteBranchesWithLocalMatches, normalizeGitRemoteUrl } from "@t3tools/shared/git";
@@ -47,6 +48,11 @@ const RANGE_DIFF_PATCH_MAX_OUTPUT_BYTES = 59_000;
 const REVIEW_DIFF_PATCH_MAX_OUTPUT_BYTES = 120_000;
 const REVIEW_UNTRACKED_DIFF_MAX_OUTPUT_BYTES = 80_000;
 const WORKSPACE_FILES_MAX_OUTPUT_BYTES = 120_000;
+// Baseline blobs are never truncated (a clipped baseline would mark the whole
+// tail of a file as modified in diff gutters), so oversized blobs are refused.
+const FILE_BASELINE_MAX_BLOB_BYTES = 2 * 1024 * 1024;
+// Matches git's own text heuristic: a NUL within the first 8000 chars.
+const FILE_BASELINE_BINARY_SNIFF_CHARS = 8_000;
 const STATUS_UPSTREAM_REFRESH_INTERVAL = Duration.seconds(15);
 const STATUS_UPSTREAM_REFRESH_TIMEOUT = Duration.seconds(5);
 
@@ -2527,6 +2533,151 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       fallbackErrorDetail: "git init failed",
     }).pipe(Effect.asVoid);
 
+  const absentBaselineBlob = (): VcsBaselineBlob => ({
+    status: "absent",
+    oid: null,
+    contents: null,
+  });
+
+  /**
+   * Resolve one baseline blob (`HEAD:...` or `:0:...`). The size cap is
+   * enforced before reading — a truncated baseline would make the client mark
+   * the whole tail of the file as modified, so "too-large" is a distinct
+   * status and contents are never clipped.
+   */
+  const readBaselineBlob = Effect.fn("readBaselineBlob")(function* (cwd: string, spec: string) {
+    const revParse = yield* executeGit(
+      "GitVcsDriver.getFileBaseline.resolveOid",
+      cwd,
+      ["rev-parse", "--verify", "--quiet", spec],
+      { allowNonZeroExit: true, timeoutMs: 10_000 },
+    );
+    if (revParse.exitCode !== 0) {
+      return absentBaselineBlob();
+    }
+    const oid = revParse.stdout.trim();
+    if (oid.length === 0) {
+      return absentBaselineBlob();
+    }
+    const objectType = yield* runGitStdout("GitVcsDriver.getFileBaseline.objectType", cwd, [
+      "cat-file",
+      "-t",
+      oid,
+    ]);
+    if (objectType.trim() !== "blob") {
+      // Symlinks and submodules resolve to non-blob objects; no baseline.
+      return absentBaselineBlob();
+    }
+    const sizeText = yield* runGitStdout("GitVcsDriver.getFileBaseline.objectSize", cwd, [
+      "cat-file",
+      "-s",
+      oid,
+    ]);
+    const size = Number.parseInt(sizeText.trim(), 10);
+    if (!Number.isFinite(size) || size > FILE_BASELINE_MAX_BLOB_BYTES) {
+      return { status: "too-large", oid, contents: null } satisfies VcsBaselineBlob;
+    }
+    const blob = yield* executeGit(
+      "GitVcsDriver.getFileBaseline.readBlob",
+      cwd,
+      ["cat-file", "blob", oid],
+      {
+        maxOutputBytes: FILE_BASELINE_MAX_BLOB_BYTES + 1024,
+        timeoutMs: 15_000,
+        fallbackErrorDetail: "git cat-file blob failed",
+      },
+    );
+    if (blob.stdoutTruncated) {
+      return { status: "too-large", oid, contents: null } satisfies VcsBaselineBlob;
+    }
+    if (blob.stdout.slice(0, FILE_BASELINE_BINARY_SNIFF_CHARS).includes("\u0000")) {
+      return { status: "binary", oid, contents: null } satisfies VcsBaselineBlob;
+    }
+    return { status: "ok", oid, contents: blob.stdout } satisfies VcsBaselineBlob;
+  });
+
+  /**
+   * Find the repo-root-relative origin path of a staged rename targeting
+   * `rootRelativePath`. Runs `git status` without a pathspec because pathspec
+   * limiting can break git's rename pairing.
+   */
+  const findStagedRenameOrigin = Effect.fn("findStagedRenameOrigin")(function* (
+    cwd: string,
+    rootRelativePath: string,
+  ) {
+    const status = yield* executeGit(
+      "GitVcsDriver.getFileBaseline.renameProbe",
+      cwd,
+      ["status", "--porcelain=2", "-z", "--untracked-files=no"],
+      { allowNonZeroExit: true, timeoutMs: 10_000 },
+    );
+    if (status.exitCode !== 0 || status.stdoutTruncated) {
+      return null;
+    }
+    // With -z, rename entries span two NUL-separated fields:
+    // "2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path>" then "<origPath>".
+    const fields = status.stdout.split("\u0000");
+    for (let index = 0; index < fields.length - 1; index += 1) {
+      const entry = fields[index];
+      if (entry === undefined || !entry.startsWith("2 ")) {
+        continue;
+      }
+      const parts = entry.split(" ");
+      const stagedState = parts[1];
+      const entryPath = parts.slice(9).join(" ");
+      const origPath = fields[index + 1];
+      if (
+        stagedState !== undefined &&
+        stagedState.startsWith("R") &&
+        entryPath === rootRelativePath &&
+        origPath !== undefined &&
+        origPath.length > 0
+      ) {
+        return origPath;
+      }
+      // Skip the origPath field so it is never parsed as an entry.
+      index += 1;
+    }
+    return null;
+  });
+
+  const getFileBaseline: GitVcsDriver.GitVcsDriver["Service"]["getFileBaseline"] = Effect.fn(
+    "getFileBaseline",
+  )(function* (input) {
+    const relativePath = input.relativePath.replaceAll("\\", "/");
+    if (relativePath.startsWith("/") || /(^|\/)\.\.(\/|$)/.test(relativePath)) {
+      return yield* new GitCommandError({
+        ...gitCommandContext({
+          operation: "GitVcsDriver.getFileBaseline",
+          cwd: input.cwd,
+          args: [],
+        }),
+        detail: "relativePath escapes the workspace root.",
+      });
+    }
+    // The "./" prefix makes git resolve the path relative to the process cwd
+    // (the workspace/worktree root), so no repo-root translation is needed.
+    const index = yield* readBaselineBlob(input.cwd, `:0:./${relativePath}`);
+    let head = yield* readBaselineBlob(input.cwd, `HEAD:./${relativePath}`);
+    let renamedFrom: string | null = null;
+    if (head.status === "absent") {
+      const prefix = yield* runGitStdout("GitVcsDriver.getFileBaseline.showPrefix", input.cwd, [
+        "rev-parse",
+        "--show-prefix",
+      ]);
+      const rootRelativePath = `${prefix.trim()}${relativePath}`;
+      const origin = yield* findStagedRenameOrigin(input.cwd, rootRelativePath);
+      if (origin !== null) {
+        const renamedHead = yield* readBaselineBlob(input.cwd, `HEAD:${origin}`);
+        if (renamedHead.status !== "absent") {
+          head = renamedHead;
+          renamedFrom = origin;
+        }
+      }
+    }
+    return { repository: "ok" as const, head, index, renamedFrom };
+  });
+
   const listLocalBranchNames: GitVcsDriver.GitVcsDriver["Service"]["listLocalBranchNames"] = (
     cwd,
   ) =>
@@ -2560,6 +2711,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     pullCurrentBranch,
     readRangeContext,
     getReviewDiffPreview,
+    getFileBaseline,
     readConfigValue,
     listRefs,
     createWorktree,

@@ -114,6 +114,111 @@ const editorChrome = EditorView.theme({
     whiteSpace: "normal",
     userSelect: "text",
   },
+  // Git diff gutter: constant-width indicator column left of the line numbers.
+  // The 6px left inset keeps the clickable bars clear of the panel/sidebar
+  // resize handles, which overlay the first few pixels of the editor edge.
+  ".cm-gitDiffGutter": {
+    width: "10px",
+  },
+  ".cm-gitDiffGutter .cm-gutterElement": {
+    width: "4px",
+    marginLeft: "6px",
+    padding: "0",
+    position: "relative",
+    overflow: "visible",
+    cursor: "pointer",
+  },
+  ".cm-gitDiffGutter-added": {
+    backgroundColor: "var(--success)",
+  },
+  ".cm-gitDiffGutter-modified": {
+    backgroundColor: "var(--warning)",
+  },
+  // Staged hunks render hollow: an inset ring instead of a solid fill.
+  ".cm-gitDiffGutter-added.cm-gitDiffGutter-staged": {
+    backgroundColor: "transparent",
+    boxShadow: "inset 0 0 0 1px var(--success)",
+  },
+  ".cm-gitDiffGutter-modified.cm-gitDiffGutter-staged": {
+    backgroundColor: "transparent",
+    boxShadow: "inset 0 0 0 1px var(--warning)",
+  },
+  ".cm-gitDiffGutter-wedge": {
+    position: "absolute",
+    left: "0",
+    width: "0",
+    height: "0",
+    borderLeft: "6px solid var(--destructive)",
+    borderTop: "4px solid transparent",
+    borderBottom: "4px solid transparent",
+    pointerEvents: "none",
+  },
+  ".cm-gitDiffGutter-wedge-above": {
+    top: "-4px",
+  },
+  ".cm-gitDiffGutter-wedge-below": {
+    bottom: "-4px",
+  },
+  ".cm-gitDiffGutter-wedge.cm-gitDiffGutter-staged": {
+    opacity: "0.5",
+  },
+  ".cm-gitDiffPeek": {
+    fontFamily: "var(--font-sans)",
+    backgroundColor: "var(--card)",
+    color: "var(--card-foreground)",
+    border: "1px solid var(--border)",
+    borderLeft: `3px solid ${mixedColor("--destructive", 60)}`,
+    borderRadius: "calc(var(--radius) - 4px)",
+    margin: "4px 12px",
+    maxWidth: "720px",
+    overflow: "hidden",
+  },
+  ".cm-gitDiffPeek-header": {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "8px",
+    padding: "4px 8px",
+    borderBottom: "1px solid var(--border)",
+    fontSize: "11px",
+    color: "var(--muted-foreground)",
+  },
+  ".cm-gitDiffPeek-actions": {
+    display: "flex",
+    alignItems: "center",
+    gap: "4px",
+  },
+  ".cm-gitDiffPeek-button": {
+    backgroundColor: "transparent",
+    color: "var(--muted-foreground)",
+    border: "1px solid var(--border)",
+    borderRadius: "calc(var(--radius) - 4px)",
+    fontSize: "11px",
+    lineHeight: "1.4",
+    padding: "1px 7px",
+    cursor: "pointer",
+  },
+  ".cm-gitDiffPeek-button:hover": {
+    backgroundColor: "var(--accent)",
+    color: "var(--accent-foreground)",
+  },
+  ".cm-gitDiffPeek-body": {
+    fontFamily: "var(--font-mono)",
+    fontSize: "var(--cm-font-size, 12px)",
+    padding: "4px 0",
+    maxHeight: "200px",
+    overflow: "auto",
+  },
+  ".cm-gitDiffPeek-line": {
+    padding: "0 12px",
+    whiteSpace: "pre",
+    backgroundColor: mixedColor("--destructive", 8),
+  },
+  ".cm-gitDiffPeek-empty": {
+    padding: "6px 12px",
+    fontSize: "11px",
+    color: "var(--muted-foreground)",
+  },
   ".cm-panels": {
     backgroundColor: "var(--card)",
     color: "var(--card-foreground)",
