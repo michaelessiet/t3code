@@ -45,7 +45,10 @@ interface BaselineFieldValue {
 }
 
 const setBaselineEffect = StateEffect.define<BaselineFieldValue | null>();
-const setMarkersEffect = StateEffect.define<RangeSet<GutterMarker>>();
+const setMarkersEffect = StateEffect.define<{
+  readonly set: RangeSet<GutterMarker>;
+  readonly specs: readonly GitDiffMarkerSpec[];
+}>();
 
 /**
  * Split with CodeMirror's own line-break semantics so a CRLF blob diffed
@@ -74,8 +77,24 @@ const markersField = StateField.define<RangeSet<GutterMarker>>({
     // window between recomputes; the next setMarkersEffect replaces them.
     let next = markers.map(transaction.changes);
     for (const effect of transaction.effects) {
-      if (effect.is(setMarkersEffect)) next = effect.value;
+      if (effect.is(setMarkersEffect)) next = effect.value.set;
       else if (effect.is(setBaselineEffect) && effect.value === null) next = RangeSet.empty;
+    }
+    return next;
+  },
+});
+
+/**
+ * The same marker specs the gutter renders, kept so the scrollbar overview
+ * ruler can re-place its marks on geometry changes without re-diffing.
+ */
+const markerSpecsField = StateField.define<readonly GitDiffMarkerSpec[]>({
+  create: () => [],
+  update: (specs, transaction) => {
+    let next = specs;
+    for (const effect of transaction.effects) {
+      if (effect.is(setMarkersEffect)) next = effect.value.specs;
+      else if (effect.is(setBaselineEffect) && effect.value === null) next = [];
     }
     return next;
   },
@@ -457,6 +476,124 @@ class GitDiffPeekWidget extends WidgetType {
   }
 }
 
+// --- Scrollbar overview ruler ---------------------------------------------------
+
+/** Contiguous same-kind marker lines, drawn as one mark on the ruler. */
+export interface GitDiffOverviewRun {
+  readonly kind: "added" | "modified" | "deleted";
+  readonly staged: boolean;
+  readonly firstLine: number;
+  readonly lastLine: number;
+}
+
+/**
+ * Collapse per-line specs into hunk-sized runs. A spec that carries both a bar
+ * and a deletion wedge stays one run of its bar kind: the ruler shows one mark
+ * per change, not one per line.
+ */
+export function buildGitDiffOverviewRuns(
+  specs: readonly GitDiffMarkerSpec[],
+): GitDiffOverviewRun[] {
+  const runs: GitDiffOverviewRun[] = [];
+  for (const spec of specs) {
+    const kind = spec.kind ?? "deleted";
+    const previous = runs[runs.length - 1];
+    if (
+      previous !== undefined &&
+      previous.kind === kind &&
+      previous.staged === spec.staged &&
+      spec.line <= previous.lastLine + 1
+    ) {
+      runs[runs.length - 1] = { ...previous, lastLine: Math.max(previous.lastLine, spec.line) };
+      continue;
+    }
+    runs.push({ kind, staged: spec.staged, firstLine: spec.line, lastLine: spec.line });
+  }
+  return runs;
+}
+
+interface OverviewMark {
+  readonly className: string;
+  readonly topPercent: number;
+  readonly heightPercent: number;
+}
+
+function measureOverviewMarks(view: EditorView): OverviewMark[] {
+  const specs = view.state.field(markerSpecsField, false) ?? [];
+  if (specs.length === 0) return [];
+  // The ruler spans the scroll track, so document pixels map onto it by
+  // scrollHeight — which also stays correct for docs shorter than the
+  // viewport, where scrollHeight is the client height.
+  const total = view.scrollDOM.scrollHeight;
+  if (total <= 0) return [];
+  const doc = view.state.doc;
+  const marks: OverviewMark[] = [];
+  for (const run of buildGitDiffOverviewRuns(specs)) {
+    const firstFrom = doc.line(Math.min(run.firstLine, doc.lines)).from;
+    const lastFrom = doc.line(Math.min(run.lastLine, doc.lines)).from;
+    const top = view.lineBlockAt(firstFrom).top;
+    const bottom = view.lineBlockAt(lastFrom).bottom;
+    marks.push({
+      className: `cm-gitDiffOverview-mark cm-gitDiffOverview-${run.kind}${
+        run.staged ? " cm-gitDiffOverview-staged" : ""
+      }`,
+      topPercent: Math.max(0, Math.min(100, (top / total) * 100)),
+      heightPercent: Math.max(0, Math.min(100, ((bottom - top) / total) * 100)),
+    });
+  }
+  return marks;
+}
+
+/**
+ * VS Code-style overview ruler: change marks painted over the scrollbar track.
+ * Non-interactive by design — the strip sits on top of the native scrollbar, so
+ * capturing pointer events here would break dragging the thumb.
+ */
+const overviewRulerPlugin = ViewPlugin.define((view) => {
+  const dom = document.createElement("div");
+  dom.className = "cm-gitDiffOverview";
+  dom.setAttribute("aria-hidden", "true");
+  view.dom.appendChild(dom);
+
+  let pending = false;
+  const render = (marks: readonly OverviewMark[]) => {
+    dom.textContent = "";
+    for (const mark of marks) {
+      const element = document.createElement("div");
+      element.className = mark.className;
+      element.style.top = `${mark.topPercent}%`;
+      element.style.height = `${mark.heightPercent}%`;
+      dom.appendChild(element);
+    }
+  };
+  const schedule = () => {
+    if (pending) return;
+    pending = true;
+    view.requestMeasure({
+      read: (measured) => {
+        pending = false;
+        return measureOverviewMarks(measured);
+      },
+      write: render,
+    });
+  };
+
+  schedule();
+  return {
+    update: (update) => {
+      const specsChanged = update.transactions.some((transaction) =>
+        transaction.effects.some(
+          (effect) => effect.is(setMarkersEffect) || effect.is(setBaselineEffect),
+        ),
+      );
+      if (specsChanged || update.docChanged || update.geometryChanged) schedule();
+    },
+    destroy: () => {
+      dom.remove();
+    },
+  };
+});
+
 // --- Recompute plugin ---------------------------------------------------------
 
 function recomputeMarkers(view: EditorView): void {
@@ -472,8 +609,9 @@ function recomputeMarkers(view: EditorView): void {
   }
   const markers = buildMarkerSet(doc, specs);
   const current = view.state.field(markersField, false) ?? RangeSet.empty;
-  if (markers.size === 0 && current.size === 0) return;
-  view.dispatch({ effects: setMarkersEffect.of(markers) });
+  const currentSpecs = view.state.field(markerSpecsField, false) ?? [];
+  if (markers.size === 0 && current.size === 0 && currentSpecs.length === 0) return;
+  view.dispatch({ effects: setMarkersEffect.of({ set: markers, specs }) });
 }
 
 const recomputePlugin = ViewPlugin.define((view) => {
@@ -575,8 +713,10 @@ export function gitDiffGutter(): Extension {
   return [
     baselineField,
     markersField,
+    markerSpecsField,
     peekField,
     recomputePlugin,
+    overviewRulerPlugin,
     diffGutter,
     keymap.of([
       { key: "Alt-F5", run: gotoNextGitDiffHunk },

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   type GitDiffMarkerSpec,
+  buildGitDiffOverviewRuns,
   computeGitDiffMarkerSpecs,
   gitDiffBaselineText,
 } from "./gitDiffGutter";
@@ -119,6 +120,51 @@ describe("computeGitDiffMarkerSpecs", () => {
       expect(specs("a\n", "A\n", null)).toEqual([
         { line: 1, kind: "modified", staged: false, wedge: null },
       ]);
+    });
+  });
+
+  describe("overview ruler runs", () => {
+    it("collapses contiguous same-kind lines into one run", () => {
+      expect(buildGitDiffOverviewRuns(specs("a\nb\nc\n", "a\nX\nY\nZ\nc\n"))).toEqual([
+        { kind: "modified", staged: false, firstLine: 2, lastLine: 2 },
+        { kind: "added", staged: false, firstLine: 3, lastLine: 4 },
+      ]);
+    });
+
+    it("keeps separate hunks as separate runs", () => {
+      expect(buildGitDiffOverviewRuns(specs("a\nb\nc\nd\ne\n", "a\nB\nc\nD\ne\n"))).toEqual([
+        { kind: "modified", staged: false, firstLine: 2, lastLine: 2 },
+        { kind: "modified", staged: false, firstLine: 4, lastLine: 4 },
+      ]);
+    });
+
+    it("does not merge runs that differ in staged state", () => {
+      expect(
+        buildGitDiffOverviewRuns([
+          { line: 1, kind: "modified", staged: true, wedge: null },
+          { line: 2, kind: "modified", staged: false, wedge: null },
+        ]),
+      ).toEqual([
+        { kind: "modified", staged: true, firstLine: 1, lastLine: 1 },
+        { kind: "modified", staged: false, firstLine: 2, lastLine: 2 },
+      ]);
+    });
+
+    it("emits a deleted run for a pure-deletion boundary spec", () => {
+      expect(buildGitDiffOverviewRuns(specs("a\nb\nc\n", "a\nc\n"))).toEqual([
+        { kind: "deleted", staged: false, firstLine: 2, lastLine: 2 },
+      ]);
+    });
+
+    it("keeps a bar hunk as one run even when it also carries a deletion wedge", () => {
+      // Shrinking replacement: one modified line plus a wedge below it.
+      expect(buildGitDiffOverviewRuns(specs("a\nb\nc\nd\n", "a\nX\nd\n"))).toEqual([
+        { kind: "modified", staged: false, firstLine: 2, lastLine: 2 },
+      ]);
+    });
+
+    it("produces no runs for a clean document", () => {
+      expect(buildGitDiffOverviewRuns(specs("a\nb\n", "a\nb\n"))).toEqual([]);
     });
   });
 });

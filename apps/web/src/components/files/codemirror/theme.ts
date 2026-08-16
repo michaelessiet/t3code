@@ -162,6 +162,36 @@ const editorChrome = EditorView.theme({
   ".cm-gitDiffGutter-wedge.cm-gitDiffGutter-staged": {
     opacity: "0.5",
   },
+  // Overview ruler: change marks painted over the scrollbar track. The strip is
+  // click-through so dragging the native scrollbar thumb keeps working.
+  ".cm-gitDiffOverview": {
+    position: "absolute",
+    top: "0",
+    right: "0",
+    bottom: "0",
+    width: "var(--app-scrollbar-width, 6px)",
+    pointerEvents: "none",
+    zIndex: "3",
+  },
+  ".cm-gitDiffOverview-mark": {
+    position: "absolute",
+    left: "0",
+    right: "0",
+    minHeight: "3px",
+    borderRadius: "1px",
+  },
+  ".cm-gitDiffOverview-added": {
+    backgroundColor: mixedColor("--success", 70),
+  },
+  ".cm-gitDiffOverview-modified": {
+    backgroundColor: mixedColor("--warning", 70),
+  },
+  ".cm-gitDiffOverview-deleted": {
+    backgroundColor: mixedColor("--destructive", 70),
+  },
+  ".cm-gitDiffOverview-mark.cm-gitDiffOverview-staged": {
+    opacity: "0.45",
+  },
   ".cm-gitDiffPeek": {
     fontFamily: "var(--font-sans)",
     backgroundColor: "var(--card)",
