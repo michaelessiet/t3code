@@ -193,6 +193,11 @@ export const VcsFileBaselineInput = Schema.Struct({
 });
 export type VcsFileBaselineInput = typeof VcsFileBaselineInput.Type;
 
+export const VcsFileStatusesInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+});
+export type VcsFileStatusesInput = typeof VcsFileStatusesInput.Type;
+
 // RPC Results
 
 const VcsStatusChangeRequest = Schema.Struct({
@@ -348,6 +353,40 @@ export const VcsFileBaselineResult = Schema.Struct({
   renamedFrom: Schema.NullOr(Schema.String),
 });
 export type VcsFileBaselineResult = typeof VcsFileBaselineResult.Type;
+
+/**
+ * Working-tree state of one path, collapsed from the porcelain XY pair to the
+ * single status a file explorer shows (VS Code/Zed style).
+ */
+export const VcsFileStatusCode = Schema.Literals([
+  "modified",
+  "added",
+  "deleted",
+  "renamed",
+  "untracked",
+  "conflicted",
+]);
+export type VcsFileStatusCode = typeof VcsFileStatusCode.Type;
+
+export const VcsFileStatusEntry = Schema.Struct({
+  /**
+   * Path relative to the requested cwd, POSIX separators. Directory entries
+   * end with "/" — git collapses wholly-untracked directories into one record.
+   */
+  path: TrimmedNonEmptyStringSchema,
+  status: VcsFileStatusCode,
+  /** True when the change is fully staged (index differs from HEAD, worktree clean). */
+  staged: Schema.Boolean,
+});
+export type VcsFileStatusEntry = typeof VcsFileStatusEntry.Type;
+
+export const VcsFileStatusesResult = Schema.Struct({
+  repository: Schema.Literals(["ok", "no-repository"]),
+  entries: Schema.Array(VcsFileStatusEntry),
+  /** True when the working tree had more changes than the response cap. */
+  truncated: Schema.Boolean,
+});
+export type VcsFileStatusesResult = typeof VcsFileStatusesResult.Type;
 
 // RPC / domain errors
 export class GitCommandError extends Schema.TaggedErrorClass<GitCommandError>()("GitCommandError", {

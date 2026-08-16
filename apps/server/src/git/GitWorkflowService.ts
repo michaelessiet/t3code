@@ -13,6 +13,8 @@ import {
   type VcsCreateWorktreeResult,
   type VcsFileBaselineInput,
   type VcsFileBaselineResult,
+  type VcsFileStatusesInput,
+  type VcsFileStatusesResult,
   type VcsListRefsInput,
   type VcsListRefsResult,
   type GitManagerServiceError,
@@ -67,6 +69,9 @@ export class GitWorkflowService extends Context.Service<
     readonly getFileBaseline: (
       input: VcsFileBaselineInput,
     ) => Effect.Effect<VcsFileBaselineResult, GitCommandError>;
+    readonly getFileStatuses: (
+      input: VcsFileStatusesInput,
+    ) => Effect.Effect<VcsFileStatusesResult, GitCommandError>;
     readonly createWorktree: (
       input: VcsCreateWorktreeInput,
     ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
@@ -316,6 +321,18 @@ export const make = Effect.gen(function* () {
           isGitRepository
             ? git.getFileBaseline(input)
             : Effect.succeed(nonRepositoryFileBaseline()),
+        ),
+      ),
+    getFileStatuses: (input) =>
+      detectGitRepositoryForCommand("GitWorkflowService.getFileStatuses", input.cwd).pipe(
+        Effect.flatMap((isGitRepository) =>
+          isGitRepository
+            ? git.getFileStatuses(input)
+            : Effect.succeed({
+                repository: "no-repository" as const,
+                entries: [],
+                truncated: false,
+              }),
         ),
       ),
     createWorktree: (input) =>

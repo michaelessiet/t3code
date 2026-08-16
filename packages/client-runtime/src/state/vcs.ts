@@ -191,6 +191,17 @@ export function createVcsEnvironmentAtoms<R, E>(
       staleTimeMs: 3_000,
       idleTtlMs: 60_000,
     }),
+    /**
+     * Per-path git status for one workspace root, used by the file explorer's
+     * change decorations. Refreshed by the file watcher and the status stream,
+     * so the stale time only exists to collapse those bursts.
+     */
+    fileStatuses: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:vcs:file-statuses",
+      tag: WS_METHODS.vcsGetFileStatuses,
+      staleTimeMs: 3_000,
+      idleTtlMs: 60_000,
+    }),
     pull: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:vcs:pull",
       tag: WS_METHODS.vcsPull,

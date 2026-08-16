@@ -25,6 +25,8 @@ import {
   VcsCreateWorktreeResult,
   VcsFileBaselineInput,
   VcsFileBaselineResult,
+  VcsFileStatusesInput,
+  VcsFileStatusesResult,
   VcsInitInput,
   VcsListRefsInput,
   VcsListRefsResult,
@@ -253,6 +255,7 @@ export const WS_METHODS = {
   vcsSwitchRef: "vcs.switchRef",
   vcsInit: "vcs.init",
   vcsGetFileBaseline: "vcs.getFileBaseline",
+  vcsGetFileStatuses: "vcs.getFileStatuses",
 
   // Git workflow methods
   gitRunStackedAction: "git.runStackedAction",
@@ -789,6 +792,12 @@ export const WsVcsGetFileBaselineRpc = Rpc.make(WS_METHODS.vcsGetFileBaseline, {
   error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
 });
 
+export const WsVcsGetFileStatusesRpc = Rpc.make(WS_METHODS.vcsGetFileStatuses, {
+  payload: VcsFileStatusesInput,
+  success: VcsFileStatusesResult,
+  error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
+});
+
 /**
  * Ephemeral live diff preview for compact/mobile surfaces.
  * Not the persisted T3 Review model. Future review sessions should use
@@ -1075,6 +1084,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsVcsSwitchRefRpc,
   WsVcsInitRpc,
   WsVcsGetFileBaselineRpc,
+  WsVcsGetFileStatusesRpc,
   WsReviewGetDiffPreviewRpc,
   WsTerminalOpenRpc,
   WsTerminalAttachRpc,
