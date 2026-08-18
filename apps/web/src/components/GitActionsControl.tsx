@@ -1035,6 +1035,28 @@ export default function GitActionsControl({
     });
   }, []);
 
+  // The elapsed-time ticker for the progress toast is armed only while a git
+  // action is publishing progress (rare and short-lived), instead of an
+  // unconditional per-second interval for every open thread.
+  const progressToastTickerRef = useRef<number | null>(null);
+  const stopProgressToastTicker = useCallback(() => {
+    if (progressToastTickerRef.current === null) {
+      return;
+    }
+    window.clearInterval(progressToastTickerRef.current);
+    progressToastTickerRef.current = null;
+  }, []);
+  const startProgressToastTicker = useCallback(() => {
+    if (progressToastTickerRef.current !== null) {
+      return;
+    }
+    progressToastTickerRef.current = window.setInterval(() => {
+      updateActiveProgressToast();
+    }, 1000);
+  }, [updateActiveProgressToast]);
+  // An in-flight action's interval must never outlive the component.
+  useEffect(() => stopProgressToastTicker, [stopProgressToastTicker]);
+
   const persistThreadBranchSync = useCallback(
     (branch: string | null) => {
       // A thread's branch metadata tracks its primary repository only —
@@ -1180,19 +1202,6 @@ export default function GitActionsControl({
     : null;
 
   useEffect(() => {
-    const interval = window.setInterval(() => {
-      if (!activeGitActionProgressRef.current) {
-        return;
-      }
-      updateActiveProgressToast();
-    }, 1000);
-
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [updateActiveProgressToast]);
-
-  useEffect(() => {
     if (gitCwd === null) {
       return;
     }
@@ -1334,6 +1343,7 @@ export default function GitActionsControl({
         lastOutputLine: null,
         currentPhaseLabel: progressStages[0] ?? "Running git action...",
       };
+      startProgressToastTicker();
 
       if (progressToastId) {
         toastManager.update(progressToastId, {
@@ -1410,7 +1420,12 @@ export default function GitActionsControl({
         onProgress: applyProgressEvent,
       });
 
-      activeGitActionProgressRef.current = null;
+      // Only tear down if this action still owns the progress slot — a newer
+      // action may have re-armed the ticker with its own progress by now.
+      if (activeGitActionProgressRef.current?.actionId === actionId) {
+        activeGitActionProgressRef.current = null;
+        stopProgressToastTicker();
+      }
       if (result._tag === "Failure") {
         if (isAtomCommandInterrupted(result)) {
           toastManager.close(resolvedProgressToastId);
