@@ -48,6 +48,8 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { useCopyEntryAcrossThreads } from "./copyEntryAcrossThreads";
 import { createFileTreeDragMentionController } from "./fileTreeDragMention";
 import { subscribeFileTreeAction } from "./fileTreeActionBus";
+import { buildFileTreeGitDecorations } from "./fileTreeGitStatus";
+import { useFileTreeGitStatuses } from "./fileTreeGitStatusState";
 import { useProjectEntriesQuery } from "./projectFilesQueryState";
 import ThreadDestinationPicker, { type ThreadDestination } from "./ThreadDestinationPicker";
 
@@ -73,8 +75,19 @@ const TREE_UNSAFE_CSS = `
     --trees-border-color-override: color-mix(in srgb, currentColor 14%, transparent);
     --trees-font-family-override: var(--font-sans);
     --trees-font-size-override: 12px;
+    /* Git decoration colors, matching the editor's diff gutter and the
+       VS Code/Zed convention: orange edits, green additions, red deletions. */
+    --trees-git-modified-color-override: var(--warning);
+    --trees-git-added-color-override: var(--success);
+    --trees-git-untracked-color-override: var(--success);
+    --trees-git-deleted-color-override: var(--destructive);
+    --trees-git-renamed-color-override: var(--info);
   }
   button[data-type='item'] { border-radius: 5px; }
+  /* A folder's status is an aggregate of what is inside it, so it tints the
+     name only: a letter there would claim the folder itself changed. */
+  button[data-item-type='folder'] > [data-item-section='git'] { visibility: hidden; }
+  [data-item-section='decoration'] { color: var(--destructive); font-weight: 600; }
 `;
 
 function treePath(entry: ProjectEntry): string {
@@ -227,6 +240,16 @@ export default function FileBrowserPanel({
   const treePaths = useMemo(() => entries.map(treePath), [entries]);
   const previousTreePathsRef = useRef<readonly string[]>([]);
 
+  const gitStatuses = useFileTreeGitStatuses(environmentId, cwd);
+  const gitDecorations = useMemo(
+    () => buildFileTreeGitDecorations(gitStatuses, treePaths),
+    [gitStatuses, treePaths],
+  );
+  // The tree reads renderRowDecoration once at construction, so conflicts are
+  // published through a ref rather than a new callback identity.
+  const conflictedPathsRef = useRef<ReadonlySet<string>>(gitDecorations.conflictedPaths);
+  conflictedPathsRef.current = gitDecorations.conflictedPaths;
+
   const mutateEntry = useAtomCommand(projectEnvironment.mutateEntry, { reportFailure: false });
   /** Placeholder paths added by New File / New Folder, awaiting their name. */
   const pendingCreatesRef = useRef(new Map<string, "file" | "directory">());
@@ -366,8 +389,14 @@ export default function FileBrowserPanel({
     density: "compact",
     fileTreeSearchMode: "hide-non-matches",
     flattenEmptyDirectories: true,
-    initialExpansion: 1,
+    // Everything starts collapsed; the reveal effect below expands only the
+    // ancestors of the file being opened.
+    initialExpansion: "closed",
     icons: T3_PIERRE_ICONS,
+    renderRowDecoration: ({ row }) =>
+      row.kind === "file" && conflictedPathsRef.current.has(row.path)
+        ? { text: "!", title: "Merge conflict" }
+        : null,
     onSelectionChange: (selectedPaths) => {
       dragMention.handleSelectionChange(selectedPaths);
       // Programmatic reveal syncs the selection to the already-open file;
@@ -412,6 +441,12 @@ export default function FileBrowserPanel({
     pendingCreatesRef.current.clear();
     model.resetPaths(treePaths);
   }, [entryKinds, model, treePaths]);
+
+  // Git decorations are options the tree only reads at construction, so they
+  // are pushed imperatively; the model dedupes by content signature.
+  useEffect(() => {
+    model.setGitStatus(gitDecorations.entries);
+  }, [gitDecorations, model]);
 
   // Reveal the open file: select it, expand its ancestors and scroll it into
   // view. Keyed by reveal request so background entry refreshes don't yank the

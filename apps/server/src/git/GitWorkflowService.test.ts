@@ -135,6 +135,29 @@ describe("GitWorkflowService", () => {
     ),
   );
 
+  it.effect("returns absent file baselines when no VCS repository is detected", () =>
+    Effect.gen(function* () {
+      const workflow = yield* GitWorkflowService.GitWorkflowService;
+      const baseline = yield* workflow.getFileBaseline({
+        cwd: "/not-a-repo",
+        relativePath: "src/index.ts",
+      });
+
+      assert.deepStrictEqual(baseline, {
+        repository: "no-repository",
+        head: { status: "absent", oid: null, contents: null },
+        index: { status: "absent", oid: null, contents: null },
+        renamedFrom: null,
+      });
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          detect: () => Effect.succeed(null),
+        }),
+      ),
+    ),
+  );
+
   it.effect("structures workflow detection failures without exposing upstream details", () => {
     const cause = new VcsRepositoryDetectionError({
       operation: "VcsDriverRegistry.detect",

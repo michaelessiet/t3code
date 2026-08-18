@@ -53,6 +53,7 @@ import { consumeEditorFocusRequest } from "./editorFocusRequest";
 import { CodeMirrorFileEditor } from "./codemirror/CodeMirrorFileEditor";
 import { documentSaveExtension } from "./codemirror/documentSave";
 import { useLspBridge } from "./codemirror/useLspBridge";
+import { gitDiffGutter, setGitDiffBaseline } from "./codemirror/gitDiffGutter";
 import {
   type ReviewAnnotationSpec,
   type ReviewLineRange,
@@ -60,6 +61,7 @@ import {
   setReviewAnnotations,
   setReviewSelection,
 } from "./codemirror/reviewComments";
+import { useGitDiffBaseline } from "./gitDiffBaselineState";
 import {
   type FileCommentAnnotationEntry,
   type FileCommentLineAnnotation,
@@ -923,10 +925,36 @@ function EditableFileSurface({
     () => documentSaveExtension(() => saveCoordinator.flush()),
     [saveCoordinator],
   );
+  const gitDiffExtension = useMemo(() => gitDiffGutter(), []);
   const editorExtensions = useMemo(
-    () => [reviewExtension, saveExtension, focusLossExtension, lspExtension ?? []],
-    [focusLossExtension, lspExtension, reviewExtension, saveExtension],
+    () => [
+      reviewExtension,
+      saveExtension,
+      focusLossExtension,
+      gitDiffExtension,
+      lspExtension ?? [],
+    ],
+    [focusLossExtension, gitDiffExtension, lspExtension, reviewExtension, saveExtension],
   );
+
+  const gitDiffBaseline = useGitDiffBaseline(environmentId, cwd, relativePath);
+  useEffect(() => {
+    if (editorView === null) return;
+    setGitDiffBaseline(
+      editorView,
+      gitDiffBaseline !== null &&
+        gitDiffBaseline.head.status === "ok" &&
+        gitDiffBaseline.head.oid !== null &&
+        gitDiffBaseline.head.contents !== null
+        ? {
+            headOid: gitDiffBaseline.head.oid,
+            headContents: gitDiffBaseline.head.contents,
+            indexOid: gitDiffBaseline.index.oid,
+            indexContents: gitDiffBaseline.index.contents,
+          }
+        : null,
+    );
+  }, [editorView, gitDiffBaseline]);
 
   useEffect(() => {
     if (editorView === null) return;

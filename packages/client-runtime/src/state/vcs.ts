@@ -13,7 +13,11 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { Atom } from "effect/unstable/reactivity";
 
-import { createEnvironmentRpcCommand, createEnvironmentSubscriptionAtomFamily } from "./runtime.ts";
+import {
+  createEnvironmentRpcCommand,
+  createEnvironmentRpcQueryAtomFamily,
+  createEnvironmentSubscriptionAtomFamily,
+} from "./runtime.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
@@ -175,6 +179,28 @@ export function createVcsEnvironmentAtoms<R, E>(
             },
           ),
         ),
+    }),
+    /**
+     * HEAD + index baseline blobs for one file, used by the editor's git diff
+     * gutter. The short stale time absorbs watcher/status refresh bursts; the
+     * client no-ops downstream when the returned oids are unchanged.
+     */
+    fileBaseline: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:vcs:file-baseline",
+      tag: WS_METHODS.vcsGetFileBaseline,
+      staleTimeMs: 3_000,
+      idleTtlMs: 60_000,
+    }),
+    /**
+     * Per-path git status for one workspace root, used by the file explorer's
+     * change decorations. Refreshed by the file watcher and the status stream,
+     * so the stale time only exists to collapse those bursts.
+     */
+    fileStatuses: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:vcs:file-statuses",
+      tag: WS_METHODS.vcsGetFileStatuses,
+      staleTimeMs: 3_000,
+      idleTtlMs: 60_000,
     }),
     pull: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:vcs:pull",

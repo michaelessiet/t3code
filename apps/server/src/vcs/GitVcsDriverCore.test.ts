@@ -318,6 +318,310 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
     );
   });
 
+  describe("file baselines", () => {
+    it.effect("returns HEAD contents for a tracked file with dirty working tree", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "README.md", "# dirty edit\n");
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const baseline = yield* driver.getFileBaseline({ cwd, relativePath: "README.md" });
+
+        assert.equal(baseline.repository, "ok");
+        assert.equal(baseline.head.status, "ok");
+        assert.equal(baseline.head.contents, "# test\n");
+        assert.isNotNull(baseline.head.oid);
+        // Nothing staged: the index blob matches HEAD.
+        assert.equal(baseline.index.status, "ok");
+        assert.equal(baseline.index.oid, baseline.head.oid);
+        assert.isNull(baseline.renamedFrom);
+      }),
+    );
+
+    it.effect("returns staged contents in the index blob", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "README.md", "# staged\n");
+        yield* git(cwd, ["add", "README.md"]);
+        yield* writeTextFile(cwd, "README.md", "# staged then edited\n");
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const baseline = yield* driver.getFileBaseline({ cwd, relativePath: "README.md" });
+
+        assert.equal(baseline.head.contents, "# test\n");
+        assert.equal(baseline.index.status, "ok");
+        assert.equal(baseline.index.contents, "# staged\n");
+        assert.notEqual(baseline.index.oid, baseline.head.oid);
+      }),
+    );
+
+    it.effect("reports untracked files as absent", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "new-file.ts", "export const value = 1;\n");
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const baseline = yield* driver.getFileBaseline({ cwd, relativePath: "new-file.ts" });
+
+        assert.equal(baseline.head.status, "absent");
+        assert.isNull(baseline.head.oid);
+        assert.equal(baseline.index.status, "absent");
+        assert.isNull(baseline.renamedFrom);
+      }),
+    );
+
+    it.effect("follows a staged rename to the original HEAD blob", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["mv", "README.md", "RENAMED.md"]);
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const baseline = yield* driver.getFileBaseline({ cwd, relativePath: "RENAMED.md" });
+
+        assert.equal(baseline.head.status, "ok");
+        assert.equal(baseline.head.contents, "# test\n");
+        assert.equal(baseline.renamedFrom, "README.md");
+      }),
+    );
+
+    it.effect("round-trips CRLF contents byte-exact", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const crlfContents = "line one\r\nline two\r\n";
+        yield* writeTextFile(cwd, "crlf.txt", crlfContents);
+        yield* git(cwd, ["add", "crlf.txt"]);
+        yield* git(cwd, ["commit", "-m", "add crlf file"]);
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const baseline = yield* driver.getFileBaseline({ cwd, relativePath: "crlf.txt" });
+
+        assert.equal(baseline.head.status, "ok");
+        assert.equal(baseline.head.contents, crlfContents);
+      }),
+    );
+
+    it.effect("reports binary blobs without contents", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const fileSystem = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+        yield* fileSystem.writeFile(
+          pathService.join(cwd, "blob.bin"),
+          new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02, 0x03]),
+        );
+        yield* git(cwd, ["add", "blob.bin"]);
+        yield* git(cwd, ["commit", "-m", "add binary"]);
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const baseline = yield* driver.getFileBaseline({ cwd, relativePath: "blob.bin" });
+
+        assert.equal(baseline.head.status, "binary");
+        assert.isNotNull(baseline.head.oid);
+        assert.isNull(baseline.head.contents);
+      }),
+    );
+
+    it.effect("refuses oversized blobs instead of truncating", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "big.txt", "x".repeat(2 * 1024 * 1024 + 1));
+        yield* git(cwd, ["add", "big.txt"]);
+        yield* git(cwd, ["commit", "-m", "add big file"]);
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const baseline = yield* driver.getFileBaseline({ cwd, relativePath: "big.txt" });
+
+        assert.equal(baseline.head.status, "too-large");
+        assert.isNotNull(baseline.head.oid);
+        assert.isNull(baseline.head.contents);
+      }),
+    );
+
+    it.effect("resolves paths from a subdirectory workspace root", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "packages/app/index.ts", "export const app = true;\n");
+        yield* git(cwd, ["add", "."]);
+        yield* git(cwd, ["commit", "-m", "add nested file"]);
+        const pathService = yield* Path.Path;
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const baseline = yield* driver.getFileBaseline({
+          cwd: pathService.join(cwd, "packages"),
+          relativePath: "app/index.ts",
+        });
+
+        assert.equal(baseline.head.status, "ok");
+        assert.equal(baseline.head.contents, "export const app = true;\n");
+      }),
+    );
+
+    it.effect("rejects paths that escape the workspace root", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const failure = yield* driver
+          .getFileBaseline({ cwd, relativePath: "../outside.txt" })
+          .pipe(Effect.flip);
+
+        assert.instanceOf(failure, GitCommandError);
+      }),
+    );
+  });
+
+  describe("file statuses", () => {
+    it.effect("classifies staged, unstaged, untracked and deleted paths", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "staged.ts", "export const staged = 1;\n");
+        yield* writeTextFile(cwd, "tracked.ts", "export const tracked = 1;\n");
+        yield* writeTextFile(cwd, "gone.ts", "export const gone = 1;\n");
+        yield* git(cwd, ["add", "."]);
+        yield* git(cwd, ["commit", "-m", "add fixtures"]);
+
+        // staged edit, unstaged edit, deletion, untracked addition.
+        yield* writeTextFile(cwd, "staged.ts", "export const staged = 2;\n");
+        yield* git(cwd, ["add", "staged.ts"]);
+        yield* writeTextFile(cwd, "tracked.ts", "export const tracked = 2;\n");
+        yield* git(cwd, ["rm", "gone.ts"]);
+        yield* writeTextFile(cwd, "brand-new.ts", "export const fresh = 1;\n");
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const result = yield* driver.getFileStatuses({ cwd });
+
+        assert.equal(result.repository, "ok");
+        assert.equal(result.truncated, false);
+        const byPath = new Map(result.entries.map((entry) => [entry.path, entry]));
+        assert.deepStrictEqual(byPath.get("staged.ts"), {
+          path: "staged.ts",
+          status: "modified",
+          staged: true,
+        });
+        assert.deepStrictEqual(byPath.get("tracked.ts"), {
+          path: "tracked.ts",
+          status: "modified",
+          staged: false,
+        });
+        assert.deepStrictEqual(byPath.get("gone.ts"), {
+          path: "gone.ts",
+          status: "deleted",
+          staged: true,
+        });
+        assert.deepStrictEqual(byPath.get("brand-new.ts"), {
+          path: "brand-new.ts",
+          status: "untracked",
+          staged: false,
+        });
+      }),
+    );
+
+    it.effect("reports a staged rename as renamed at the new path", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["mv", "README.md", "RENAMED.md"]);
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const result = yield* driver.getFileStatuses({ cwd });
+
+        assert.deepStrictEqual(
+          [...result.entries],
+          [{ path: "RENAMED.md", status: "renamed", staged: true }],
+        );
+      }),
+    );
+
+    it.effect("collapses untracked directories into a single trailing-slash entry", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "fresh/a.ts", "export const a = 1;\n");
+        yield* writeTextFile(cwd, "fresh/b.ts", "export const b = 1;\n");
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const result = yield* driver.getFileStatuses({ cwd });
+
+        assert.deepStrictEqual(
+          [...result.entries],
+          [{ path: "fresh/", status: "untracked", staged: false }],
+        );
+      }),
+    );
+
+    it.effect("returns paths relative to a subdirectory cwd and drops paths outside it", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "packages/app/index.ts", "export const app = true;\n");
+        yield* writeTextFile(cwd, "root.ts", "export const root = true;\n");
+        yield* git(cwd, ["add", "."]);
+        yield* git(cwd, ["commit", "-m", "add nested files"]);
+        yield* writeTextFile(cwd, "packages/app/index.ts", "export const app = false;\n");
+        yield* writeTextFile(cwd, "root.ts", "export const root = false;\n");
+        const pathService = yield* Path.Path;
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const result = yield* driver.getFileStatuses({
+          cwd: pathService.join(cwd, "packages"),
+        });
+
+        assert.deepStrictEqual(
+          [...result.entries],
+          [{ path: "app/index.ts", status: "modified", staged: false }],
+        );
+      }),
+    );
+
+    it.effect("reports unmerged paths as conflicted", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "conflict.txt", "base\n");
+        yield* git(cwd, ["add", "."]);
+        yield* git(cwd, ["commit", "-m", "add conflict base"]);
+        yield* git(cwd, ["checkout", "-b", "other"]);
+        yield* writeTextFile(cwd, "conflict.txt", "other side\n");
+        yield* git(cwd, ["commit", "-am", "other side"]);
+        yield* git(cwd, ["checkout", initialBranch]);
+        yield* writeTextFile(cwd, "conflict.txt", "this side\n");
+        yield* git(cwd, ["commit", "-am", "this side"]);
+        yield* git(cwd, ["merge", "other"]).pipe(Effect.ignore);
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const result = yield* driver.getFileStatuses({ cwd });
+
+        assert.deepStrictEqual(
+          [...result.entries],
+          [{ path: "conflict.txt", status: "conflicted", staged: false }],
+        );
+      }),
+    );
+
+    it.effect("reports a clean repository with no entries", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const result = yield* driver.getFileStatuses({ cwd });
+
+        assert.equal(result.repository, "ok");
+        assert.deepStrictEqual([...result.entries], []);
+      }),
+    );
+  });
+
   describe("repository status", () => {
     it.effect("reports non-repository directories without failing", () =>
       Effect.gen(function* () {

@@ -11,6 +11,10 @@ import {
   type VcsCreateRefResult,
   type VcsCreateWorktreeInput,
   type VcsCreateWorktreeResult,
+  type VcsFileBaselineInput,
+  type VcsFileBaselineResult,
+  type VcsFileStatusesInput,
+  type VcsFileStatusesResult,
   type VcsListRefsInput,
   type VcsListRefsResult,
   type GitManagerServiceError,
@@ -62,6 +66,12 @@ export class GitWorkflowService extends Context.Service<
     readonly listRefs: (
       input: VcsListRefsInput,
     ) => Effect.Effect<VcsListRefsResult, GitCommandError>;
+    readonly getFileBaseline: (
+      input: VcsFileBaselineInput,
+    ) => Effect.Effect<VcsFileBaselineResult, GitCommandError>;
+    readonly getFileStatuses: (
+      input: VcsFileStatusesInput,
+    ) => Effect.Effect<VcsFileStatusesResult, GitCommandError>;
     readonly createWorktree: (
       input: VcsCreateWorktreeInput,
     ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
@@ -127,6 +137,16 @@ function nonRepositoryListRefs(): VcsListRefsResult {
     hasPrimaryRemote: false,
     nextCursor: null,
     totalCount: 0,
+  };
+}
+
+function nonRepositoryFileBaseline(): VcsFileBaselineResult {
+  const absent = { status: "absent" as const, oid: null, contents: null };
+  return {
+    repository: "no-repository",
+    head: absent,
+    index: absent,
+    renamedFrom: null,
   };
 }
 
@@ -293,6 +313,26 @@ export const make = Effect.gen(function* () {
       detectGitRepositoryForCommand("GitWorkflowService.listRefs", input.cwd).pipe(
         Effect.flatMap((isGitRepository) =>
           isGitRepository ? git.listRefs(input) : Effect.succeed(nonRepositoryListRefs()),
+        ),
+      ),
+    getFileBaseline: (input) =>
+      detectGitRepositoryForCommand("GitWorkflowService.getFileBaseline", input.cwd).pipe(
+        Effect.flatMap((isGitRepository) =>
+          isGitRepository
+            ? git.getFileBaseline(input)
+            : Effect.succeed(nonRepositoryFileBaseline()),
+        ),
+      ),
+    getFileStatuses: (input) =>
+      detectGitRepositoryForCommand("GitWorkflowService.getFileStatuses", input.cwd).pipe(
+        Effect.flatMap((isGitRepository) =>
+          isGitRepository
+            ? git.getFileStatuses(input)
+            : Effect.succeed({
+                repository: "no-repository" as const,
+                entries: [],
+                truncated: false,
+              }),
         ),
       ),
     createWorktree: (input) =>
