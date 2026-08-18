@@ -152,10 +152,16 @@ export function createVcsEnvironmentAtoms<R, E>(
   const listRefsByEnvironment = Atom.family((environmentId: EnvironmentId) =>
     Atom.family((inputKey: string) => {
       const input = JSON.parse(inputKey) as VcsListRefsInput;
+      // Every subscribed list revalidates on an interval, so an idle grace
+      // keeps polling the server after the picker closes. Drop filtered and
+      // paginated lists (minted per keystroke and page) immediately; keep a
+      // short grace only for the unfiltered first page so reopening the
+      // picker stays warm.
+      const idleTtlMs = input.query === undefined && input.cursor === undefined ? 15_000 : 0;
       return runtime
         .atom(cachedVcsRefsChanges(environmentId, input))
         .pipe(
-          Atom.setIdleTTL(5 * 60_000),
+          Atom.setIdleTTL(idleTtlMs),
           Atom.withLabel(`environment-data:vcs:list-refs:${environmentId}:${inputKey}`),
         );
     }),
