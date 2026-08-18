@@ -19,6 +19,9 @@ export interface TerminalSessionState {
 
 export interface TerminalBufferState {
   readonly buffer: string;
+  /** UTF-8 size of `buffer`, tracked incrementally so output events only
+      encode the incoming chunk instead of the whole buffer per chunk. */
+  readonly bufferBytes: number;
   readonly status: TerminalSessionSnapshot["status"] | "closed";
   readonly error: string | null;
   readonly updatedAt: string | null;
@@ -46,6 +49,7 @@ export function selectRunningSubprocessTerminalIds(
 
 export const EMPTY_TERMINAL_BUFFER_STATE = Object.freeze<TerminalBufferState>({
   buffer: "",
+  bufferBytes: 0,
   status: "closed",
   error: null,
   updatedAt: null,
@@ -66,14 +70,17 @@ export const DEFAULT_MAX_TERMINAL_BUFFER_BYTES = 512 * 1024;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
-function trimBufferToBytes(buffer: string, maxBufferBytes: number): string {
+function trimBufferToBytes(
+  buffer: string,
+  maxBufferBytes: number,
+): { readonly buffer: string; readonly bufferBytes: number } {
   if (maxBufferBytes <= 0) {
-    return "";
+    return { buffer: "", bufferBytes: 0 };
   }
 
   const encoded = textEncoder.encode(buffer);
   if (encoded.byteLength <= maxBufferBytes) {
-    return buffer;
+    return { buffer, bufferBytes: encoded.byteLength };
   }
 
   let start = encoded.byteLength - maxBufferBytes;
@@ -85,7 +92,37 @@ function trimBufferToBytes(buffer: string, maxBufferBytes: number): string {
     start += 1;
   }
 
-  return textDecoder.decode(encoded.subarray(start));
+  return {
+    buffer: textDecoder.decode(encoded.subarray(start)),
+    bufferBytes: encoded.byteLength - start,
+  };
+}
+
+/** UTF-8 width of the code point at `index`, mirroring TextEncoder (lone
+    surrogates encode as U+FFFD, 3 bytes / 1 UTF-16 unit). */
+function utf8WidthAt(text: string, index: number): { bytes: number; units: number } {
+  const code = text.codePointAt(index) ?? 0;
+  if (code < 0x80) return { bytes: 1, units: 1 };
+  if (code < 0x800) return { bytes: 2, units: 1 };
+  if (code < 0x10000) return { bytes: 3, units: 1 };
+  return { bytes: 4, units: 2 };
+}
+
+/** Front-trims at least `dropBytes` UTF-8 bytes without encoding the whole
+    buffer: only the dropped prefix is walked, so appends stay O(chunk). */
+function dropLeadingUtf8Bytes(
+  buffer: string,
+  dropBytes: number,
+  totalBytes: number,
+): { readonly buffer: string; readonly bufferBytes: number } {
+  let index = 0;
+  let dropped = 0;
+  while (index < buffer.length && dropped < dropBytes) {
+    const width = utf8WidthAt(buffer, index);
+    dropped += width.bytes;
+    index += width.units;
+  }
+  return { buffer: buffer.slice(index), bufferBytes: totalBytes - dropped };
 }
 
 export function terminalBufferStateFromSnapshot(
@@ -93,7 +130,7 @@ export function terminalBufferStateFromSnapshot(
   maxBufferBytes: number,
 ): TerminalBufferState {
   return {
-    buffer: trimBufferToBytes(snapshot.history, maxBufferBytes),
+    ...trimBufferToBytes(snapshot.history, maxBufferBytes),
     status: snapshot.status,
     error: null,
     updatedAt: snapshot.updatedAt,
@@ -131,18 +168,29 @@ export function applyTerminalAttachStreamEvent(
     case "snapshot":
     case "restarted":
       return terminalBufferStateFromSnapshot(event.snapshot, maxBufferBytes);
-    case "output":
+    case "output": {
+      const chunkBytes = textEncoder.encode(event.data).byteLength;
+      const totalBytes = current.bufferBytes + chunkBytes;
+      const combined = `${current.buffer}${event.data}`;
+      const next =
+        maxBufferBytes <= 0
+          ? { buffer: "", bufferBytes: 0 }
+          : totalBytes <= maxBufferBytes
+            ? { buffer: combined, bufferBytes: totalBytes }
+            : dropLeadingUtf8Bytes(combined, totalBytes - maxBufferBytes, totalBytes);
       return {
         ...current,
-        buffer: trimBufferToBytes(`${current.buffer}${event.data}`, maxBufferBytes),
+        ...next,
         status: current.status === "closed" ? "running" : current.status,
         error: null,
         version: current.version + 1,
       };
+    }
     case "cleared":
       return {
         ...current,
         buffer: "",
+        bufferBytes: 0,
         error: null,
         version: current.version + 1,
       };

@@ -183,5 +183,27 @@ describe("terminal session reducers", () => {
     );
 
     expect(state.buffer).toBe("🙂");
+    expect(state.bufferBytes).toBe(4);
+  });
+
+  it("keeps incremental byte accounting exact across multibyte trims", () => {
+    const chunks = ["héllo ", "wörld🙂", "!", "ééééééé", "plain ascii tail"];
+    let state = EMPTY_TERMINAL_BUFFER_STATE;
+    for (const data of chunks) {
+      state = applyTerminalAttachStreamEvent(
+        state,
+        {
+          type: "output",
+          threadId: TARGET.threadId,
+          terminalId: TARGET.terminalId,
+          data,
+        },
+        16,
+      );
+      const encodedBytes = new TextEncoder().encode(state.buffer).byteLength;
+      expect(state.bufferBytes).toBe(encodedBytes);
+      expect(encodedBytes).toBeLessThanOrEqual(16);
+    }
+    expect(state.buffer).toBe("plain ascii tail");
   });
 });
