@@ -20,7 +20,16 @@ export interface LanguageServerConfig {
   readonly args: ReadonlyArray<string>;
   /** True when the binary ships with the app rather than user PATH. */
   readonly bundled: boolean;
+  /** Initialize handshake budget; unset means the LspClient default (30s). */
+  readonly initializeTimeoutMs?: number;
 }
+
+/**
+ * Initialize budget for user-configured servers. jdtls-class heavyweights
+ * (bundle cache creation, project import) legitimately take over 30s on a
+ * cold start, and custom servers are exactly where they arrive.
+ */
+export const CUSTOM_SERVER_INITIALIZE_TIMEOUT_MS = 120_000;
 
 const TYPESCRIPT_SERVER: LanguageServerConfig = {
   serverId: "typescript",
@@ -118,6 +127,7 @@ export function resolveRegistry(custom: ReadonlyArray<CustomLanguageServer>): Re
       command: entry.command,
       args: entry.args,
       bundled: false,
+      initializeTimeoutMs: CUSTOM_SERVER_INITIALIZE_TIMEOUT_MS,
     };
     servers.push(config);
     for (const extension of entry.extensions) {
