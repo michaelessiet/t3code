@@ -6,6 +6,73 @@ import * as Option from "effect/Option";
 import * as ProcessResourceMonitor from "./ProcessResourceMonitor.ts";
 
 describe("ProcessResourceMonitor", () => {
+  it.effect("samples densely only while history has been read recently", () =>
+    Effect.sync(() => {
+      const nowMs = DateTime.toEpochMillis(DateTime.makeUnsafe("2026-05-05T10:00:00.000Z"));
+
+      // Never consumed: sparse baseline cadence.
+      expect(ProcessResourceMonitor.currentSampleIntervalMs({ nowMs, lastReadAtMs: null })).toBe(
+        60_000,
+      );
+
+      // Read just now / recently: dense cadence.
+      expect(ProcessResourceMonitor.currentSampleIntervalMs({ nowMs, lastReadAtMs: nowMs })).toBe(
+        5_000,
+      );
+      expect(
+        ProcessResourceMonitor.currentSampleIntervalMs({
+          nowMs,
+          lastReadAtMs: nowMs - 2 * 60_000,
+        }),
+      ).toBe(5_000);
+
+      // Last read fell out of the active window: back to the sparse baseline.
+      expect(
+        ProcessResourceMonitor.currentSampleIntervalMs({
+          nowMs,
+          lastReadAtMs: nowMs - 2 * 60_000 - 1,
+        }),
+      ).toBe(60_000);
+    }),
+  );
+
+  it.effect("weights cpuSecondsApprox by each sample's interval", () =>
+    Effect.sync(() => {
+      const sampledAt = DateTime.makeUnsafe("2026-05-05T10:00:00.000Z");
+      const samples = ProcessResourceMonitor.collectMonitoredSamples({
+        serverPid: 100,
+        sampledAt,
+        sampledAtMs: DateTime.toEpochMillis(sampledAt),
+        intervalMs: 60_000,
+        rows: [
+          {
+            pid: 100,
+            ppid: 1,
+            pgid: 100,
+            status: "S",
+            cpuPercent: 10,
+            rssBytes: 1_000,
+            elapsed: "01:00",
+            command: "t3 server",
+          },
+        ],
+      });
+
+      const result = ProcessResourceMonitor.aggregateProcessResourceHistory({
+        samples,
+        readAt: sampledAt,
+        readAtMs: DateTime.toEpochMillis(sampledAt),
+        windowMs: 60_000,
+        bucketMs: 10_000,
+        lastFailure: null,
+      });
+
+      // One sample at 10% CPU covering a 60s idle interval → 6 CPU-seconds.
+      expect(result.totalCpuSecondsApprox).toBe(6);
+      expect(result.topProcesses[0]?.cpuSecondsApprox).toBe(6);
+    }),
+  );
+
   it.effect("samples the server root process and descendants", () =>
     Effect.sync(() => {
       const sampledAt = DateTime.makeUnsafe("2026-05-05T10:00:00.000Z");
@@ -13,6 +80,7 @@ describe("ProcessResourceMonitor", () => {
         serverPid: 100,
         sampledAt,
         sampledAtMs: DateTime.toEpochMillis(sampledAt),
+        intervalMs: 5_000,
         rows: [
           {
             pid: 100,
@@ -73,6 +141,7 @@ describe("ProcessResourceMonitor", () => {
           serverPid: 100,
           sampledAt: firstAt,
           sampledAtMs: DateTime.toEpochMillis(firstAt),
+          intervalMs: 5_000,
           rows: [
             {
               pid: 100,
@@ -90,6 +159,7 @@ describe("ProcessResourceMonitor", () => {
           serverPid: 100,
           sampledAt: secondAt,
           sampledAtMs: DateTime.toEpochMillis(secondAt),
+          intervalMs: 5_000,
           rows: [
             {
               pid: 100,
@@ -133,6 +203,7 @@ describe("ProcessResourceMonitor", () => {
           serverPid: 100,
           sampledAt: firstAt,
           sampledAtMs: DateTime.toEpochMillis(firstAt),
+          intervalMs: 5_000,
           rows: [
             {
               pid: 100,
@@ -150,6 +221,7 @@ describe("ProcessResourceMonitor", () => {
           serverPid: 100,
           sampledAt: secondAt,
           sampledAtMs: DateTime.toEpochMillis(secondAt),
+          intervalMs: 5_000,
           rows: [
             {
               pid: 100,
@@ -188,6 +260,7 @@ describe("ProcessResourceMonitor", () => {
         serverPid: 100,
         sampledAt,
         sampledAtMs: DateTime.toEpochMillis(sampledAt),
+        intervalMs: 5_000,
         rows: [
           {
             pid: 100,

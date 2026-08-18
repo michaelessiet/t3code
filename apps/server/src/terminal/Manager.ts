@@ -76,7 +76,7 @@ export {
 
 const DEFAULT_HISTORY_LINE_LIMIT = 5_000;
 const DEFAULT_PERSIST_DEBOUNCE_MS = 40;
-const DEFAULT_SUBPROCESS_POLL_INTERVAL_MS = 1_000;
+export const DEFAULT_SUBPROCESS_POLL_INTERVAL_MS = 3_000;
 const DEFAULT_PROCESS_KILL_GRACE_MS = 1_000;
 const DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS = 128;
 const DEFAULT_OPEN_COLS = 120;
@@ -840,6 +840,92 @@ const posixInspectSubprocess = Effect.fn("terminal.posixInspectSubprocess")(func
   };
 });
 
+/**
+ * Linux-only subprocess inspection via `/proc/<pid>/task/<tid>/children`
+ * (available since Linux 3.5). These are plain file reads, so a poll tick
+ * costs no process spawns at all — unlike the portable pgrep/ps path, which
+ * spawns 1-3 processes per live terminal per tick.
+ *
+ * Returns `Option.none()` when `/proc` is unavailable (or the terminal
+ * process is already gone) so the caller can fall back to pgrep/ps.
+ *
+ * Exported for tests.
+ */
+export const linuxInspectSubprocess = Effect.fn("terminal.linuxInspectSubprocess")(function* (
+  terminalPid: number,
+  platform: NodeJS.Platform,
+): Effect.fn.Return<Option.Option<TerminalSubprocessInspectResult>, never, FileSystem.FileSystem> {
+  const fileSystem = yield* FileSystem.FileSystem;
+
+  // Children forked by a non-main thread are listed on that thread's task
+  // entry, so union the children files across the whole task directory.
+  const listChildPids = (pid: number) =>
+    fileSystem.readDirectory(`/proc/${pid}/task`).pipe(
+      Effect.flatMap((taskIds) =>
+        Effect.forEach(taskIds, (taskId) =>
+          fileSystem
+            .readFileString(`/proc/${pid}/task/${taskId}/children`)
+            .pipe(Effect.orElseSucceed(() => "")),
+        ),
+      ),
+      Effect.map((contents) => {
+        const childPids: number[] = [];
+        const seen = new Set<number>();
+        for (const content of contents) {
+          for (const raw of content.trim().split(/\s+/g)) {
+            const childPid = Number(raw);
+            if (!Number.isInteger(childPid) || childPid <= 0 || seen.has(childPid)) continue;
+            seen.add(childPid);
+            childPids.push(childPid);
+          }
+        }
+        return childPids;
+      }),
+    );
+
+  const directChildren = yield* listChildPids(terminalPid).pipe(
+    Effect.map(Option.some),
+    Effect.orElseSucceed(() => Option.none<ReadonlyArray<number>>()),
+  );
+  if (Option.isNone(directChildren)) {
+    return Option.none();
+  }
+
+  const firstChildPid = directChildren.value[0];
+  if (firstChildPid === undefined) {
+    return Option.some({ hasRunningSubprocess: false, childCommand: null, processIds: [] });
+  }
+
+  const processIds = new Set<number>([terminalPid]);
+  const pending = [...directChildren.value];
+  while (pending.length > 0) {
+    const pid = pending.pop();
+    if (pid === undefined || processIds.has(pid)) continue;
+    processIds.add(pid);
+    const childPids = yield* listChildPids(pid).pipe(
+      Effect.orElseSucceed((): ReadonlyArray<number> => []),
+    );
+    pending.push(...childPids);
+  }
+
+  let rawComm = (yield* fileSystem
+    .readFileString(`/proc/${firstChildPid}/comm`)
+    .pipe(Effect.orElseSucceed(() => ""))).trim();
+  if (rawComm.length === 0) {
+    const cmdline = yield* fileSystem
+      .readFileString(`/proc/${firstChildPid}/cmdline`)
+      .pipe(Effect.orElseSucceed(() => ""));
+    rawComm = cmdline.split("\0")[0]?.trim() ?? "";
+  }
+
+  const normalized = rawComm.length > 0 ? normalizeChildCommandName(rawComm, platform) : null;
+  return Option.some({
+    hasRunningSubprocess: true,
+    childCommand: normalized ? truncateTerminalWireLabel(normalized) : null,
+    processIds: [...processIds],
+  });
+});
+
 function defaultSubprocessInspectorForPlatform(platform: NodeJS.Platform) {
   return Effect.fn("terminal.defaultSubprocessInspector")(function* (terminalPid: number) {
     if (!Number.isInteger(terminalPid) || terminalPid <= 0) {
@@ -847,6 +933,12 @@ function defaultSubprocessInspectorForPlatform(platform: NodeJS.Platform) {
     }
     if (platform === "win32") {
       return yield* windowsInspectSubprocess(terminalPid, platform);
+    }
+    if (platform === "linux") {
+      const result = yield* linuxInspectSubprocess(terminalPid, platform);
+      if (Option.isSome(result)) {
+        return result.value;
+      }
     }
     return yield* posixInspectSubprocess(terminalPid, platform);
   });
@@ -1234,6 +1326,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     ((terminalPid) =>
       defaultSubprocessInspectorForPlatform(platform)(terminalPid).pipe(
         Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
       ));
   const subprocessPollIntervalMs =
     options.subprocessPollIntervalMs ?? DEFAULT_SUBPROCESS_POLL_INTERVAL_MS;
@@ -2135,14 +2228,24 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     });
   });
 
-  const hasRunningSessions = readManagerState.pipe(
-    Effect.map((state) =>
-      [...state.sessions.values()].some((session) => session.status === "running"),
+  // Subprocess inspection exists to (1) render the "has running subprocess"
+  // label/flag that terminal metadata subscribers (sidebar and thread
+  // indicators) consume for every session, and (2) feed terminal attribution
+  // to the client-retained preview port scanner. Metadata subscriptions span
+  // all sessions, so inspection cannot be gated per attached terminal — but
+  // when no terminal event listener exists at all (no connected client is
+  // viewing anything), nothing consumes the results, so skip inspection
+  // entirely. A new subscriber picks up fresh results on the next tick.
+  const shouldPollSubprocessActivity = readManagerState.pipe(
+    Effect.map(
+      (state) =>
+        terminalEventListeners.size > 0 &&
+        [...state.sessions.values()].some((session) => session.status === "running"),
     ),
   );
 
   yield* Effect.forever(
-    hasRunningSessions.pipe(
+    shouldPollSubprocessActivity.pipe(
       Effect.flatMap((active) =>
         active
           ? pollSubprocessActivity().pipe(

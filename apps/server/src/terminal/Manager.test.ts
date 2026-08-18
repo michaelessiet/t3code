@@ -213,6 +213,7 @@ interface CreateManagerOptions {
   processKillGraceMs?: number;
   maxRetainedInactiveSessions?: number;
   ptyAdapter?: FakePtyAdapter;
+  subscribeEvents?: boolean;
 }
 
 interface ManagerFixture {
@@ -256,10 +257,12 @@ const createManager = (
           : {}),
       });
       const eventsRef = yield* Ref.make<ReadonlyArray<TerminalEvent>>([]);
-      const unsubscribe = yield* manager.subscribe((event) =>
-        Ref.update(eventsRef, (events) => [...events, event]),
-      );
-      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+      if (options.subscribeEvents !== false) {
+        const unsubscribe = yield* manager.subscribe((event) =>
+          Ref.update(eventsRef, (events) => [...events, event]),
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+      }
 
       return {
         baseDir,
@@ -950,6 +953,107 @@ it.layer(
         Effect.sync(() => checks > 0),
         "1200 millis",
       );
+    }),
+  );
+
+  it.effect("keeps the default subprocess poll cadence at 3s", () =>
+    Effect.sync(() => {
+      // Each poll tick can spawn 1-3 processes per live terminal on the
+      // pgrep/ps path, so the default cadence is intentionally coarse.
+      expect(TerminalManager.DEFAULT_SUBPROCESS_POLL_INTERVAL_MS).toBe(3_000);
+    }),
+  );
+
+  it.effect("skips subprocess polling while no terminal event listener is subscribed", () =>
+    Effect.gen(function* () {
+      let checks = 0;
+      const { manager } = yield* createManager(5, {
+        subprocessInspector: () => {
+          checks += 1;
+          return Effect.succeed({
+            hasRunningSubprocess: false,
+            childCommand: null,
+            processIds: [],
+          });
+        },
+        subprocessPollIntervalMs: 20,
+        subscribeEvents: false,
+      });
+
+      yield* manager.open(openInput());
+      yield* Effect.sleep("80 millis");
+      assert.equal(checks, 0);
+
+      const unsubscribe = yield* manager.subscribe(() => Effect.void);
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+      yield* waitFor(
+        Effect.sync(() => checks > 0),
+        "1200 millis",
+      );
+    }),
+  );
+
+  it.effect("inspects Linux subprocesses via /proc children files without spawning", () =>
+    Effect.gen(function* () {
+      const notFound = (method: string, path: string) =>
+        Effect.fail(
+          PlatformError.systemError({
+            _tag: "NotFound",
+            module: "FileSystem",
+            method,
+            pathOrDescriptor: path,
+          }),
+        );
+      const directories = new Map<string, ReadonlyArray<string>>([
+        ["/proc/500/task", ["500"]],
+        ["/proc/600/task", ["600", "601"]],
+        ["/proc/700/task", ["700"]],
+      ]);
+      const files = new Map<string, string>([
+        ["/proc/500/task/500/children", "600 "],
+        ["/proc/600/task/600/children", ""],
+        // Children forked from a non-main thread live on that thread's entry.
+        ["/proc/600/task/601/children", "700\n"],
+        ["/proc/700/task/700/children", ""],
+        ["/proc/600/comm", "vim\n"],
+      ]);
+      const fakeProcFileSystem = FileSystem.makeNoop({
+        readDirectory: (path) => {
+          const entries = directories.get(path);
+          return entries ? Effect.succeed([...entries]) : notFound("readDirectory", path);
+        },
+        readFileString: (path) => {
+          const content = files.get(path);
+          return content !== undefined ? Effect.succeed(content) : notFound("readFileString", path);
+        },
+      });
+
+      const inspect = (terminalPid: number) =>
+        TerminalManager.linuxInspectSubprocess(terminalPid, "linux").pipe(
+          Effect.provideService(FileSystem.FileSystem, fakeProcFileSystem),
+        );
+
+      const withChild = yield* inspect(500);
+      assert.isTrue(Option.isSome(withChild));
+      if (Option.isSome(withChild)) {
+        expect(withChild.value.hasRunningSubprocess).toBe(true);
+        expect(withChild.value.childCommand).toBe("vim");
+        expect([...withChild.value.processIds].toSorted((a, b) => a - b)).toEqual([500, 600, 700]);
+      }
+
+      const idle = yield* inspect(700);
+      assert.isTrue(Option.isSome(idle));
+      if (Option.isSome(idle)) {
+        expect(idle.value).toEqual({
+          hasRunningSubprocess: false,
+          childCommand: null,
+          processIds: [],
+        });
+      }
+
+      // Unknown pid: /proc read fails, so the caller must fall back to pgrep/ps.
+      const unavailable = yield* inspect(999);
+      assert.isTrue(Option.isNone(unavailable));
     }),
   );
 
