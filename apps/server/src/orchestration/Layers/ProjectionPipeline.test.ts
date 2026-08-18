@@ -3106,3 +3106,532 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-addi
     );
   },
 );
+
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-shell-summary-")))(
+  "OrchestrationProjectionPipeline",
+  (it) => {
+    it.effect("derives shell summary columns across every summary-refreshing event type", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-summary");
+
+        const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+          eventStore
+            .append(event)
+            .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+        const threadEventBase = (eventId: string, occurredAt: string) => ({
+          eventId: EventId.make(eventId),
+          aggregateKind: "thread" as const,
+          aggregateId: threadId,
+          occurredAt,
+          commandId: CommandId.make(`cmd-${eventId}`),
+          causationEventId: null,
+          correlationId: CorrelationId.make(`cmd-${eventId}`),
+          metadata: {},
+        });
+
+        const expectSummary = (
+          label: string,
+          expected: {
+            readonly latestUserMessageAt: string | null;
+            readonly pendingApprovalCount: number;
+            readonly pendingUserInputCount: number;
+            readonly hasActionableProposedPlan: number;
+          },
+        ) =>
+          Effect.gen(function* () {
+            const rows = yield* sql<{
+              readonly latestUserMessageAt: string | null;
+              readonly pendingApprovalCount: number;
+              readonly pendingUserInputCount: number;
+              readonly hasActionableProposedPlan: number;
+            }>`
+              SELECT
+                latest_user_message_at AS "latestUserMessageAt",
+                pending_approval_count AS "pendingApprovalCount",
+                pending_user_input_count AS "pendingUserInputCount",
+                has_actionable_proposed_plan AS "hasActionableProposedPlan"
+              FROM projection_threads
+              WHERE thread_id = ${threadId}
+            `;
+            assert.deepEqual(rows, [expected], label);
+          });
+
+        yield* appendAndProject({
+          type: "project.created",
+          eventId: EventId.make("evt-summary-project"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make("project-summary"),
+          occurredAt: "2026-03-01T10:00:00.000Z",
+          commandId: CommandId.make("cmd-summary-project"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-summary-project"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make("project-summary"),
+            title: "Project Summary",
+            workspaceRoot: "/tmp/project-summary",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-03-01T10:00:00.000Z",
+            updatedAt: "2026-03-01T10:00:00.000Z",
+          },
+        });
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-summary-thread", "2026-03-01T10:00:01.000Z"),
+          type: "thread.created",
+          payload: {
+            threadId,
+            projectId: ProjectId.make("project-summary"),
+            title: "Thread Summary",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: "2026-03-01T10:00:01.000Z",
+            updatedAt: "2026-03-01T10:00:01.000Z",
+          },
+        });
+
+        // User message → latest_user_message_at.
+        yield* appendAndProject({
+          ...threadEventBase("evt-summary-msg-user-1", "2026-03-01T10:00:02.000Z"),
+          type: "thread.message-sent",
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-summary-user-1"),
+            role: "user",
+            text: "first user message",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-03-01T10:00:02.000Z",
+            updatedAt: "2026-03-01T10:00:02.000Z",
+          },
+        });
+        yield* expectSummary("after first user message", {
+          latestUserMessageAt: "2026-03-01T10:00:02.000Z",
+          pendingApprovalCount: 0,
+          pendingUserInputCount: 0,
+          hasActionableProposedPlan: 0,
+        });
+
+        // Assistant messages must not move latest_user_message_at.
+        yield* appendAndProject({
+          ...threadEventBase("evt-summary-msg-assistant", "2026-03-01T10:00:03.000Z"),
+          type: "thread.message-sent",
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-summary-assistant"),
+            role: "assistant",
+            text: "streaming chunk",
+            turnId: null,
+            streaming: true,
+            createdAt: "2026-03-01T10:00:03.000Z",
+            updatedAt: "2026-03-01T10:00:03.000Z",
+          },
+        });
+        yield* expectSummary("after assistant message", {
+          latestUserMessageAt: "2026-03-01T10:00:02.000Z",
+          pendingApprovalCount: 0,
+          pendingUserInputCount: 0,
+          hasActionableProposedPlan: 0,
+        });
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-summary-msg-user-2", "2026-03-01T10:00:04.000Z"),
+          type: "thread.message-sent",
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-summary-user-2"),
+            role: "user",
+            text: "second user message",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-03-01T10:00:04.000Z",
+            updatedAt: "2026-03-01T10:00:04.000Z",
+          },
+        });
+        yield* expectSummary("after second user message", {
+          latestUserMessageAt: "2026-03-01T10:00:04.000Z",
+          pendingApprovalCount: 0,
+          pendingUserInputCount: 0,
+          hasActionableProposedPlan: 0,
+        });
+
+        // Pending approval + two pending user-input requests, one resolved.
+        yield* appendAndProject({
+          ...threadEventBase("evt-summary-approval", "2026-03-01T10:00:05.000Z"),
+          type: "thread.activity-appended",
+          payload: {
+            threadId,
+            activity: {
+              id: EventId.make("activity-summary-approval"),
+              tone: "approval",
+              kind: "approval.requested",
+              summary: "Command approval requested",
+              payload: { requestId: "summary-approval-1", requestKind: "command" },
+              turnId: null,
+              createdAt: "2026-03-01T10:00:05.000Z",
+            },
+          },
+        });
+        yield* appendAndProject({
+          ...threadEventBase("evt-summary-input-1", "2026-03-01T10:00:06.000Z"),
+          type: "thread.activity-appended",
+          payload: {
+            threadId,
+            activity: {
+              id: EventId.make("activity-summary-input-1"),
+              tone: "info",
+              kind: "user-input.requested",
+              summary: "User input requested",
+              payload: { requestId: "summary-input-1" },
+              turnId: null,
+              createdAt: "2026-03-01T10:00:06.000Z",
+            },
+          },
+        });
+        yield* appendAndProject({
+          ...threadEventBase("evt-summary-input-2", "2026-03-01T10:00:07.000Z"),
+          type: "thread.activity-appended",
+          payload: {
+            threadId,
+            activity: {
+              id: EventId.make("activity-summary-input-2"),
+              tone: "info",
+              kind: "user-input.requested",
+              summary: "User input requested",
+              payload: { requestId: "summary-input-2" },
+              turnId: null,
+              createdAt: "2026-03-01T10:00:07.000Z",
+            },
+          },
+        });
+        yield* expectSummary("after approval + two user-input requests", {
+          latestUserMessageAt: "2026-03-01T10:00:04.000Z",
+          pendingApprovalCount: 1,
+          pendingUserInputCount: 2,
+          hasActionableProposedPlan: 0,
+        });
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-summary-input-resolved", "2026-03-01T10:00:08.000Z"),
+          type: "thread.activity-appended",
+          payload: {
+            threadId,
+            activity: {
+              id: EventId.make("activity-summary-input-resolved"),
+              tone: "info",
+              kind: "user-input.resolved",
+              summary: "User input resolved",
+              payload: { requestId: "summary-input-1" },
+              turnId: null,
+              createdAt: "2026-03-01T10:00:08.000Z",
+            },
+          },
+        });
+        yield* expectSummary("after resolving one user-input request", {
+          latestUserMessageAt: "2026-03-01T10:00:04.000Z",
+          pendingApprovalCount: 1,
+          pendingUserInputCount: 1,
+          hasActionableProposedPlan: 0,
+        });
+
+        // Latest plan overall is unimplemented → actionable while latestTurnId
+        // is null.
+        yield* appendAndProject({
+          ...threadEventBase("evt-summary-plan-1", "2026-03-01T10:00:09.000Z"),
+          type: "thread.proposed-plan-upserted",
+          payload: {
+            threadId,
+            proposedPlan: {
+              id: "plan-summary-1",
+              turnId: TurnId.make("turn-summary-1"),
+              planMarkdown: "Plan one",
+              implementedAt: null,
+              implementationThreadId: null,
+              createdAt: "2026-03-01T10:00:09.000Z",
+              updatedAt: "2026-03-01T10:00:09.000Z",
+            },
+          },
+        });
+        yield* expectSummary("after first proposed plan", {
+          latestUserMessageAt: "2026-03-01T10:00:04.000Z",
+          pendingApprovalCount: 1,
+          pendingUserInputCount: 1,
+          hasActionableProposedPlan: 1,
+        });
+
+        // A newer, already-implemented plan supersedes it.
+        yield* appendAndProject({
+          ...threadEventBase("evt-summary-plan-2", "2026-03-01T10:00:10.000Z"),
+          type: "thread.proposed-plan-upserted",
+          payload: {
+            threadId,
+            proposedPlan: {
+              id: "plan-summary-2",
+              turnId: TurnId.make("turn-summary-2"),
+              planMarkdown: "Plan two",
+              implementedAt: "2026-03-01T10:00:10.000Z",
+              implementationThreadId: null,
+              createdAt: "2026-03-01T10:00:10.000Z",
+              updatedAt: "2026-03-01T10:00:10.000Z",
+            },
+          },
+        });
+        yield* expectSummary("after implemented second plan", {
+          latestUserMessageAt: "2026-03-01T10:00:04.000Z",
+          pendingApprovalCount: 1,
+          pendingUserInputCount: 1,
+          hasActionableProposedPlan: 0,
+        });
+
+        // session-set pins latestTurnId to turn-summary-2 whose latest plan is
+        // implemented → still not actionable.
+        yield* appendAndProject({
+          ...threadEventBase("evt-summary-session", "2026-03-01T10:00:11.000Z"),
+          type: "thread.session-set",
+          payload: {
+            threadId,
+            session: {
+              threadId,
+              status: "running",
+              providerName: "codex",
+              runtimeMode: "approval-required",
+              activeTurnId: TurnId.make("turn-summary-2"),
+              lastError: null,
+              updatedAt: "2026-03-01T10:00:11.000Z",
+            },
+          },
+        });
+        yield* expectSummary("after thread.session-set", {
+          latestUserMessageAt: "2026-03-01T10:00:04.000Z",
+          pendingApprovalCount: 1,
+          pendingUserInputCount: 1,
+          hasActionableProposedPlan: 0,
+        });
+
+        // turn-diff-completed moves latestTurnId to turn-summary-1 whose plan
+        // is unimplemented → actionable again.
+        yield* appendAndProject({
+          ...threadEventBase("evt-summary-turn-diff", "2026-03-01T10:00:12.000Z"),
+          type: "thread.turn-diff-completed",
+          payload: {
+            threadId,
+            turnId: TurnId.make("turn-summary-1"),
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make("refs/t3/checkpoints/thread-summary/turn/1"),
+            status: "ready",
+            files: [],
+            assistantMessageId: null,
+            completedAt: "2026-03-01T10:00:12.000Z",
+          },
+        });
+        yield* expectSummary("after thread.turn-diff-completed", {
+          latestUserMessageAt: "2026-03-01T10:00:04.000Z",
+          pendingApprovalCount: 1,
+          pendingUserInputCount: 1,
+          hasActionableProposedPlan: 1,
+        });
+
+        // Resolving the approval clears pending_approval_count.
+        yield* appendAndProject({
+          ...threadEventBase("evt-summary-approval-resolved", "2026-03-01T10:00:13.000Z"),
+          type: "thread.activity-appended",
+          payload: {
+            threadId,
+            activity: {
+              id: EventId.make("activity-summary-approval-resolved"),
+              tone: "approval",
+              kind: "approval.resolved",
+              summary: "Command approval resolved",
+              payload: { requestId: "summary-approval-1", decision: "accept" },
+              turnId: null,
+              createdAt: "2026-03-01T10:00:13.000Z",
+            },
+          },
+        });
+        yield* expectSummary("after resolving the approval", {
+          latestUserMessageAt: "2026-03-01T10:00:04.000Z",
+          pendingApprovalCount: 0,
+          pendingUserInputCount: 1,
+          hasActionableProposedPlan: 1,
+        });
+      }),
+    );
+
+    it.effect("rolls back all projector writes and cursors together when one projector fails", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-atomic");
+
+        const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+          eventStore
+            .append(event)
+            .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+        yield* appendAndProject({
+          type: "project.created",
+          eventId: EventId.make("evt-atomic-project"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make("project-atomic"),
+          occurredAt: "2026-03-02T10:00:00.000Z",
+          commandId: CommandId.make("cmd-atomic-project"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-atomic-project"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make("project-atomic"),
+            title: "Project Atomic",
+            workspaceRoot: "/tmp/project-atomic",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-03-02T10:00:00.000Z",
+            updatedAt: "2026-03-02T10:00:00.000Z",
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.created",
+          eventId: EventId.make("evt-atomic-thread"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-03-02T10:00:01.000Z",
+          commandId: CommandId.make("cmd-atomic-thread"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-atomic-thread"),
+          metadata: {},
+          payload: {
+            threadId,
+            projectId: ProjectId.make("project-atomic"),
+            title: "Thread Atomic",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: "2026-03-02T10:00:01.000Z",
+            updatedAt: "2026-03-02T10:00:01.000Z",
+          },
+        });
+
+        const readCursors = () =>
+          sql<{ readonly projector: string; readonly lastAppliedSequence: number }>`
+            SELECT
+              projector,
+              last_applied_sequence AS "lastAppliedSequence"
+            FROM projection_state
+            ORDER BY projector ASC
+          `;
+
+        const cursorsBeforeFailure = yield* readCursors();
+        assert.equal(
+          cursorsBeforeFailure.length,
+          Object.keys(ORCHESTRATION_PROJECTOR_NAMES).length,
+        );
+
+        // Fail the pending-approvals projector, which runs AFTER the
+        // thread-activities projector for the same event.
+        yield* sql`
+          CREATE TRIGGER fail_pending_approvals_insert
+          BEFORE INSERT ON projection_pending_approvals
+          BEGIN
+            SELECT RAISE(ABORT, 'forced-pending-approvals-failure');
+          END;
+        `;
+
+        const failingEvent = yield* eventStore.append({
+          type: "thread.activity-appended",
+          eventId: EventId.make("evt-atomic-activity"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-03-02T10:00:02.000Z",
+          commandId: CommandId.make("cmd-atomic-activity"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-atomic-activity"),
+          metadata: {},
+          payload: {
+            threadId,
+            activity: {
+              id: EventId.make("activity-atomic-approval"),
+              tone: "approval",
+              kind: "approval.requested",
+              summary: "Command approval requested",
+              payload: { requestId: "atomic-approval-1", requestKind: "command" },
+              turnId: null,
+              createdAt: "2026-03-02T10:00:02.000Z",
+            },
+          },
+        });
+
+        const result = yield* Effect.result(projectionPipeline.projectEvent(failingEvent));
+        assert.equal(result._tag, "Failure");
+
+        // All-or-nothing: the activity row written by the earlier
+        // thread-activities projector must have rolled back with the failing
+        // pending-approvals projector, and no cursor may have advanced.
+        const activityRowsAfterFailure = yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS "count"
+          FROM projection_thread_activities
+          WHERE activity_id = 'activity-atomic-approval'
+        `;
+        assert.equal(activityRowsAfterFailure[0]?.count ?? -1, 0);
+
+        const approvalRowsAfterFailure = yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS "count"
+          FROM projection_pending_approvals
+          WHERE request_id = 'atomic-approval-1'
+        `;
+        assert.equal(approvalRowsAfterFailure[0]?.count ?? -1, 0);
+
+        assert.deepEqual(yield* readCursors(), cursorsBeforeFailure);
+
+        // Boot-time catch-up converges every projector once the fault clears.
+        yield* sql`DROP TRIGGER IF EXISTS fail_pending_approvals_insert`;
+        yield* projectionPipeline.bootstrap;
+
+        const cursorsAfterRecovery = yield* readCursors();
+        assert.equal(cursorsAfterRecovery.length, cursorsBeforeFailure.length);
+        for (const row of cursorsAfterRecovery) {
+          assert.equal(row.lastAppliedSequence, failingEvent.sequence);
+        }
+
+        const activityRowsAfterRecovery = yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS "count"
+          FROM projection_thread_activities
+          WHERE activity_id = 'activity-atomic-approval'
+        `;
+        assert.equal(activityRowsAfterRecovery[0]?.count ?? -1, 1);
+
+        const approvalRowsAfterRecovery = yield* sql<{
+          readonly status: string;
+        }>`
+          SELECT status
+          FROM projection_pending_approvals
+          WHERE request_id = 'atomic-approval-1'
+        `;
+        assert.deepEqual(approvalRowsAfterRecovery, [{ status: "pending" }]);
+
+        const threadRows = yield* sql<{ readonly pendingApprovalCount: number }>`
+          SELECT pending_approval_count AS "pendingApprovalCount"
+          FROM projection_threads
+          WHERE thread_id = ${threadId}
+        `;
+        assert.deepEqual(threadRows, [{ pendingApprovalCount: 1 }]);
+      }),
+    );
+  },
+);

@@ -130,8 +130,31 @@ function isStalePendingApprovalFailureDetail(detail: string | null): boolean {
   );
 }
 
+/**
+ * The only activity columns the pending-user-input derivation needs. Kept
+ * narrow so the hot-path shell-summary refresh can hydrate just these fields
+ * (for just the user-input activity kinds) instead of full activity rows.
+ */
+interface ShellSummaryActivityInput {
+  readonly activityId: string;
+  readonly kind: string;
+  readonly payload: unknown;
+  readonly createdAt: string;
+}
+
+/**
+ * Activity kinds that can affect derivePendingUserInputCountFromActivities.
+ * Every other activity kind is ignored by the derivation, so the shell-summary
+ * refresh only hydrates rows of these kinds.
+ */
+const PENDING_USER_INPUT_ACTIVITY_KINDS = [
+  "user-input.requested",
+  "user-input.resolved",
+  "provider.user-input.respond.failed",
+] as const;
+
 function derivePendingUserInputCountFromActivities(
-  activities: ReadonlyArray<ProjectionThreadActivity>,
+  activities: ReadonlyArray<ShellSummaryActivityInput>,
 ): number {
   const openRequestIds = new Set<string>();
   const ordered = [...activities].toSorted(
@@ -176,16 +199,43 @@ function derivePendingUserInputCountFromActivities(
   return openRequestIds.size;
 }
 
+/**
+ * Parse a raw projection_thread_activities.payload_json column value. An
+ * unparseable payload yields null, which the pending-user-input derivation
+ * skips (it requires a string requestId on the payload).
+ */
+function parseActivityPayloadJson(payloadJson: string | null): unknown {
+  if (payloadJson === null) {
+    return null;
+  }
+  try {
+    return JSON.parse(payloadJson);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The only proposed-plan columns the actionable-plan derivation needs. Kept
+ * narrow so the hot-path shell-summary refresh avoids hydrating plan bodies.
+ */
+interface ShellSummaryProposedPlanInput {
+  readonly planId: string;
+  readonly turnId: string | null;
+  readonly implementedAt: string | null;
+  readonly updatedAt: string;
+}
+
 function deriveHasActionableProposedPlan(input: {
   readonly latestTurnId: string | null;
-  readonly proposedPlans: ReadonlyArray<ProjectionThreadProposedPlan>;
+  readonly proposedPlans: ReadonlyArray<ShellSummaryProposedPlanInput>;
 }): boolean {
   const sorted = [...input.proposedPlans].toSorted(
     (left, right) =>
       left.updatedAt.localeCompare(right.updatedAt) || left.planId.localeCompare(right.planId),
   );
 
-  let latestForTurn: ProjectionThreadProposedPlan | null = null;
+  let latestForTurn: ShellSummaryProposedPlanInput | null = null;
   if (input.latestTurnId !== null) {
     for (let index = sorted.length - 1; index >= 0; index -= 1) {
       const plan = sorted[index];
@@ -555,30 +605,73 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         return;
       }
 
-      const [messages, proposedPlans, activities, pendingApprovals] = yield* Effect.all([
-        projectionThreadMessageRepository.listByThreadId({ threadId }),
-        projectionThreadProposedPlanRepository.listByThreadId({ threadId }),
-        projectionThreadActivityRepository.listByThreadId({ threadId }),
-        projectionPendingApprovalRepository.listByThreadId({ threadId }),
-      ]);
+      // This runs on the streaming hot path (every thread.message-sent /
+      // activity-appended / session-set / turn-diff-completed event), so it
+      // must not hydrate full message/plan/activity/approval rows. Scalars are
+      // computed with narrow SQL; the two derivations that genuinely need row
+      // data (pending user input over activity payloads, actionable proposed
+      // plan) hydrate only the narrow columns — and, for activities, only the
+      // few user-input kinds — the derivations inspect.
+      const [latestUserMessageRows, pendingApprovalRows, userInputActivityRows, proposedPlanRows] =
+        yield* Effect.all([
+          sql<{ readonly latestUserMessageAt: string | null }>`
+            SELECT MAX(created_at) AS "latestUserMessageAt"
+            FROM projection_thread_messages
+            WHERE thread_id = ${threadId} AND role = 'user'
+          `,
+          sql<{ readonly pendingApprovalCount: number }>`
+            SELECT COUNT(*) AS "pendingApprovalCount"
+            FROM projection_pending_approvals
+            WHERE thread_id = ${threadId} AND status = 'pending'
+          `,
+          sql<{
+            readonly activityId: string;
+            readonly kind: string;
+            readonly payloadJson: string | null;
+            readonly createdAt: string;
+          }>`
+            SELECT
+              activity_id AS "activityId",
+              kind,
+              payload_json AS "payloadJson",
+              created_at AS "createdAt"
+            FROM projection_thread_activities
+            WHERE thread_id = ${threadId}
+            AND ${sql.in("kind", PENDING_USER_INPUT_ACTIVITY_KINDS)}
+          `,
+          sql<{
+            readonly planId: string;
+            readonly turnId: string | null;
+            readonly implementedAt: string | null;
+            readonly updatedAt: string;
+          }>`
+            SELECT
+              plan_id AS "planId",
+              turn_id AS "turnId",
+              implemented_at AS "implementedAt",
+              updated_at AS "updatedAt"
+            FROM projection_thread_proposed_plans
+            WHERE thread_id = ${threadId}
+          `,
+        ]).pipe(
+          Effect.mapError(
+            toPersistenceSqlError("ProjectionPipeline.refreshThreadShellSummary:query"),
+          ),
+        );
 
-      let latestUserMessageAt: string | null = null;
-      for (const message of messages) {
-        if (
-          message.role === "user" &&
-          (latestUserMessageAt === null || message.createdAt > latestUserMessageAt)
-        ) {
-          latestUserMessageAt = message.createdAt;
-        }
-      }
-
-      const pendingApprovalCount = pendingApprovals.filter(
-        (approval) => approval.status === "pending",
-      ).length;
-      const pendingUserInputCount = derivePendingUserInputCountFromActivities(activities);
+      const latestUserMessageAt = latestUserMessageRows[0]?.latestUserMessageAt ?? null;
+      const pendingApprovalCount = pendingApprovalRows[0]?.pendingApprovalCount ?? 0;
+      const pendingUserInputCount = derivePendingUserInputCountFromActivities(
+        userInputActivityRows.map((row) => ({
+          activityId: row.activityId,
+          kind: row.kind,
+          payload: parseActivityPayloadJson(row.payloadJson),
+          createdAt: row.createdAt,
+        })),
+      );
       const hasActionableProposedPlan = deriveHasActionableProposedPlan({
         latestTurnId: existingRow.value.latestTurnId,
-        proposedPlans,
+        proposedPlans: proposedPlanRows,
       });
 
       yield* projectionThreadRepository.upsert({
@@ -1580,6 +1673,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       },
     ];
 
+    // Boot-time catch-up path only: replays ONE projector from its own cursor
+    // with a per-event transaction, so a lagging projector can converge
+    // independently of the others. The live projectEvent path below instead
+    // runs all projectors for an event inside a single shared transaction.
     const runProjectorForEvent = Effect.fn("runProjectorForEvent")(function* (
       projector: ProjectorDefinition,
       event: OrchestrationEvent,
@@ -1629,9 +1726,62 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           ),
         );
 
+    // One multi-row upsert advancing every projector cursor to the event's
+    // sequence, instead of nine single-row upserts.
+    const upsertAllProjectorCursors = (event: OrchestrationEvent) =>
+      sql`
+        INSERT INTO projection_state ${sql.insert(
+          projectors.map((projector) => ({
+            projector: projector.name,
+            last_applied_sequence: event.sequence,
+            updated_at: event.occurredAt,
+          })),
+        )}
+        ON CONFLICT (projector)
+        DO UPDATE SET
+          last_applied_sequence = excluded.last_applied_sequence,
+          updated_at = excluded.updated_at
+      `;
+
+    // Live projection path: all projectors for an event run sequentially
+    // inside ONE shared transaction (a single savepoint when nested inside the
+    // command transaction) followed by one combined cursor write, instead of a
+    // savepoint + cursor upsert per projector.
+    //
+    // Failure semantics are all-or-nothing for the event: if any projector
+    // fails, every projection write and every cursor for the event rolls back
+    // together. This matches the previously observable behavior — projectEvent
+    // always runs inside the command transaction, so a projector failure
+    // already rolled back the entire command including earlier projectors'
+    // savepoints — while removing the window where cursors could diverge.
+    // Boot-time catch-up (bootstrapProjector above) still replays each
+    // projector independently from its own cursor, so per-projector cursors
+    // continue to converge after a crash.
     const projectEvent: OrchestrationProjectionPipelineShape["projectEvent"] = (event) =>
-      Effect.forEach(projectors, (projector) => runProjectorForEvent(projector, event), {
-        concurrency: 1,
+      Effect.gen(function* () {
+        const attachmentSideEffects: AttachmentSideEffects = {
+          deletedThreadIds: new Set<string>(),
+          prunedThreadRelativePaths: new Map<string, Set<string>>(),
+        };
+
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            for (const projector of projectors) {
+              yield* projector.apply(event, attachmentSideEffects);
+            }
+            yield* upsertAllProjectorCursors(event);
+          }),
+        );
+
+        yield* runAttachmentSideEffects(attachmentSideEffects).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("failed to apply projected attachment side-effects", {
+              sequence: event.sequence,
+              eventType: event.type,
+              cause,
+            }),
+          ),
+        );
       }).pipe(
         Effect.provideService(FileSystem.FileSystem, fileSystem),
         Effect.provideService(Path.Path, path),
