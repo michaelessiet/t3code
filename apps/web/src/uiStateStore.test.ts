@@ -9,6 +9,7 @@ import {
   PERSISTED_STATE_KEY,
   type PersistedUiState,
   persistState,
+  removeThreadUiState,
   reorderProjects,
   resolveProjectExpanded,
   setDefaultAdvertisedEndpointKey,
@@ -133,6 +134,31 @@ describe("uiStateStore pure functions", () => {
         "turn-1": true,
       },
     });
+  });
+
+  it("removes every per-thread record for a deleted thread", () => {
+    const threadKey = "environment-1:thread-1";
+    const otherThreadKey = "environment-1:thread-2";
+    const initialState = makeUiState({
+      threadLastVisitedAtById: {
+        [threadKey]: "2026-02-25T12:30:00.000Z",
+        [otherThreadKey]: "2026-02-25T12:31:00.000Z",
+      },
+      threadChangedFilesExpandedById: {
+        [threadKey]: { "turn-1": true },
+        [otherThreadKey]: { "turn-2": false },
+      },
+    });
+
+    const next = removeThreadUiState(initialState, threadKey);
+
+    expect(next.threadLastVisitedAtById).toEqual({
+      [otherThreadKey]: "2026-02-25T12:31:00.000Z",
+    });
+    expect(next.threadChangedFilesExpandedById).toEqual({
+      [otherThreadKey]: { "turn-2": false },
+    });
+    expect(removeThreadUiState(next, threadKey)).toBe(next);
   });
 
   it("stores the endpoint preference by stable key", () => {

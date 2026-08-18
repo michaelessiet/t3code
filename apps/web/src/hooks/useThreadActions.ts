@@ -1,5 +1,6 @@
 import {
   parseScopedThreadKey,
+  scopedThreadKey,
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
@@ -14,6 +15,11 @@ import { useCallback, useMemo, useRef } from "react";
 
 import { getFallbackThreadIdAfterDelete } from "../components/Sidebar.logic";
 import { useComposerDraftStore } from "../composerDraftStore";
+import { useDiffPanelStore } from "../diffPanelStore";
+import { useGitRootStore } from "../gitRootStore";
+import { usePreviewMiniPlayerStore } from "../previewMiniPlayerStore";
+import { removePreviewThread } from "../previewStateStore";
+import { useRightPanelStore } from "../rightPanelStore";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment } from "../state/threads";
 import { vcsEnvironment } from "../state/vcs";
@@ -28,6 +34,7 @@ import {
   readThreadShell,
 } from "../state/entities";
 import { useTerminalUiStateStore } from "../terminalUiStateStore";
+import { useUiStateStore } from "../uiStateStore";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
@@ -131,6 +138,11 @@ export function useThreadActions() {
     (store) => store.clearProjectDraftThreadById,
   );
   const clearTerminalUiState = useTerminalUiStateStore((state) => state.clearTerminalUiState);
+  const removeDiffPanelThread = useDiffPanelStore((store) => store.removeThread);
+  const removeRightPanelThread = useRightPanelStore((store) => store.removeThread);
+  const removePreviewMiniPlayerThread = usePreviewMiniPlayerStore((store) => store.removeThread);
+  const removeGitRootThread = useGitRootStore((store) => store.removeThread);
+  const removeThreadUiState = useUiStateStore((store) => store.removeThreadUiState);
   const router = useRouter();
   const handleNewThread = useNewThreadHandler();
   // Keep a ref so archiveThread can call handleNewThread without appearing in
@@ -139,6 +151,26 @@ export function useThreadActions() {
   // sidebar row via archiveThread → attemptArchiveThread.
   const handleNewThreadRef = useRef(handleNewThread);
   handleNewThreadRef.current = handleNewThread;
+
+  const removeThreadLocalUiState = useCallback(
+    (target: ScopedThreadRef) => {
+      clearTerminalUiState(target);
+      removePreviewThread(target);
+      removeDiffPanelThread(target);
+      removeRightPanelThread(target);
+      removePreviewMiniPlayerThread(target);
+      removeGitRootThread(target);
+      removeThreadUiState(scopedThreadKey(target));
+    },
+    [
+      clearTerminalUiState,
+      removeDiffPanelThread,
+      removeGitRootThread,
+      removePreviewMiniPlayerThread,
+      removeRightPanelThread,
+      removeThreadUiState,
+    ],
+  );
 
   const resolveThreadTarget = useCallback((target: ScopedThreadRef) => {
     const thread = readThreadShell(target);
@@ -225,6 +257,8 @@ export function useThreadActions() {
         });
         if (result._tag === "Success") {
           refreshArchivedThreadsForEnvironment(target.environmentId);
+          clearComposerDraftForThread(target);
+          removeThreadLocalUiState(target);
         }
         return result;
       }
@@ -313,7 +347,7 @@ export function useThreadActions() {
         scopeProjectRef(threadRef.environmentId, thread.projectId),
         threadRef,
       );
-      clearTerminalUiState(threadRef);
+      removeThreadLocalUiState(threadRef);
 
       if (shouldNavigateToFallback) {
         if (fallbackThreadId) {
@@ -399,11 +433,11 @@ export function useThreadActions() {
     [
       clearComposerDraftForThread,
       clearProjectDraftThreadById,
-      clearTerminalUiState,
       closeTerminal,
       deleteThreadMutation,
       getCurrentRouteThreadRef,
       refreshVcsStatus,
+      removeThreadLocalUiState,
       removeWorktree,
       router,
       resolveThreadTarget,

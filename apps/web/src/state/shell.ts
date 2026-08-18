@@ -8,6 +8,7 @@ import {
   createEnvironmentSnapshotAtom,
   createShellEnvironmentAtoms,
 } from "@t3tools/client-runtime/state/shell";
+import type { EnvironmentId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
@@ -46,3 +47,29 @@ export const allEnvironmentShellsBootstrappedAtom = Atom.make((get) => {
   }
   return true;
 }).pipe(Atom.withLabel("web-all-environment-shells-bootstrapped"));
+
+/** Environments whose shell stream has fully synchronized ("live"): their
+    snapshot thread list is authoritative for the whole environment. */
+export const liveShellEnvironmentIdsAtom = (() => {
+  let previous: ReadonlyArray<EnvironmentId> = [];
+  return Atom.make((get) => {
+    const catalog = AsyncResult.value(get(environmentCatalog.catalogAtom));
+    if (Option.isNone(catalog)) {
+      if (previous.length > 0) {
+        previous = [];
+      }
+      return previous;
+    }
+    const next = [...catalog.value.entries.keys()].filter(
+      (environmentId) => get(environmentShell.stateValueAtom(environmentId)).status === "live",
+    );
+    if (
+      next.length === previous.length &&
+      next.every((environmentId, index) => environmentId === previous[index])
+    ) {
+      return previous;
+    }
+    previous = next;
+    return next;
+  }).pipe(Atom.withLabel("web-live-shell-environment-ids"));
+})();

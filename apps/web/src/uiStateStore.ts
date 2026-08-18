@@ -293,6 +293,23 @@ export function setThreadChangedFilesExpanded(
   };
 }
 
+export function removeThreadUiState(state: UiState, threadId: string): UiState {
+  const hasLastVisitedAt = threadId in state.threadLastVisitedAtById;
+  const hasChangedFilesExpanded = threadId in state.threadChangedFilesExpandedById;
+  if (!hasLastVisitedAt && !hasChangedFilesExpanded) {
+    return state;
+  }
+  const { [threadId]: _removedVisitedAt, ...threadLastVisitedAtById } =
+    state.threadLastVisitedAtById;
+  const { [threadId]: _removedExpanded, ...threadChangedFilesExpandedById } =
+    state.threadChangedFilesExpandedById;
+  return {
+    ...state,
+    threadLastVisitedAtById,
+    threadChangedFilesExpandedById,
+  };
+}
+
 export function setDefaultAdvertisedEndpointKey(state: UiState, key: string | null): UiState {
   const nextKey = key && key.length > 0 ? key : null;
   if (state.defaultAdvertisedEndpointKey === nextKey) {
@@ -385,6 +402,7 @@ interface UiStateStore extends UiState {
   markThreadVisited: (threadId: string, visitedAt: string) => void;
   markThreadUnread: (threadId: string, latestTurnCompletedAt: string | null | undefined) => void;
   setThreadChangedFilesExpanded: (threadId: string, turnId: string, expanded: boolean) => void;
+  removeThreadUiState: (threadId: string) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setProjectExpanded: (projectIds: string | readonly string[], expanded: boolean) => void;
   reorderProjects: (
@@ -402,6 +420,7 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => markThreadUnread(state, threadId, latestTurnCompletedAt)),
   setThreadChangedFilesExpanded: (threadId, turnId, expanded) =>
     set((state) => setThreadChangedFilesExpanded(state, threadId, turnId, expanded)),
+  removeThreadUiState: (threadId) => set((state) => removeThreadUiState(state, threadId)),
   setDefaultAdvertisedEndpointKey: (key) =>
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
   setProjectExpanded: (projectIds, expanded) =>
