@@ -67,6 +67,7 @@ export function buildLocalDraftThread(
     modelSelection: fallbackModelSelection,
     runtimeMode: draftThread.runtimeMode,
     interactionMode: draftThread.interactionMode,
+    additionalRoots: [],
     session: null,
     messages: [],
     createdAt: draftThread.createdAt,

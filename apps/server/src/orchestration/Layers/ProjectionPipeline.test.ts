@@ -1,4 +1,5 @@
 import {
+  ApprovalRequestId,
   CheckpointRef,
   CommandId,
   CorrelationId,
@@ -2775,3 +2776,333 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
     }),
   );
 });
+
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-additional-roots-")))(
+  "OrchestrationProjectionPipeline",
+  (it) => {
+    it.effect("preserves thread additionalRoots across every thread-event upsert", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const now = "2026-01-01T00:00:00.000Z";
+        const threadId = ThreadId.make("thread-roots");
+        const turnId = TurnId.make("turn-roots-1");
+        const additionalRoots = [
+          { kind: "path" as const, path: "/tmp/extra-root" },
+          { kind: "project" as const, projectId: ProjectId.make("project-roots-attached") },
+        ];
+
+        const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+          eventStore
+            .append(event)
+            .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+        const expectRootsPreserved = (label: string) =>
+          Effect.gen(function* () {
+            const rows = yield* sql<{
+              readonly additionalRootsJson: string;
+            }>`
+              SELECT additional_roots_json AS "additionalRootsJson"
+              FROM projection_threads
+              WHERE thread_id = ${threadId}
+            `;
+            assert.equal(rows.length, 1, label);
+            // @effect-diagnostics-next-line preferSchemaOverJson:off
+            const parsedRoots = JSON.parse(rows[0]?.additionalRootsJson ?? "null");
+            assert.deepEqual(parsedRoots, additionalRoots, label);
+          });
+
+        yield* appendAndProject({
+          type: "project.created",
+          eventId: EventId.make("evt-roots-project"),
+          aggregateKind: "project",
+          aggregateId: ProjectId.make("project-roots"),
+          occurredAt: now,
+          commandId: CommandId.make("cmd-roots-project"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-roots-project"),
+          metadata: {},
+          payload: {
+            projectId: ProjectId.make("project-roots"),
+            title: "Project Roots",
+            workspaceRoot: "/tmp/project-roots",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+
+        yield* appendAndProject({
+          type: "thread.created",
+          eventId: EventId.make("evt-roots-created"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-roots-created"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-roots-created"),
+          metadata: {},
+          payload: {
+            threadId,
+            projectId: ProjectId.make("project-roots"),
+            title: "Thread Roots",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            additionalRoots,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* expectRootsPreserved("after thread.created");
+
+        const threadEventBase = (id: string, occurredAt: string) =>
+          ({
+            eventId: EventId.make(id),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt,
+            commandId: CommandId.make(`cmd-${id}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-${id}`),
+            metadata: {},
+          }) as const;
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-archived", "2026-01-01T00:00:01.000Z"),
+          type: "thread.archived",
+          payload: {
+            threadId,
+            archivedAt: "2026-01-01T00:00:01.000Z",
+            updatedAt: "2026-01-01T00:00:01.000Z",
+          },
+        });
+        yield* expectRootsPreserved("after thread.archived");
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-unarchived", "2026-01-01T00:00:02.000Z"),
+          type: "thread.unarchived",
+          payload: {
+            threadId,
+            updatedAt: "2026-01-01T00:00:02.000Z",
+          },
+        });
+        yield* expectRootsPreserved("after thread.unarchived");
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-settled", "2026-01-01T00:00:03.000Z"),
+          type: "thread.settled",
+          payload: {
+            threadId,
+            settledAt: "2026-01-01T00:00:03.000Z",
+            updatedAt: "2026-01-01T00:00:03.000Z",
+          },
+        });
+        yield* expectRootsPreserved("after thread.settled");
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-unsettled", "2026-01-01T00:00:04.000Z"),
+          type: "thread.unsettled",
+          payload: {
+            threadId,
+            reason: "user",
+            updatedAt: "2026-01-01T00:00:04.000Z",
+          },
+        });
+        yield* expectRootsPreserved("after thread.unsettled");
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-snoozed", "2026-01-01T00:00:05.000Z"),
+          type: "thread.snoozed",
+          payload: {
+            threadId,
+            snoozedUntil: "2026-01-02T00:00:00.000Z",
+            snoozedAt: "2026-01-01T00:00:05.000Z",
+            updatedAt: "2026-01-01T00:00:05.000Z",
+          },
+        });
+        yield* expectRootsPreserved("after thread.snoozed");
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-unsnoozed", "2026-01-01T00:00:06.000Z"),
+          type: "thread.unsnoozed",
+          payload: {
+            threadId,
+            reason: "user",
+            updatedAt: "2026-01-01T00:00:06.000Z",
+          },
+        });
+        yield* expectRootsPreserved("after thread.unsnoozed");
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-meta-updated", "2026-01-01T00:00:07.000Z"),
+          type: "thread.meta-updated",
+          payload: {
+            threadId,
+            title: "Thread Roots Renamed",
+            updatedAt: "2026-01-01T00:00:07.000Z",
+          },
+        });
+        yield* expectRootsPreserved("after thread.meta-updated without additionalRoots");
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-runtime-mode", "2026-01-01T00:00:08.000Z"),
+          type: "thread.runtime-mode-set",
+          payload: {
+            threadId,
+            runtimeMode: "approval-required",
+            updatedAt: "2026-01-01T00:00:08.000Z",
+          },
+        });
+        yield* expectRootsPreserved("after thread.runtime-mode-set");
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-interaction-mode", "2026-01-01T00:00:09.000Z"),
+          type: "thread.interaction-mode-set",
+          payload: {
+            threadId,
+            interactionMode: "plan",
+            updatedAt: "2026-01-01T00:00:09.000Z",
+          },
+        });
+        yield* expectRootsPreserved("after thread.interaction-mode-set");
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-message-sent", "2026-01-01T00:00:10.000Z"),
+          type: "thread.message-sent",
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-roots"),
+            role: "user",
+            text: "hello",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-01-01T00:00:10.000Z",
+            updatedAt: "2026-01-01T00:00:10.000Z",
+          },
+        });
+        yield* expectRootsPreserved("after thread.message-sent");
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-proposed-plan", "2026-01-01T00:00:11.000Z"),
+          type: "thread.proposed-plan-upserted",
+          payload: {
+            threadId,
+            proposedPlan: {
+              id: "plan-roots-1",
+              turnId: null,
+              planMarkdown: "Do the thing",
+              implementedAt: null,
+              implementationThreadId: null,
+              createdAt: "2026-01-01T00:00:11.000Z",
+              updatedAt: "2026-01-01T00:00:11.000Z",
+            },
+          },
+        });
+        yield* expectRootsPreserved("after thread.proposed-plan-upserted");
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-activity", "2026-01-01T00:00:12.000Z"),
+          type: "thread.activity-appended",
+          payload: {
+            threadId,
+            activity: {
+              id: EventId.make("activity-roots-1"),
+              tone: "info",
+              kind: "note",
+              summary: "Something happened",
+              payload: {},
+              turnId: null,
+              createdAt: "2026-01-01T00:00:12.000Z",
+            },
+          },
+        });
+        yield* expectRootsPreserved("after thread.activity-appended");
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-approval-response", "2026-01-01T00:00:13.000Z"),
+          type: "thread.approval-response-requested",
+          payload: {
+            threadId,
+            requestId: ApprovalRequestId.make("approval-roots-1"),
+            decision: "accept",
+            createdAt: "2026-01-01T00:00:13.000Z",
+          },
+        });
+        yield* expectRootsPreserved("after thread.approval-response-requested");
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-user-input-response", "2026-01-01T00:00:14.000Z"),
+          type: "thread.user-input-response-requested",
+          payload: {
+            threadId,
+            requestId: ApprovalRequestId.make("input-roots-1"),
+            answers: {},
+            createdAt: "2026-01-01T00:00:14.000Z",
+          },
+        });
+        yield* expectRootsPreserved("after thread.user-input-response-requested");
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-session-set", "2026-01-01T00:00:15.000Z"),
+          type: "thread.session-set",
+          payload: {
+            threadId,
+            session: {
+              threadId,
+              status: "running",
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: turnId,
+              lastError: null,
+              updatedAt: "2026-01-01T00:00:15.000Z",
+            },
+          },
+        });
+        yield* expectRootsPreserved("after thread.session-set");
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-turn-diff", "2026-01-01T00:00:16.000Z"),
+          type: "thread.turn-diff-completed",
+          payload: {
+            threadId,
+            turnId,
+            checkpointTurnCount: 1,
+            checkpointRef: CheckpointRef.make("refs/t3/checkpoints/thread-roots/turn/1"),
+            status: "ready",
+            files: [],
+            assistantMessageId: null,
+            completedAt: "2026-01-01T00:00:16.000Z",
+          },
+        });
+        yield* expectRootsPreserved("after thread.turn-diff-completed");
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-reverted", "2026-01-01T00:00:17.000Z"),
+          type: "thread.reverted",
+          payload: {
+            threadId,
+            turnCount: 0,
+          },
+        });
+        yield* expectRootsPreserved("after thread.reverted");
+
+        yield* appendAndProject({
+          ...threadEventBase("evt-roots-deleted", "2026-01-01T00:00:18.000Z"),
+          type: "thread.deleted",
+          payload: {
+            threadId,
+            deletedAt: "2026-01-01T00:00:18.000Z",
+          },
+        });
+        yield* expectRootsPreserved("after thread.deleted");
+      }),
+    );
+  },
+);

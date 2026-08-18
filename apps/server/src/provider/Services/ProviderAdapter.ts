@@ -25,11 +25,19 @@ import type * as Stream from "effect/Stream";
 
 export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
 
+export type ProviderAdditionalDirectoriesMode = "supported" | "unsupported";
+
 export interface ProviderAdapterCapabilities {
   /**
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+  /**
+   * Declares whether the provider can attach additional workspace
+   * directories to a session (multi-root threads). When unsupported the
+   * reactor degrades to a plain-text note in the turn input instead.
+   */
+  readonly additionalDirectories: ProviderAdditionalDirectoriesMode;
 }
 
 export interface ProviderThreadTurnSnapshot {

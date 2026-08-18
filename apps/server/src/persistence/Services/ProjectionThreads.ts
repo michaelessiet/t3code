@@ -15,6 +15,7 @@ import {
   RuntimeMode,
   ThreadId,
   TurnId,
+  WorkspaceRootRef,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -32,6 +33,7 @@ export const ProjectionThread = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
+  additionalRoots: Schema.Array(WorkspaceRootRef),
   latestTurnId: Schema.NullOr(TurnId),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,

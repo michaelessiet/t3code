@@ -82,6 +82,7 @@ const shellFor = (projectId: ProjectId, workspaceRoot: string): OrchestrationPro
   id: projectId,
   title: "t3code",
   workspaceRoot,
+  additionalRoots: [],
   repositoryIdentity: null,
   defaultModelSelection: null,
   scripts: [],

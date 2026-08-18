@@ -49,6 +49,7 @@ function makeThread(
     activities: [],
     checkpoints: [],
     session: null,
+    additionalRoots: [],
     ...input,
     settledOverride: input.settledOverride ?? null,
     settledAt: input.settledAt ?? null,

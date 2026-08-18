@@ -88,6 +88,7 @@ const THREAD_SHELL = {
   projectId: PROJECT_ID,
   title: "Thread",
   modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+  additionalRoots: [],
   runtimeMode: "full-access",
   interactionMode: "default",
   branch: null,
@@ -113,6 +114,7 @@ const SNAPSHOT: OrchestrationShellSnapshot = {
       id: PROJECT_ID,
       title: "Project",
       workspaceRoot: "/repo",
+      additionalRoots: [],
       repositoryIdentity: null,
       defaultModelSelection: null,
       scripts: [],
@@ -123,6 +125,7 @@ const SNAPSHOT: OrchestrationShellSnapshot = {
       id: OTHER_PROJECT_ID,
       title: "Other project",
       workspaceRoot: "/other-repo",
+      additionalRoots: [],
       repositoryIdentity: null,
       defaultModelSelection: null,
       scripts: [],
@@ -227,6 +230,39 @@ describe("environment entity projections", () => {
       worktreePath: "/repo/current-worktree",
     });
     expect(merged?.messages).toBe(messages);
+  });
+
+  it("takes workspace roots from the shell over a stale detail", () => {
+    const detail = {
+      ...THREAD_SHELL,
+      environmentId: ENVIRONMENT_ID,
+      additionalRoots: [],
+      resolvedAdditionalRoots: [],
+      deletedAt: null,
+      messages: [],
+      proposedPlans: [],
+      activities: [],
+      checkpoints: [],
+    } satisfies OrchestrationThread & { readonly environmentId: EnvironmentId };
+    const attachedRoot = { kind: "path", path: "/repos/frontend" } as const;
+    const shell = {
+      ...THREAD_SHELL,
+      environmentId: ENVIRONMENT_ID,
+      additionalRoots: [attachedRoot],
+      resolvedAdditionalRoots: [
+        {
+          ref: attachedRoot,
+          path: "/repos/frontend",
+          repositoryIdentity: null,
+          status: "ok" as const,
+        },
+      ],
+    };
+
+    const merged = mergeEnvironmentThread(detail, shell);
+
+    expect(merged?.additionalRoots).toEqual([attachedRoot]);
+    expect(merged?.resolvedAdditionalRoots).toEqual(shell.resolvedAdditionalRoots);
   });
 
   it("preserves untouched project and thread identities across unrelated shell updates", () => {

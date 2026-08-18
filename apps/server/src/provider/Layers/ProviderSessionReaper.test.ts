@@ -92,6 +92,8 @@ function makeReadModel(
       id: thread.id,
       projectId,
       title: `Thread ${thread.id}`,
+      additionalRoots: [],
+      resolvedAdditionalRoots: [],
       modelSelection: defaultModelSelection,
       interactionMode: "default" as const,
       runtimeMode: "full-access" as const,
@@ -159,7 +161,8 @@ describe("ProviderSessionReaper", () => {
       respondToUserInput: () => unsupported(),
       stopSession,
       listSessions: () => Effect.succeed([]),
-      getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
+      getCapabilities: () =>
+        Effect.succeed({ sessionModelSwitch: "in-session", additionalDirectories: "unsupported" }),
       getInstanceInfo: (instanceId) => {
         const driverKind = ProviderDriverKind.make(String(instanceId));
         return Effect.succeed({

@@ -82,6 +82,7 @@ import {
   rewriteMarkdownFileUriHref,
 } from "../markdown-links";
 import { resolveWorkspaceFilePath, useWorkspaceFilePathIndex } from "../workspaceFilePathIndex";
+import { useThreadRoots } from "../state/threadRoots";
 import { readLocalApi } from "../localApi";
 import { cn } from "../lib/utils";
 import { buildThreadRouteParams } from "../threadRoutes";
@@ -747,6 +748,9 @@ interface MarkdownFileLinkProps {
   iconPath: string;
   displayPath: string;
   workspaceRelativePath: string | null;
+  /** Non-null when the file lives in an attached (non-primary) workspace
+      root; the built-in editor is scoped to that root on open. */
+  rootPath: string | null;
   line?: number | undefined;
   endLine?: number | undefined;
   label: string;
@@ -1079,6 +1083,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   iconPath,
   displayPath,
   workspaceRelativePath,
+  rootPath,
   line,
   endLine,
   label,
@@ -1129,8 +1134,16 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       handleOpenInEditor();
       return;
     }
-    useRightPanelStore.getState().openFile(threadRef, workspaceRelativePath, line, endLine);
-  }, [endLine, handleOpenInEditor, line, threadRef, workspaceRelativePath]);
+    useRightPanelStore
+      .getState()
+      .openFile(
+        threadRef,
+        workspaceRelativePath,
+        line,
+        endLine,
+        rootPath !== null ? { rootPath } : undefined,
+      );
+  }, [endLine, handleOpenInEditor, line, rootPath, threadRef, workspaceRelativePath]);
 
   const handleOpenInBrowser = useCallback(() => {
     if (!onOpenInBrowser) {
@@ -1300,6 +1313,7 @@ function areMarkdownFileLinkPropsEqual(
     previous.iconPath === next.iconPath &&
     previous.displayPath === next.displayPath &&
     previous.workspaceRelativePath === next.workspaceRelativePath &&
+    previous.rootPath === next.rootPath &&
     previous.line === next.line &&
     previous.endLine === next.endLine &&
     previous.label === next.label &&
@@ -1330,6 +1344,9 @@ function ChatMarkdown({
     reportFailure: false,
   });
   const preparedConnection = usePreparedConnection(threadRef?.environmentId ?? null);
+  // Attached workspace roots let absolute-path links from other repos resolve
+  // to labeled, in-editor-openable targets instead of external-editor bounces.
+  const threadRoots = useThreadRoots(threadRef ?? null);
   const environmentId = useActiveEnvironmentId();
   const serverConfig = useAtomValue(serverEnvironment.configValueAtom(environmentId));
   const openInPreferredEditor = useOpenInPreferredEditor(
@@ -1372,13 +1389,13 @@ function ChatMarkdown({
     for (const href of extractMarkdownLinkHrefs(text)) {
       const normalizedHref = normalizeMarkdownLinkHrefKey(href);
       if (metaByHref.has(normalizedHref)) continue;
-      const meta = resolveMarkdownFileLinkMeta(normalizedHref, cwd);
+      const meta = resolveMarkdownFileLinkMeta(normalizedHref, cwd, threadRoots.all);
       if (meta) {
         metaByHref.set(normalizedHref, meta);
       }
     }
     return metaByHref;
-  }, [cwd, text]);
+  }, [cwd, text, threadRoots.all]);
   const fileLinkParentSuffixByPath = useMemo(() => {
     const filePaths = [...markdownFileLinkMetaByHref.values()].map((meta) => meta.filePath);
     return buildFileLinkParentSuffixByPath(filePaths);
@@ -1506,7 +1523,7 @@ function ChatMarkdown({
           : (markdownFileLinkMetaByHref.get(normalizedHref) ??
             (autolinkedPathText === null
               ? null
-              : resolveMarkdownFileLinkMeta(normalizedHref, cwd)));
+              : resolveMarkdownFileLinkMeta(normalizedHref, cwd, threadRoots.all)));
         if (!fileLinkMeta) {
           const faviconHost = resolveExternalWebLinkHost(href);
           const isSameDocumentLink = href?.startsWith("#") ?? false;
@@ -1596,6 +1613,7 @@ function ChatMarkdown({
             iconPath={fileLinkMeta.filePath}
             displayPath={fileLinkMeta.displayPath}
             workspaceRelativePath={fileLinkMeta.workspaceRelativePath}
+            rootPath={fileLinkMeta.rootPath}
             line={fileLinkMeta.line}
             endLine={fileLinkMeta.endLine}
             label={autolinkedPathText ?? labelParts.join(" · ")}
@@ -1670,6 +1688,7 @@ function ChatMarkdown({
       skills,
       text,
       threadRef,
+      threadRoots.all,
     ],
   );
 

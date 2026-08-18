@@ -44,6 +44,9 @@ export type RightPanelSurface =
       id: `file:${string}`;
       kind: "file";
       relativePath: string;
+      /** Absolute path of the workspace root the file belongs to; null means
+          the thread's primary root (also the pre-multi-root legacy shape). */
+      rootPath: string | null;
       revealLine: number | null;
       revealEndLine: number | null;
       revealRequestId: number;
@@ -52,10 +55,10 @@ export type RightPanelSurface =
   | { id: "graph"; kind: "graph" };
 
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
-// 9: added the `graph` surface. The migration below passes unrecognised
-// singleton surfaces through untouched, so the bump is only here to stop an
-// older build from choking on a `graph` entry a newer one persisted.
-const RIGHT_PANEL_STORAGE_VERSION = 9;
+// 10: file surfaces gained `rootPath` and root-qualified ids
+//     (`file:${rootPath ?? ""}:${relativePath}`); the migration rewrites old
+//     `file:${relativePath}` ids in place so open tabs survive the upgrade.
+const RIGHT_PANEL_STORAGE_VERSION = 10;
 
 export interface ThreadRightPanelState {
   isOpen: boolean;
@@ -68,7 +71,13 @@ interface RightPanelStoreState {
   open: (ref: ScopedThreadRef, kind: Exclude<RightPanelKind, "file" | "terminal">) => void;
   openBrowser: (ref: ScopedThreadRef, tabId: string | null) => void;
   openSearch: (ref: ScopedThreadRef) => void;
-  openFile: (ref: ScopedThreadRef, relativePath: string, line?: number, endLine?: number) => void;
+  openFile: (
+    ref: ScopedThreadRef,
+    relativePath: string,
+    line?: number,
+    endLine?: number,
+    options?: { readonly rootPath?: string | null },
+  ) => void;
   openTerminal: (ref: ScopedThreadRef, terminalId: string) => void;
   splitTerminal: (
     ref: ScopedThreadRef,
@@ -120,15 +129,20 @@ const browserSurface = (tabId: string | null): RightPanelSurface =>
     ? { id: `browser:${tabId}`, kind: "preview", resourceId: tabId }
     : { id: "browser:new", kind: "preview", resourceId: null };
 
+export const fileSurfaceId = (rootPath: string | null, relativePath: string): `file:${string}` =>
+  `file:${rootPath ?? ""}:${relativePath}`;
+
 const fileSurface = (
   relativePath: string,
+  rootPath: string | null,
   revealLine: number | null,
   revealEndLine: number | null,
   revealRequestId: number,
 ): RightPanelSurface => ({
-  id: `file:${relativePath}`,
+  id: fileSurfaceId(rootPath, relativePath),
   kind: "file",
   relativePath,
+  rootPath,
   revealLine,
   revealEndLine,
   revealRequestId,
@@ -190,6 +204,9 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
             ([threadKey, threadState]) => {
               const validThreadState =
                 threadState && typeof threadState === "object" ? threadState : null;
+              // Old file surface ids (`file:${relativePath}`) are rewritten to
+              // the root-qualified form; the remap keeps the active tab alive.
+              const idRemap = new Map<string, string>();
               const surfaces = Array.isArray(validThreadState?.surfaces)
                 ? validThreadState.surfaces.flatMap<RightPanelSurface>((surface) => {
                     if (surface.kind === "file") {
@@ -211,7 +228,17 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
                         surface.revealRequestId >= 0
                           ? surface.revealRequestId
                           : 0;
-                      return [{ ...surface, revealLine, revealEndLine, revealRequestId }];
+                      const rootPath =
+                        typeof surface.rootPath === "string" && surface.rootPath.length > 0
+                          ? surface.rootPath
+                          : null;
+                      const id = fileSurfaceId(rootPath, surface.relativePath);
+                      if (surface.id !== id) {
+                        idRemap.set(surface.id, id);
+                      }
+                      return [
+                        { ...surface, id, rootPath, revealLine, revealEndLine, revealRequestId },
+                      ];
                     }
                     if (surface.kind !== "terminal") return [surface];
                     if (
@@ -247,10 +274,13 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
                     ];
                   })
                 : [];
-              const activeSurfaceId = surfaces.some(
-                (surface) => surface.id === validThreadState?.activeSurfaceId,
-              )
-                ? (validThreadState?.activeSurfaceId ?? null)
+              const persistedActiveId = validThreadState?.activeSurfaceId ?? null;
+              const remappedActiveId =
+                persistedActiveId !== null
+                  ? (idRemap.get(persistedActiveId) ?? persistedActiveId)
+                  : null;
+              const activeSurfaceId = surfaces.some((surface) => surface.id === remappedActiveId)
+                ? remappedActiveId
                 : null;
               const isOpen =
                 typeof validThreadState?.isOpen === "boolean"
@@ -294,13 +324,14 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             upsertSurface(current, singletonSurface("search")),
           ),
         })),
-      openFile: (ref, relativePath, line, endLine) =>
+      openFile: (ref, relativePath, line, endLine, options) =>
         set((state) => ({
           byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
             const withoutStandaloneExplorer = current.surfaces.filter(
               (surface) => surface.kind !== "files",
             );
-            const surfaceId = `file:${relativePath}` as const;
+            const rootPath = options?.rootPath ?? null;
+            const surfaceId = fileSurfaceId(rootPath, relativePath);
             const existing = withoutStandaloneExplorer.find(
               (surface): surface is Extract<RightPanelSurface, { kind: "file" }> =>
                 surface.id === surfaceId && surface.kind === "file",
@@ -309,6 +340,7 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             const revealEndLine = normalizeRevealLine(endLine);
             const surface = fileSurface(
               relativePath,
+              rootPath,
               revealLine,
               // A range only makes sense below its start line.
               revealLine !== null && revealEndLine !== null && revealEndLine > revealLine

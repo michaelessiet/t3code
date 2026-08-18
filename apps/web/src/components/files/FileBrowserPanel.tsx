@@ -15,7 +15,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
+import { composerMentionFromTreePath } from "~/components/chat/composerMentionDrag";
 import {
   AtSign,
   ClipboardPaste,
@@ -56,6 +56,9 @@ interface FileBrowserPanelProps {
   cwd: string;
   projectName: string;
   threadRef: ScopedThreadRef;
+  /** Set to `cwd` when this panel browses an attached (non-primary) workspace
+      root; mentions from the tree then serialize as absolute paths. */
+  mentionRootPath?: string | null;
   /** File currently open in the editor, revealed (selected + scrolled to) in the tree. */
   openRelativePath: string | null;
   revealRequestId: number;
@@ -207,6 +210,7 @@ export default function FileBrowserPanel({
   cwd,
   projectName,
   threadRef,
+  mentionRootPath = null,
   openRelativePath,
   revealRequestId,
   onOpenFile,
@@ -294,21 +298,26 @@ export default function FileBrowserPanel({
 
   // Mention helpers, offered from the tree's context menu: the composer
   // understands the serialized file link, so both actions share it.
-  const copyMention = useCallback((path: string) => {
-    const relativePath = stripTrailingSlash(path);
-    void (async () => {
-      try {
-        await writeTextToClipboard(serializeComposerFileLink(relativePath));
-        toastManager.add({ type: "success", title: "Mention copied", description: relativePath });
-      } catch (error) {
-        toastManager.add({
-          type: "error",
-          title: "Failed to copy mention",
-          description: error instanceof Error ? error.message : "An error occurred.",
-        });
-      }
-    })();
-  }, []);
+  const copyMention = useCallback(
+    (path: string) => {
+      const relativePath = stripTrailingSlash(path);
+      const mention = composerMentionFromTreePath(relativePath, { rootPath: mentionRootPath });
+      if (mention === null) return;
+      void (async () => {
+        try {
+          await writeTextToClipboard(mention);
+          toastManager.add({ type: "success", title: "Mention copied", description: relativePath });
+        } catch (error) {
+          toastManager.add({
+            type: "error",
+            title: "Failed to copy mention",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          });
+        }
+      })();
+    },
+    [mentionRootPath],
+  );
 
   const addMentionToChat = useCallback(
     (path: string) => {
@@ -321,7 +330,10 @@ export default function FileBrowserPanel({
         });
         return;
       }
-      const mention = serializeComposerFileLink(stripTrailingSlash(path));
+      const mention = composerMentionFromTreePath(stripTrailingSlash(path), {
+        rootPath: mentionRootPath,
+      });
+      if (mention === null) return;
       const inserted = composer.insertTextAtEnd(`${mention} `, { ensureLeadingBoundary: true });
       if (!inserted) {
         toastManager.add({
@@ -331,17 +343,20 @@ export default function FileBrowserPanel({
         });
       }
     },
-    [composerRef],
+    [composerRef, mentionRootPath],
   );
 
   const treeModelRef = useRef<ReturnType<typeof useFileTree>["model"] | null>(null);
   const revealInProgressRef = useRef(false);
   const dragMention = useMemo(
     () =>
-      createFileTreeDragMentionController({
-        deselect: (path) => treeModelRef.current?.getItem(path)?.deselect(),
-      }),
-    [],
+      createFileTreeDragMentionController(
+        {
+          deselect: (path) => treeModelRef.current?.getItem(path)?.deselect(),
+        },
+        { mentionRootPath },
+      ),
+    [mentionRootPath],
   );
 
   const { model } = useFileTree({

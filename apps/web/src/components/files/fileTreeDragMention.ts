@@ -17,6 +17,12 @@ export interface FileTreeDragMentionHost {
   deselect(treePath: string): void;
 }
 
+export interface FileTreeDragMentionOptions {
+  /** Absolute path of the tree's workspace root when it is not the thread's
+      primary root; mentions then serialize as absolute paths. */
+  readonly mentionRootPath?: string | null;
+}
+
 export interface FileTreeDragMentionController {
   /**
    * True from the moment a row drag starts until it ends. The tree selects
@@ -46,6 +52,7 @@ const itemPathOf = (node: unknown): string | null => {
  */
 export function createFileTreeDragMentionController(
   host: FileTreeDragMentionHost,
+  options?: FileTreeDragMentionOptions,
 ): FileTreeDragMentionController {
   let selection: ReadonlyArray<string> = [];
   let draggedPaths: ReadonlyArray<string> = [];
@@ -74,7 +81,9 @@ export function createFileTreeDragMentionController(
       // part of the current selection drags the whole selection.
       const dragged = selection.includes(itemPath) ? selection : [itemPath];
       const mentions = dragged
-        .map((path) => composerMentionFromTreePath(path))
+        .map((path) =>
+          composerMentionFromTreePath(path, { rootPath: options?.mentionRootPath ?? null }),
+        )
         .filter((mention): mention is string => mention !== null);
       if (mentions.length === 0) {
         return;

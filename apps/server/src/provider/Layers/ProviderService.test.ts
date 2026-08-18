@@ -203,6 +203,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     provider,
     capabilities: {
       sessionModelSwitch: "in-session",
+      additionalDirectories: "unsupported",
     },
     startSession,
     sendTurn,
@@ -924,6 +925,44 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.equal(startPayload.threadId, session.threadId);
       }
       assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("listSessions echoes the requested additionalDirectories onto adapter sessions", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-roots");
+
+      // The fake adapter (like the real ones) stores its session without
+      // additionalDirectories; the service must overlay the requested set so
+      // the reactor's roots-changed restart predicate sees what was asked for.
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        additionalDirectories: ["/tmp/frontend"],
+        runtimeMode: "full-access",
+      });
+      const withRoots = (yield* provider.listSessions()).find(
+        (session) => session.threadId === threadId,
+      );
+      assert.deepEqual(withRoots?.additionalDirectories, ["/tmp/frontend"]);
+
+      // Restarting the session without additional directories clears the echo.
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      const withoutRoots = (yield* provider.listSessions()).find(
+        (session) => session.threadId === threadId,
+      );
+      assert.equal(withoutRoots?.additionalDirectories, undefined);
+
+      yield* provider.stopSession({ threadId });
     }),
   );
 

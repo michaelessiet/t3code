@@ -53,6 +53,10 @@ export function mergeEnvironmentThread(
     interactionMode: shell.interactionMode,
     branch: shell.branch,
     worktreePath: shell.worktreePath,
+    additionalRoots: shell.additionalRoots,
+    ...(shell.resolvedAdditionalRoots !== undefined
+      ? { resolvedAdditionalRoots: shell.resolvedAdditionalRoots }
+      : {}),
     latestTurn: shell.latestTurn,
     createdAt: shell.createdAt,
     updatedAt: shell.updatedAt,

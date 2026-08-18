@@ -27,6 +27,7 @@ function makeProject(id: string, title: string): EnvironmentProject {
     repositoryIdentity: null,
     defaultModelSelection: null,
     scripts: [],
+    additionalRoots: [],
     createdAt: "2026-06-01T00:00:00.000Z",
     updatedAt: "2026-06-01T00:00:00.000Z",
   };
@@ -54,6 +55,7 @@ function makeThread(id: string, projectId: ProjectId): EnvironmentThreadShell {
     hasPendingApprovals: false,
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
+    additionalRoots: [],
   };
 }
 

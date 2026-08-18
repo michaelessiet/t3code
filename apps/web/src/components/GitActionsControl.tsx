@@ -78,6 +78,9 @@ import {
   useVcsPullAction,
 } from "~/lib/sourceControlActions";
 import { useThread } from "~/state/entities";
+import { useThreadRoots } from "~/state/threadRoots";
+import { selectSelectedGitRootPath, useGitRootStore } from "~/gitRootStore";
+import { GitRootSwitcher } from "./GitRootSwitcher";
 import { useEnvironmentQuery } from "~/state/query";
 import { serverEnvironment } from "~/state/server";
 import { sourceControlEnvironment } from "~/state/sourceControl";
@@ -969,7 +972,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
 }
 
 export default function GitActionsControl({
-  gitCwd,
+  gitCwd: primaryGitCwd,
   activeThreadRef,
   draftId,
 }: GitActionsControlProps) {
@@ -977,6 +980,14 @@ export default function GitActionsControl({
     threadEnvironment.updateMetadata,
     "thread branch metadata update",
   );
+  const threadRoots = useThreadRoots(activeThreadRef, draftId);
+  const selectedGitRootPath = useGitRootStore((state) =>
+    selectSelectedGitRootPath(state.selectedRootPathByThreadKey, activeThreadRef, threadRoots.all),
+  );
+  // All git status/actions below run against the selected root; branch
+  // metadata sync stays gated to the primary root.
+  const gitCwd = selectedGitRootPath ?? primaryGitCwd;
+  const isPrimaryRootSelected = selectedGitRootPath === null;
   const activeEnvironmentId = activeThreadRef?.environmentId ?? null;
   const serverConfig = useAtomValue(serverEnvironment.configValueAtom(activeEnvironmentId));
   const openInPreferredEditor = useOpenInPreferredEditor(
@@ -1026,7 +1037,9 @@ export default function GitActionsControl({
 
   const persistThreadBranchSync = useCallback(
     (branch: string | null) => {
-      if (!activeThreadRef) {
+      // A thread's branch metadata tracks its primary repository only —
+      // never sync it from an attached root's git status.
+      if (!activeThreadRef || !isPrimaryRootSelected) {
         return;
       }
 
@@ -1060,6 +1073,7 @@ export default function GitActionsControl({
       activeServerThread,
       activeThreadRef,
       draftId,
+      isPrimaryRootSelected,
       setDraftThreadContext,
       updateThreadMetadata,
     ],
@@ -1633,6 +1647,7 @@ export default function GitActionsControl({
         threadRef: activeThreadRef,
         filePath,
         workspaceRoot: gitCwd,
+        roots: threadRoots.all,
         openFilesInExternalEditor: getClientSettings().openFilesInExternalEditor,
         openInEditor: (targetPath) => {
           void (async () => {
@@ -1653,7 +1668,7 @@ export default function GitActionsControl({
         },
       });
     },
-    [activeThreadRef, gitCwd, openInPreferredEditor, threadToastData],
+    [activeThreadRef, gitCwd, openInPreferredEditor, threadRoots.all, threadToastData],
   );
 
   const canPublishRepository = isRepo && gitStatusForActions !== null && !hasPrimaryRemote;
@@ -1662,6 +1677,16 @@ export default function GitActionsControl({
 
   return (
     <>
+      {activeEnvironmentId !== null && activeThreadRef !== null && threadRoots.all.length > 1 && (
+        <GitRootSwitcher
+          environmentId={activeEnvironmentId}
+          roots={threadRoots.all}
+          selectedRootPath={selectedGitRootPath}
+          onSelect={(rootPath) =>
+            useGitRootStore.getState().selectGitRoot(activeThreadRef, rootPath)
+          }
+        />
+      )}
       {!isRepo ? (
         <Button
           variant="outline"

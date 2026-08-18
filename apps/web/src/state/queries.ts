@@ -7,6 +7,7 @@ import { type VcsRefTarget } from "@t3tools/client-runtime/state/vcs";
 import type {
   EnvironmentId,
   OrchestrationThread,
+  ProjectEntry,
   ThreadId,
   VcsListRefsResult,
   VcsRef,
@@ -21,11 +22,13 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { orchestrationEnvironment } from "./orchestration";
 import { projectEnvironment } from "./projects";
 import { useEnvironmentQuery } from "./query";
+import type { ThreadRoot } from "./threadRoots";
 import { useEnvironmentThread } from "./threads";
 import { vcsEnvironment } from "./vcs";
 
 const COMPOSER_PATH_SEARCH_DEBOUNCE_MS = 120;
 const COMPOSER_PATH_SEARCH_LIMIT = 80;
+const MULTI_ROOT_COMPOSER_PATH_SEARCH_PER_ROOT_LIMIT = 30;
 const VCS_REF_LIST_LIMIT = 100;
 const EMPTY_REFS: ReadonlyArray<VcsRef> = [];
 const INITIAL_BRANCH_CURSORS = [undefined] as const;
@@ -198,6 +201,174 @@ export function useComposerPathSearch(target: ComposerPathSearchTarget) {
     isPending: normalizedTarget.query !== debouncedTarget.query || result.isPending,
     refresh: result.refresh,
   };
+}
+
+export interface MultiRootComposerPathSearchTarget {
+  readonly environmentId: EnvironmentId | null;
+  /** Effective thread roots, primary first (`ThreadRoots.all`). */
+  readonly roots: ReadonlyArray<ThreadRoot>;
+  readonly query: string | null;
+}
+
+export interface MultiRootComposerPathEntry {
+  readonly entry: ProjectEntry;
+  readonly root: ThreadRoot;
+}
+
+const EMPTY_THREAD_ROOTS: ReadonlyArray<ThreadRoot> = [];
+
+/**
+ * Reuse one array identity per root-path set. Callers often rebuild the roots
+ * array every render (or pass `[]` literals); feeding those identities into
+ * the atom-fan-out memos below would mint a fresh `Atom.make` per render and
+ * loop `useAtomValue` resubscriptions into a maximum-update-depth error.
+ * Labels/ordering are derived from the path set, so the key is sufficient.
+ */
+function useStableThreadRoots(
+  roots: ReadonlyArray<ThreadRoot>,
+  rootPathsKey: string,
+): ReadonlyArray<ThreadRoot> {
+  return useMemo(
+    () => (roots.length === 0 ? EMPTY_THREAD_ROOTS : roots),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rootPathsKey],
+  );
+}
+
+/**
+ * Multi-root variant of `useComposerPathSearch`: one `searchEntries` query per
+ * workspace root, merged in root order (primary first). With a single root it
+ * behaves like the single-cwd hook, including the request limit.
+ */
+export function useMultiRootComposerPathSearch(target: MultiRootComposerPathSearchTarget) {
+  const query = target.query?.trim() ?? "";
+  const rootPathsKey = target.roots.map((root) => root.path).join("\n");
+  const normalizedTarget = useMemo(
+    () => ({ environmentId: target.environmentId, rootPathsKey, query }),
+    [target.environmentId, rootPathsKey, query],
+  );
+  const debouncedTarget = useDebouncedValue(normalizedTarget, COMPOSER_PATH_SEARCH_DEBOUNCE_MS);
+  const stableRoots = useStableThreadRoots(target.roots, rootPathsKey);
+  // Only pair atoms with roots when the debounced key matches the live roots;
+  // during the debounce window the stale combination reports as pending.
+  const activeRoots =
+    debouncedTarget.environmentId !== null &&
+    debouncedTarget.query.length > 0 &&
+    debouncedTarget.rootPathsKey === rootPathsKey
+      ? stableRoots
+      : EMPTY_THREAD_ROOTS;
+  const perRootLimit =
+    activeRoots.length > 1
+      ? MULTI_ROOT_COMPOSER_PATH_SEARCH_PER_ROOT_LIMIT
+      : COMPOSER_PATH_SEARCH_LIMIT;
+  const searchAtoms = useMemo(
+    () =>
+      activeRoots.map((root) =>
+        projectEnvironment.searchEntries({
+          environmentId: debouncedTarget.environmentId!,
+          input: {
+            cwd: root.path,
+            query: debouncedTarget.query,
+            limit: perRootLimit,
+          },
+        }),
+      ),
+    [activeRoots, debouncedTarget.environmentId, debouncedTarget.query, perRootLimit],
+  );
+  const combinedAtom = useMemo(
+    () =>
+      Atom.make((get) => searchAtoms.map((atom) => get(atom))).pipe(
+        Atom.withLabel(
+          `web:composer-path-search-multi:${debouncedTarget.environmentId ?? "none"}:${searchAtoms.length}`,
+        ),
+      ),
+    [searchAtoms, debouncedTarget.environmentId],
+  );
+  const results = useAtomValue(combinedAtom);
+
+  const entries: Array<MultiRootComposerPathEntry> = [];
+  results.forEach((result, index) => {
+    const root = activeRoots[index];
+    if (root === undefined) return;
+    const value = Option.getOrNull(AsyncResult.value(result));
+    if (value === null) return;
+    for (const entry of value.entries) {
+      entries.push({ entry, root });
+    }
+  });
+  const failed = results.find((result) => result._tag === "Failure");
+  const error =
+    failed?._tag === "Failure"
+      ? (() => {
+          const cause = Cause.squash(failed.cause);
+          return cause instanceof Error && cause.message.trim().length > 0
+            ? cause.message
+            : "Failed to search files.";
+        })()
+      : null;
+  const refresh = useCallback(() => {
+    for (const atom of searchAtoms) {
+      appAtomRegistry.refresh(atom);
+    }
+  }, [searchAtoms]);
+
+  return {
+    entries,
+    error,
+    isPending:
+      normalizedTarget.query !== debouncedTarget.query ||
+      normalizedTarget.rootPathsKey !== debouncedTarget.rootPathsKey ||
+      results.some((result) => result.waiting),
+    refresh,
+  };
+}
+
+export interface MultiRootGitStatusSummary {
+  readonly root: ThreadRoot;
+  /** Null while the status subscription is still loading. */
+  readonly isRepo: boolean | null;
+  /** Null when loading or when the root is not a git repository. */
+  readonly changedFileCount: number | null;
+}
+
+/**
+ * Live working-tree summaries for every workspace root of a thread, one
+ * cached `vcsEnvironment.status` subscription per root. The atom fan-out is
+ * keyed on the root-path set, so unstable `roots` identities are safe.
+ */
+export function useMultiRootGitStatusSummaries(
+  environmentId: EnvironmentId | null,
+  roots: ReadonlyArray<ThreadRoot>,
+): ReadonlyArray<MultiRootGitStatusSummary> {
+  const stableRoots = useStableThreadRoots(roots, roots.map((root) => root.path).join("\n"));
+  const statusAtoms = useMemo(
+    () =>
+      environmentId === null
+        ? []
+        : stableRoots.map((root) =>
+            vcsEnvironment.status({ environmentId, input: { cwd: root.path } }),
+          ),
+    [environmentId, stableRoots],
+  );
+  const combinedAtom = useMemo(
+    () =>
+      Atom.make((get) => statusAtoms.map((atom) => get(atom))).pipe(
+        Atom.withLabel(
+          `web:multi-root-git-status:${environmentId ?? "none"}:${statusAtoms.length}`,
+        ),
+      ),
+    [statusAtoms, environmentId],
+  );
+  const results = useAtomValue(combinedAtom);
+  return stableRoots.map((root, index) => {
+    const result = results[index];
+    const value = result === undefined ? null : Option.getOrNull(AsyncResult.value(result));
+    return {
+      root,
+      isRepo: value?.isRepo ?? null,
+      changedFileCount: value === null || !value.isRepo ? null : value.workingTree.files.length,
+    };
+  });
 }
 
 export function useCheckpointDiff(

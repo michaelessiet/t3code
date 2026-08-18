@@ -38,6 +38,7 @@ const seedReadModel = Effect.gen(function* () {
       projectId: asProjectId("project-delete"),
       title: "Project Delete",
       workspaceRoot: "/tmp/project-delete",
+      additionalRoots: [],
       defaultModelSelection: null,
       scripts: [],
       createdAt: now,
@@ -60,6 +61,7 @@ const seedReadModel = Effect.gen(function* () {
       threadId: asThreadId("thread-delete-1"),
       projectId: asProjectId("project-delete"),
       title: "Thread Delete 1",
+      additionalRoots: [],
       modelSelection: {
         instanceId: ProviderInstanceId.make("codex"),
         model: "gpt-5-codex",
@@ -88,6 +90,7 @@ const seedReadModel = Effect.gen(function* () {
       threadId: asThreadId("thread-delete-2"),
       projectId: asProjectId("project-delete"),
       title: "Thread Delete 2",
+      additionalRoots: [],
       modelSelection: {
         instanceId: ProviderInstanceId.make("codex"),
         model: "gpt-5-codex",

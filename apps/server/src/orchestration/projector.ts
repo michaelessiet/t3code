@@ -210,6 +210,7 @@ export function projectEvent(
             id: payload.projectId,
             title: payload.title,
             workspaceRoot: payload.workspaceRoot,
+            additionalRoots: payload.additionalRoots,
             defaultModelSelection: payload.defaultModelSelection,
             scripts: payload.scripts,
             createdAt: payload.createdAt,
@@ -244,6 +245,9 @@ export function projectEvent(
                     ? { defaultModelSelection: payload.defaultModelSelection }
                     : {}),
                   ...(payload.scripts !== undefined ? { scripts: payload.scripts } : {}),
+                  ...(payload.additionalRoots !== undefined
+                    ? { additionalRoots: payload.additionalRoots }
+                    : {}),
                   updatedAt: payload.updatedAt,
                 }
               : project,
@@ -286,6 +290,7 @@ export function projectEvent(
             interactionMode: payload.interactionMode,
             branch: payload.branch,
             worktreePath: payload.worktreePath,
+            additionalRoots: payload.additionalRoots,
             latestTurn: null,
             createdAt: payload.createdAt,
             updatedAt: payload.updatedAt,
@@ -404,6 +409,9 @@ export function projectEvent(
               : {}),
             ...(payload.branch !== undefined ? { branch: payload.branch } : {}),
             ...(payload.worktreePath !== undefined ? { worktreePath: payload.worktreePath } : {}),
+            ...(payload.additionalRoots !== undefined
+              ? { additionalRoots: payload.additionalRoots }
+              : {}),
             updatedAt: payload.updatedAt,
           }),
         })),

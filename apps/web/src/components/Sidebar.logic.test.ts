@@ -1049,6 +1049,7 @@ function makeProject(overrides: Partial<Project> = {}): Project {
     title: "Project",
     workspaceRoot: "/tmp/project",
     repositoryIdentity: null,
+    additionalRoots: [],
     defaultModelSelection: {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5.4",
@@ -1067,6 +1068,7 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
     environmentId: localEnvironmentId,
     projectId: ProjectId.make("project-1"),
     title: "Thread",
+    additionalRoots: [],
     modelSelection: {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5.4",

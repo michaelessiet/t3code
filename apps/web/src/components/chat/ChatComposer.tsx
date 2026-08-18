@@ -66,7 +66,8 @@ import {
   insertInlineTerminalContextPlaceholder,
   removeInlineTerminalContextPlaceholder,
 } from "../../lib/terminalContext";
-import { useComposerPathSearch } from "../../lib/composerPathSearchState";
+import { useMultiRootComposerPathSearch } from "../../state/queries";
+import type { ThreadRoot } from "../../state/threadRoots";
 import { type ElementContextDraft } from "../../lib/elementContext";
 import { ComposerPendingElementContexts } from "./ComposerPendingElementContexts";
 import { ComposerPendingReviewComments } from "./ComposerPendingReviewComments";
@@ -579,6 +580,8 @@ export interface ChatComposerProps {
   keybindings: ResolvedKeybindingsConfig;
   terminalOpen: boolean;
   gitCwd: string | null;
+  /** Effective workspace roots (primary first); empty when unknown. */
+  threadRoots: ReadonlyArray<ThreadRoot>;
 
   // Refs the parent needs kept in sync
   promptRef: React.RefObject<string>;
@@ -669,6 +672,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     keybindings,
     terminalOpen,
     gitCwd,
+    threadRoots,
     promptRef,
     composerRef,
     composerImagesRef,
@@ -1019,9 +1023,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerTriggerKind = composerTrigger?.kind ?? null;
   const pathTriggerQuery = composerTrigger?.kind === "path" ? composerTrigger.query : "";
   const isPathTrigger = composerTriggerKind === "path";
-  const workspaceEntries = useComposerPathSearch({
+  // Fall back to the single git cwd when the thread's roots are not known
+  // (e.g. home-route composers without a resolved project).
+  const mentionRoots = useMemo<ReadonlyArray<ThreadRoot>>(
+    () =>
+      threadRoots.length > 0
+        ? threadRoots
+        : gitCwd !== null
+          ? [{ path: gitCwd, label: basenameOfPath(gitCwd), isPrimary: true, source: "primary" }]
+          : [],
+    [gitCwd, threadRoots],
+  );
+  const workspaceEntries = useMultiRootComposerPathSearch({
     environmentId,
-    cwd: isPathTrigger ? gitCwd : null,
+    roots: isPathTrigger ? mentionRoots : [],
     query: isPathTrigger ? pathTriggerQuery : null,
   });
   const threadShells = useThreadShells();
@@ -1086,14 +1101,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         });
     }
     if (composerTrigger.kind === "path") {
-      return workspaceEntries.entries.map((entry) => ({
-        id: `path:${entry.kind}:${entry.path}`,
-        type: "path",
-        path: entry.path,
-        pathKind: entry.kind,
-        label: basenameOfPath(entry.path),
-        description: entry.path.slice(0, Math.max(0, entry.path.lastIndexOf("/"))),
-      }));
+      const showRootLabels = mentionRoots.length > 1;
+      return workspaceEntries.entries.map(({ entry, root }) => {
+        const parentPath = entry.path.slice(0, Math.max(0, entry.path.lastIndexOf("/")));
+        return {
+          id: `path:${root.isPrimary ? "" : root.path}:${entry.kind}:${entry.path}`,
+          type: "path",
+          path: entry.path,
+          pathKind: entry.kind,
+          rootPath: root.isPrimary ? null : root.path,
+          label: basenameOfPath(entry.path),
+          description: showRootLabels
+            ? parentPath.length > 0
+              ? `${root.label} · ${parentPath}`
+              : root.label
+            : parentPath,
+        };
+      });
     }
     if (composerTrigger.kind === "slash-command") {
       const builtInSlashCommandItems = [
@@ -1156,6 +1180,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeThreadId,
     composerTrigger,
     environmentId,
+    mentionRoots.length,
     projects,
     selectedProvider,
     selectedProviderStatus,
@@ -1721,7 +1746,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       const { snapshot, trigger } = resolveActiveComposerTrigger();
       if (!trigger) return;
       if (item.type === "path") {
-        const replacement = `${serializeComposerFileLink(item.path)} `;
+        // Primary-root entries keep the legacy relative form; entries from
+        // attached roots serialize as absolute paths so every consumer
+        // (agent tools, link resolution) finds them without root context.
+        const mentionPath = item.rootPath === null ? item.path : `${item.rootPath}/${item.path}`;
+        const replacement = `${serializeComposerFileLink(mentionPath)} `;
         const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
           snapshot.value,
           trigger.rangeEnd,
