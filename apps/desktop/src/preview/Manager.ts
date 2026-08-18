@@ -547,6 +547,25 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         ),
       );
     });
+  // Recording encodes frames via MediaRecorder inside the main window's
+  // renderer (apps/web browserRecording.ts), which Chromium would throttle to
+  // ~1Hz while the window is hidden. Suspend throttling only while a
+  // recording consumer is active instead of disabling it for the app's
+  // whole lifetime.
+  const syncMainWindowBackgroundThrottling = Effect.fn(
+    "PreviewManager.syncMainWindowBackgroundThrottling",
+  )(function* () {
+    const mainWindow = yield* Ref.get(mainWindowRef);
+    if (Option.isNone(mainWindow) || mainWindow.value.isDestroyed()) return;
+    const sessions = yield* SynchronizedRef.get(frameCaptureSessionsRef);
+    const recordingActive = [...sessions.values()].some((session) =>
+      session.consumers.has("recording"),
+    );
+    yield* attempt({ operation: "syncMainWindowBackgroundThrottling" }, () => {
+      mainWindow.value.webContents.setBackgroundThrottling(!recordingActive);
+    }).pipe(Effect.ignore);
+  });
+
   const stopFrameCapture = Effect.fn("PreviewManager.stopFrameCapture")(function* (
     tabId: string,
     consumer: FrameCaptureConsumer,
@@ -576,6 +595,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     if (captureScope) {
       yield* Scope.close(captureScope, Exit.void).pipe(Effect.ignore);
     }
+    yield* syncMainWindowBackgroundThrottling();
   });
 
   const deliverEvent = (
@@ -1362,6 +1382,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     window: BrowserWindow,
   ) {
     yield* Ref.set(mainWindowRef, Option.some(window));
+    yield* syncMainWindowBackgroundThrottling();
     window.once("closed", () => {
       runFork(closeAllPictureInPicture());
     });
@@ -2176,6 +2197,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         ] as const;
       });
     });
+    yield* syncMainWindowBackgroundThrottling();
     if (!created) return;
     yield* capturePreviewFrame(tabId).pipe(
       Effect.catch((error) =>
