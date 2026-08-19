@@ -13,6 +13,9 @@ import { describe, expect, it } from "vite-plus/test";
 import { buildThreadFeed, type ThreadFeedActivity } from "../../mobile/src/lib/threadActivity.ts";
 import { deriveWorkLogEntries } from "../../web/src/session-logic.ts";
 import {
+  MCP_TOOL_CALL_AGGRESSIVE_STRING_BYTE_BUDGET,
+  MCP_TOOL_CALL_DATA_BYTE_BUDGET,
+  MCP_TOOL_CALL_STRING_BYTE_BUDGET,
   projectActivityEvent,
   projectActivityPayload,
   projectThreadDetailSnapshot,
@@ -183,8 +186,11 @@ describe("projectActivityPayload", () => {
     });
   });
 
-  it("passes MCP tool data through unchanged", () => {
+  it("passes under-budget MCP tool data through byte-identical", () => {
     expect(projectActivityPayload(fixtures[4]!)).toBe(fixtures[4]);
+    expect(JSON.stringify(projectActivityPayload(fixtures[4]!).payload)).toBe(
+      JSON.stringify(fixtures[4]!.payload),
+    );
   });
 
   it("keeps current web and mobile derived output identical for every tool item type", () => {
@@ -229,5 +235,196 @@ describe("projectActivityPayload", () => {
         : undefined,
     ).toEqual(projectActivityPayload(activity));
     expect(event.payload.activity).toBe(activity);
+  });
+});
+
+describe("projectActivityPayload mcp_tool_call size budgets", () => {
+  function makeMcpActivity(
+    id: string,
+    data: Record<string, unknown>,
+    kind = "tool.completed",
+  ): OrchestrationThreadActivity {
+    return {
+      id: EventId.make(id),
+      tone: "tool",
+      kind,
+      summary: "Completed mcp_tool_call",
+      payload: {
+        itemType: "mcp_tool_call",
+        title: "MCP tool call",
+        detail: "repository · search",
+        status: "completed",
+        data,
+      },
+      turnId: TurnId.make(`turn-${id}`),
+      createdAt: "2026-07-27T00:00:00.000Z",
+    };
+  }
+
+  function payloadRecord(activity: OrchestrationThreadActivity): Record<string, unknown> {
+    return activity.payload as Record<string, unknown>;
+  }
+
+  function dataRecord(activity: OrchestrationThreadActivity): Record<string, unknown> {
+    return payloadRecord(activity).data as Record<string, unknown>;
+  }
+
+  const oversizedItem = {
+    server: "browser",
+    tool: "screenshot",
+    toolCallId: "tool-mcp-oversized",
+    input: { url: "https://example.test" },
+    result: {
+      content: [{ type: "image", data: "QUJD".repeat(64_000) }],
+      aggregatedOutput: "line of output\n".repeat(8_000),
+    },
+  };
+
+  it("trims an oversized MCP payload with markers, metadata, and valid JSON", () => {
+    const activity = makeMcpActivity("mcp-oversized", { item: oversizedItem });
+    const originalDataBytes = Buffer.byteLength(JSON.stringify(dataRecord(activity)), "utf8");
+    expect(originalDataBytes).toBeGreaterThan(MCP_TOOL_CALL_DATA_BYTE_BUDGET);
+
+    const projected = projectActivityPayload(activity);
+    expect(projected).not.toBe(activity);
+    // Source stays untouched (events remain the source of truth).
+    expect(dataRecord(activity)).toEqual({ item: oversizedItem });
+
+    const payload = payloadRecord(projected);
+    expect(payload.trimmed).toBe(true);
+    expect(payload.originalDataBytes).toBe(originalDataBytes);
+    expect(payload.itemType).toBe("mcp_tool_call");
+    expect(payload.title).toBe("MCP tool call");
+    expect(payload.detail).toBe("repository · search");
+    expect(payload.status).toBe("completed");
+
+    const data = dataRecord(projected);
+    const serialized = JSON.stringify(data);
+    expect(Buffer.byteLength(serialized, "utf8")).toBeLessThanOrEqual(
+      MCP_TOOL_CALL_DATA_BYTE_BUDGET,
+    );
+    // Structure survives; only strings were truncated.
+    const item = data.item as Record<string, unknown>;
+    const result = item.result as Record<string, unknown>;
+    const content = result.content as Array<Record<string, unknown>>;
+    expect(item.server).toBe("browser");
+    expect(item.tool).toBe("screenshot");
+    expect(item.input).toEqual({ url: "https://example.test" });
+    expect(content[0]!.type).toBe("image");
+    expect(content[0]!.data).toMatch(/…\[truncated \d+ bytes\]$/u);
+    expect(result.aggregatedOutput).toMatch(/…\[truncated \d+ bytes\]$/u);
+    // Round-trips as JSON (what the projection tables and wire formats store).
+    expect(JSON.parse(serialized)).toEqual(data);
+  });
+
+  it("keeps identifier keys intact even when their values exceed the string budget", () => {
+    const hugeRequestId = `request-${"r".repeat(MCP_TOOL_CALL_STRING_BYTE_BUDGET * 2)}`;
+    const hugeToolCallId = `tool-${"t".repeat(MCP_TOOL_CALL_STRING_BYTE_BUDGET * 2)}`;
+    const activity = makeMcpActivity("mcp-request-id", {
+      requestId: hugeRequestId,
+      item: {
+        ...oversizedItem,
+        toolCallId: hugeToolCallId,
+        nested: { requestId: hugeRequestId },
+      },
+    });
+
+    const projected = projectActivityPayload(activity);
+    expect(projected).not.toBe(activity);
+    const data = dataRecord(projected);
+    const item = data.item as Record<string, unknown>;
+    expect(data.requestId).toBe(hugeRequestId);
+    expect(item.toolCallId).toBe(hugeToolCallId);
+    expect((item.nested as Record<string, unknown>).requestId).toBe(hugeRequestId);
+  });
+
+  it("never trims payloads for kinds consumed by request/approval logic", () => {
+    for (const kind of [
+      "user-input.requested",
+      "user-input.resolved",
+      "provider.user-input.respond.failed",
+      "approval.requested",
+      "approval.resolved",
+      "provider.approval.respond.failed",
+    ]) {
+      const activity = makeMcpActivity(`mcp-${kind}`, { item: oversizedItem }, kind);
+      expect(projectActivityPayload(activity)).toBe(activity);
+    }
+  });
+
+  it("falls back to the aggressive string budget when many medium strings overflow", () => {
+    const mediumString = "m".repeat(MCP_TOOL_CALL_STRING_BYTE_BUDGET - 1024);
+    const activity = makeMcpActivity("mcp-many-strings", {
+      item: {
+        server: "repository",
+        tool: "multi-read",
+        result: Object.fromEntries(
+          Array.from({ length: 24 }, (_, index) => [`file-${index}`, mediumString]),
+        ),
+      },
+    });
+
+    const projected = projectActivityPayload(activity);
+    expect(projected).not.toBe(activity);
+    const data = dataRecord(projected);
+    expect(Buffer.byteLength(JSON.stringify(data), "utf8")).toBeLessThanOrEqual(
+      MCP_TOOL_CALL_DATA_BYTE_BUDGET,
+    );
+    const result = (data.item as Record<string, unknown>).result as Record<string, string>;
+    const trimmedValue = result["file-0"]!;
+    expect(trimmedValue.startsWith("m".repeat(MCP_TOOL_CALL_AGGRESSIVE_STRING_BYTE_BUDGET))).toBe(
+      true,
+    );
+    expect(trimmedValue).toMatch(/…\[truncated \d+ bytes\]$/u);
+  });
+
+  it("never splits multi-byte characters when truncating", () => {
+    const activity = makeMcpActivity("mcp-multibyte", {
+      item: {
+        server: "emoji",
+        tool: "dump",
+        result: { aggregatedOutput: "🙂".repeat(40_000) },
+      },
+    });
+
+    const projected = projectActivityPayload(activity);
+    const result = (dataRecord(projected).item as Record<string, unknown>).result as Record<
+      string,
+      string
+    >;
+    const trimmedValue = result.aggregatedOutput!;
+    expect(trimmedValue.isWellFormed()).toBe(true);
+    expect(trimmedValue).toMatch(/…\[truncated \d+ bytes\]$/u);
+    expect(JSON.parse(JSON.stringify(trimmedValue))).toBe(trimmedValue);
+  });
+
+  it("is deterministic across repeated projection and event replay", () => {
+    const activity = makeMcpActivity("mcp-deterministic", { item: oversizedItem });
+    const first = projectActivityPayload(activity);
+    const second = projectActivityPayload(activity);
+    expect(second).toEqual(first);
+    expect(JSON.stringify(second.payload)).toBe(JSON.stringify(first.payload));
+
+    const event = {
+      sequence: 9,
+      eventId: EventId.make("event-mcp-deterministic"),
+      aggregateKind: "thread",
+      aggregateId: ThreadId.make("thread-projection"),
+      occurredAt: "2026-07-27T00:00:02.000Z",
+      commandId: null,
+      causationEventId: null,
+      correlationId: null,
+      metadata: {},
+      type: "thread.activity-appended",
+      payload: {
+        threadId: ThreadId.make("thread-projection"),
+        activity,
+      },
+    } satisfies Extract<OrchestrationEvent, { type: "thread.activity-appended" }>;
+
+    const replayed = projectActivityEvent(event);
+    expect(
+      replayed.type === "thread.activity-appended" ? replayed.payload.activity : undefined,
+    ).toEqual(first);
   });
 });
