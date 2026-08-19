@@ -29,6 +29,14 @@ export const GRAPHIFY_OUT_DIR_NAME = "graphify-out";
 export const GRAPH_META_FILE_NAME = "meta.json";
 
 /**
+ * Marker beside `meta.json` recording a *deferred* auto-rebuild: the checkout
+ * changed after the graph was built, but nobody had read the graph recently
+ * enough to justify rebuilding it on the spot. A file rather than process
+ * state so the debt survives a restart. T3-owned; graphify never touches it.
+ */
+export const GRAPH_DIRTY_FILE_NAME = "dirty.json";
+
+/**
  * Keeps a directory name readable in a terminal. The hash suffix carries
  * uniqueness, so truncating the slug is lossless for correctness.
  */

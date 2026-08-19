@@ -41,8 +41,22 @@
  * A rebuild cannot retrigger itself: graphify writes only into T3's store,
  * which is outside the watched root.
  *
+ * ## Only while someone is actually reading it
+ *
+ * Keeping a graph fresh is only worth CPU while something consumes it. Every
+ * consumer entry point — the `graph.*` RPCs and the MCP graph tools, all of
+ * which funnel through `GraphService` — stamps `lastOpenedAt` on each read,
+ * and a rebuild deliberately preserves it, so the field is precisely "last
+ * consumed" and it lives in `meta.json`, surviving restarts. An edit inside
+ * {@link DEFAULT_CONSUMER_RECENCY_WINDOW_MS} of the last read rebuilds at full
+ * cadence as before; outside it, the entry is marked dirty in the store
+ * instead, and the *next read* settles the debt by queueing one background
+ * refresh (see `GraphService`). A manual `graph.build` is unaffected — it
+ * never passes through here.
+ *
  * @module GraphAutoRebuild
  */
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -90,9 +104,23 @@ const DEFAULT_QUIET_PERIOD_MS = 30 * 1000;
  */
 const WATCH_RESTART_DELAY_MS = 30 * 1000;
 
+/**
+ * Thirty minutes — how recently the graph must have been *read* for an edit
+ * to trigger a rebuild rather than a dirty mark.
+ *
+ * Long enough to span the pauses of an agent session that is actively citing
+ * the graph (queries land minutes apart, not seconds); short enough that an
+ * idle-but-open project stops burning CPU on save bursts within one window.
+ * The trade-off for a stale first answer after a long gap is deliberate:
+ * every read already carries a `stale` flag, and the deferred rebuild is
+ * queued the moment that first read arrives.
+ */
+const DEFAULT_CONSUMER_RECENCY_WINDOW_MS = 30 * 60 * 1000;
+
 export interface GraphAutoRebuildOptions {
   readonly reconcileIntervalMs?: number;
   readonly quietPeriodMs?: number;
+  readonly consumerRecencyWindowMs?: number;
 }
 
 export class GraphAutoRebuild extends Context.Service<
@@ -123,6 +151,10 @@ export const make = (options?: GraphAutoRebuildOptions) =>
     );
     const quietPeriod = Duration.millis(
       Math.max(1, options?.quietPeriodMs ?? DEFAULT_QUIET_PERIOD_MS),
+    );
+    const consumerRecencyWindowMs = Math.max(
+      1,
+      options?.consumerRecencyWindowMs ?? DEFAULT_CONSUMER_RECENCY_WINDOW_MS,
     );
 
     /** Watch fibers by workspace root, owned by the scope `start` was given. */
@@ -162,6 +194,27 @@ export const make = (options?: GraphAutoRebuildOptions) =>
         .pipe(Effect.orElseSucceed(() => null));
       if (entry === null) return;
 
+      // A graph nobody has read within the recency window is not worth CPU on
+      // every save burst. Record the debt instead and stand down; the next
+      // consumer read settles it (see `GraphService`). `lastOpenedAt` is
+      // stamped by every read and preserved across rebuilds, so it is exactly
+      // "last consumed".
+      const now = yield* Clock.currentTimeMillis;
+      if (now - entry.lastOpenedAt > consumerRecencyWindowMs) {
+        yield* store
+          .markDirty(resolved.location)
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("graph.autoRebuild.mark-dirty-failed", { workspaceRoot, cause }),
+            ),
+          );
+        yield* Effect.logInfo("graph.autoRebuild.deferred", {
+          projectId: resolved.location.projectId,
+          branch: resolved.branch,
+        });
+        return;
+      }
+
       const status = yield* worker.statusFor(resolved.location);
       if (status.state === "queued" || status.state === "running") return;
 
@@ -174,6 +227,9 @@ export const make = (options?: GraphAutoRebuildOptions) =>
       );
       if (!ready) return;
 
+      // A rebuild being queued settles any dirty mark left by an earlier
+      // deferral: whatever debt existed, this build pays it.
+      yield* store.clearDirty(resolved.location).pipe(Effect.ignore);
       yield* worker.request({
         location: resolved.location,
         workspaceRoot: resolved.workspaceRoot,
