@@ -7,10 +7,14 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import {
   canRetainCachedPlatformRegistrationAfterRefreshFailure,
   canReuseCachedPlatformRegistration,
+  makePlatformRegistrationTriggers,
   primaryRegistrationToRetainAfterTopologyRead,
   provisionDesktopSshEnvironment,
   readPrimaryEnvironmentTargetResult,
@@ -185,6 +189,53 @@ describe("desktop-local bearer cache", () => {
       ),
     ).toEqual(new Map());
   });
+});
+
+describe("platform registration triggers", () => {
+  it.effect("emits immediately, then re-emits on each bridge bootstrap change", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let listener: (() => void) | undefined;
+        let unsubscribed = false;
+        const triggers = makePlatformRegistrationTriggers((next) => {
+          listener = next;
+          return () => {
+            unsubscribed = true;
+          };
+        });
+
+        const fiber = yield* triggers.pipe(Stream.take(3), Stream.runCount, Effect.forkScoped);
+        // Let the merged stream start and install the bridge subscription.
+        while (listener === undefined) {
+          yield* Effect.yieldNow;
+        }
+        listener();
+        listener();
+        expect(yield* Fiber.join(fiber)).toBe(3);
+        // Taking three elements closes the stream scope, which unsubscribes.
+        expect(unsubscribed).toBe(true);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("falls back to the slow safety tick when the bridge exposes no change event", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        // Web builds (no desktopBridge) and older desktop mains that predate
+        // the change event subscribe as a no-op; the tick is the only trigger.
+        const triggers = makePlatformRegistrationTriggers(() => () => {}, "60 seconds");
+
+        const fiber = yield* triggers.pipe(Stream.take(3), Stream.runCount, Effect.forkScoped);
+        // Let the forked stream emit its immediate first element and register
+        // the tick's sleep before advancing the test clock.
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust("60 seconds");
+        yield* TestClock.adjust("60 seconds");
+        expect(yield* Fiber.join(fiber)).toBe(3);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+  );
 });
 
 describe("primary topology cache", () => {

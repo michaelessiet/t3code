@@ -99,6 +99,8 @@ import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
+import * as ElectronWindow from "../electron/ElectronWindow.ts";
+import * as IpcChannels from "../ipc/channels.ts";
 
 const { logWarning: logBackendPoolWarning } =
   DesktopObservability.makeComponentLogger("desktop-backend-pool");
@@ -203,13 +205,41 @@ type UnregisterAction =
   | { readonly _tag: "Wait"; readonly done: Deferred.Deferred<void> }
   | { readonly _tag: "Close"; readonly entry: ActiveRegisteredInstance };
 
+// Wrap an instance spec so every bootstrap-relevant lifecycle transition
+// (backend became ready, backend stopped, preflight gave up) also runs
+// `notify`. Together with the register/unregister notifications in the pool
+// layer this is what lets the renderer subscribe to bootstrap changes instead
+// of polling getLocalEnvironmentBootstraps() on a timer. Exported for tests.
+export const withLocalBootstrapChangeNotifications = (
+  spec: BackendInstanceSpec,
+  notify: Effect.Effect<void>,
+): BackendInstanceSpec => ({
+  ...spec,
+  // `ensuring` (not `andThen`) so the ping still fires when the original
+  // callback fails — stop() ignores onShutdown failures, and the renderer
+  // must still learn that the backend went away.
+  onReady: (httpBaseUrl) =>
+    (spec.onReady?.(httpBaseUrl) ?? Effect.void).pipe(Effect.ensuring(notify)),
+  onShutdown: () => (spec.onShutdown?.() ?? Effect.void).pipe(Effect.ensuring(notify)),
+  onPreflightFailed: (failure) =>
+    (spec.onPreflightFailed?.(failure) ?? Effect.succeed(false)).pipe(Effect.ensuring(notify)),
+});
+
 export const layer = Layer.effect(
   DesktopBackendPool,
   Effect.gen(function* () {
     const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
     const desktopWindow = yield* DesktopWindow.DesktopWindow;
     const electronDialog = yield* ElectronDialog.ElectronDialog;
+    const electronWindow = yield* ElectronWindow.ElectronWindow;
     const appSettings = yield* DesktopAppSettings.DesktopAppSettings;
+    // The getLocalEnvironmentBootstraps sync IPC reads pool state on demand;
+    // this ping tells renderer windows that state changed so they re-read it
+    // instead of polling. It intentionally carries no payload — the sync
+    // getter stays the single source of truth for the topology.
+    const notifyLocalBootstrapsChanged = electronWindow.sendAll(
+      IpcChannels.LOCAL_ENVIRONMENT_BOOTSTRAPS_CHANGED_CHANNEL,
+    );
     // Anchor the pool's lifetime to its layer scope so registered
     // instance scopes can be forked off it. Without this, instance
     // scopes are orphaned: they only close via explicit unregister()
@@ -273,31 +303,36 @@ export const layer = Layer.effect(
       },
     );
 
-    const primary = yield* DesktopBackendManager.makeBackendInstance({
-      id: DesktopBackendManager.PRIMARY_INSTANCE_ID,
-      // Keep this lazy. The pool layer is initialized before startup loads
-      // persisted desktop settings, so resolving the primary label here would
-      // permanently capture DEFAULT_DESKTOP_SETTINGS and mislabel WSL-only
-      // primaries as Windows.
-      label: configuration.resolvePrimaryLabel,
-      configResolve: configuration.resolvePrimary,
-      // Window creation errors propagating out of handleBackendReady must
-      // not block the readiness callback (that would prevent restartAttempt
-      // from being reset), so we absorb them here. The window service only
-      // logs on success, so log the failure here before swallowing it —
-      // otherwise a post-readiness window-open failure vanishes silently and
-      // is near-impossible to diagnose in production.
-      onReady: (httpBaseUrl) =>
-        desktopWindow.handleBackendReady(httpBaseUrl).pipe(
-          Effect.catch((error) =>
-            logBackendPoolWarning("failed to open main window after backend readiness", {
-              error: error.message,
-            }),
-          ),
-        ),
-      onShutdown: () => desktopWindow.handleBackendNotReady,
-      onPreflightFailed: handlePrimaryPreflightFailure,
-    });
+    const primary = yield* DesktopBackendManager.makeBackendInstance(
+      withLocalBootstrapChangeNotifications(
+        {
+          id: DesktopBackendManager.PRIMARY_INSTANCE_ID,
+          // Keep this lazy. The pool layer is initialized before startup loads
+          // persisted desktop settings, so resolving the primary label here would
+          // permanently capture DEFAULT_DESKTOP_SETTINGS and mislabel WSL-only
+          // primaries as Windows.
+          label: configuration.resolvePrimaryLabel,
+          configResolve: configuration.resolvePrimary,
+          // Window creation errors propagating out of handleBackendReady must
+          // not block the readiness callback (that would prevent restartAttempt
+          // from being reset), so we absorb them here. The window service only
+          // logs on success, so log the failure here before swallowing it —
+          // otherwise a post-readiness window-open failure vanishes silently and
+          // is near-impossible to diagnose in production.
+          onReady: (httpBaseUrl) =>
+            desktopWindow.handleBackendReady(httpBaseUrl).pipe(
+              Effect.catch((error) =>
+                logBackendPoolWarning("failed to open main window after backend readiness", {
+                  error: error.message,
+                }),
+              ),
+            ),
+          onShutdown: () => desktopWindow.handleBackendNotReady,
+          onPreflightFailed: handlePrimaryPreflightFailure,
+        },
+        notifyLocalBootstrapsChanged,
+      ),
+    );
 
     const instancesRef = yield* SynchronizedRef.make<
       ReadonlyMap<BackendInstanceId, RegisteredInstance>
@@ -333,13 +368,18 @@ export const layer = Layer.effect(
               ] as const);
             }
             return Effect.gen(function* () {
-              // Provide the captured factory services first, then the child scope
-              // last so instance finalizers are owned by the unregisterable scope.
+              // Provide the child scope innermost (before the factory
+              // services): factoryContext was captured with Effect.context()
+              // during the layer build, so it carries the layer scope, and an
+              // outer Scope.provide would be shadowed by it — leaving instance
+              // finalizers owned by the layer scope, where unregister's
+              // Scope.close could never reach them (they'd only run at app
+              // shutdown). Innermost wins, so the unregisterable child scope
+              // owns the instance's auto-stop finalizer.
               const instanceScope = yield* Scope.fork(layerScope, "sequential");
-              const instance = yield* DesktopBackendManager.makeBackendInstance(spec).pipe(
-                Effect.provide(factoryContext),
-                Scope.provide(instanceScope),
-              );
+              const instance = yield* DesktopBackendManager.makeBackendInstance(
+                withLocalBootstrapChangeNotifications(spec, notifyLocalBootstrapsChanged),
+              ).pipe(Scope.provide(instanceScope), Effect.provide(factoryContext));
               const next = new Map(current);
               next.set(spec.id, {
                 _tag: "Active",
@@ -355,7 +395,10 @@ export const layer = Layer.effect(
         ).pipe(
           Effect.flatMap((result) =>
             result._tag === "Registered"
-              ? Effect.succeed(result.instance)
+              ? // A freshly registered instance surfaces as a pending
+                // ("Connecting…") bootstrap even before its first start, so
+                // tell renderers right away.
+                notifyLocalBootstrapsChanged.pipe(Effect.as(result.instance))
               : Deferred.await(result.done).pipe(Effect.andThen(register(spec))),
           ),
         ),
@@ -415,6 +458,10 @@ export const layer = Layer.effect(
           onNone: () => Effect.void,
           onSome: (scope) => Scope.close(scope, Exit.void).pipe(Effect.ignore),
         }).pipe(Effect.ensuring(finish));
+        // Only the Close branch removed an entry from the registry; the
+        // Absent/Wait branches observed someone else's removal (which
+        // notifies from its own Close path).
+        yield* notifyLocalBootstrapsChanged;
       });
 
     return DesktopBackendPool.of({

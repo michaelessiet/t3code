@@ -981,6 +981,15 @@ export interface DesktopBridge {
   // info (omits instances whose backend hasn't produced a config yet).
   // The primary backend is identified by id === PRIMARY_LOCAL_ENVIRONMENT_ID.
   getLocalEnvironmentBootstraps: () => readonly DesktopEnvironmentBootstrap[];
+  /**
+   * Fires when the local bootstrap topology may have changed (a backend
+   * became ready or stopped, the WSL backend was toggled, or a pool instance
+   * was registered/unregistered). The ping carries no payload: listeners
+   * re-read via {@link getLocalEnvironmentBootstraps}. Optional: absent on
+   * web builds and on desktop builds predating this event, so callers must
+   * keep a slow safety re-read for those hosts.
+   */
+  onLocalEnvironmentBootstrapsChanged?: (listener: () => void) => () => void;
   getLocalEnvironmentBearerToken: () => Promise<string>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
