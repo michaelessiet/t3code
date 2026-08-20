@@ -29,7 +29,10 @@ import type * as Protocol from "vscode-languageserver-protocol";
 import type { LanguageServerConfig } from "./LanguageServers.ts";
 
 const REQUEST_TIMEOUT_MS = 15_000;
+/** Default initialize budget; configs may override via initializeTimeoutMs. */
 const INITIALIZE_TIMEOUT_MS = 30_000;
+/** Grace period after SIGTERM before escalating to SIGKILL on dispose. */
+const KILL_ESCALATION_MS = 5_000;
 
 export type LspClientFailure =
   | { readonly kind: "not_installed" }
@@ -164,7 +167,15 @@ export class LspClient {
 
   static async start(options: LspClientOptions): Promise<LspClient> {
     const client = new LspClient(options);
-    await client.spawnAndInitialize();
+    try {
+      await client.spawnAndInitialize();
+    } catch (error) {
+      // A failed initialize (timeout, error response, exit mid-handshake)
+      // must not leak the spawned process; dispose() is safe when the child
+      // already exited (kill on a dead pid is a no-op).
+      await client.dispose().catch(() => {});
+      throw error;
+    }
     return client;
   }
 
@@ -201,6 +212,9 @@ export class LspClient {
       this.options.onExit(
         `exited with ${code ?? signal ?? "unknown"}: ${stderrTail.trim().slice(0, 500)}`,
       );
+      // Reject in-flight requests (initialize included) now rather than
+      // letting them run out their timeouts against a dead connection.
+      this.connection?.dispose();
     });
 
     const connection = createMessageConnection(
@@ -265,7 +279,7 @@ export class LspClient {
     };
     await withTimeout(
       connection.sendRequest("initialize", initializeParams),
-      INITIALIZE_TIMEOUT_MS,
+      this.options.config.initializeTimeoutMs ?? INITIALIZE_TIMEOUT_MS,
     );
     await connection.sendNotification("initialized", {});
   }
@@ -294,8 +308,28 @@ export class LspClient {
         await this.connection.sendNotification("exit", null).catch(() => {});
         this.connection.dispose();
       }
+    } catch {
+      // Connection already torn down (e.g. by the exit handler after the
+      // child died); sendRequest throws synchronously on a disposed
+      // connection and there is nothing left to say goodbye to.
     } finally {
-      this.child?.kill();
+      this.killChild();
     }
+  }
+
+  /**
+   * Kill the child, escalating to SIGKILL for servers that ignore SIGTERM —
+   * a server hung during initialize is exactly that case. No-op when the
+   * child already exited.
+   */
+  private killChild(): void {
+    const child = this.child;
+    if (child === null || child.exitCode !== null || child.signalCode !== null) return;
+    child.kill();
+    const escalation = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }, KILL_ESCALATION_MS);
+    escalation.unref();
+    child.once("exit", () => clearTimeout(escalation));
   }
 }

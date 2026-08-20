@@ -16,6 +16,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import * as ElectronPowerMonitor from "../electron/ElectronPowerMonitor.ts";
 import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
@@ -96,6 +97,22 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
       ).pipe(Effect.asVoid),
   } satisfies ElectronUpdater.ElectronUpdater["Service"]);
 
+  const powerListeners = new Map<string, Set<() => void>>();
+  const powerMonitorLayer = Layer.succeed(ElectronPowerMonitor.ElectronPowerMonitor, {
+    on: (eventName, listener) =>
+      Effect.acquireRelease(
+        Effect.sync(() => {
+          const eventListeners = powerListeners.get(eventName) ?? new Set();
+          eventListeners.add(listener);
+          powerListeners.set(eventName, eventListeners);
+        }),
+        () =>
+          Effect.sync(() => {
+            powerListeners.get(eventName)?.delete(listener);
+          }),
+      ).pipe(Effect.asVoid),
+  } satisfies ElectronPowerMonitor.ElectronPowerMonitor["Service"]);
+
   const windowLayer = Layer.succeed(ElectronWindow.ElectronWindow, {
     create: () => Effect.die("unexpected BrowserWindow creation"),
     main: Effect.succeed(Option.none()),
@@ -172,6 +189,7 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
 
   const layer = DesktopUpdates.layer.pipe(
     Layer.provideMerge(updaterLayer),
+    Layer.provideMerge(powerMonitorLayer),
     Layer.provideMerge(windowLayer),
     Layer.provideMerge(backendLayer),
     Layer.provideMerge(DesktopState.layer),
@@ -202,6 +220,11 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
     emit: (eventName: string, payload?: unknown) => {
       for (const listener of listeners.get(eventName) ?? []) {
         listener(payload);
+      }
+    },
+    emitPower: (eventName: string) => {
+      for (const listener of powerListeners.get(eventName) ?? []) {
+        listener();
       }
     },
   };
@@ -272,6 +295,32 @@ describe("DesktopUpdates", () => {
 
       assert.equal(harness.listenerCount(), 0);
     }).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("pauses the update poll while suspended and checks once on resume", () => {
+    const harness = makeHarness();
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+
+        yield* TestClock.adjust(Duration.millis(15_000));
+        assert.equal(harness.checkCount(), 1);
+
+        harness.emitPower("suspend");
+        yield* flushCallbacks;
+        yield* TestClock.adjust(Duration.hours(2));
+        assert.equal(harness.checkCount(), 1);
+
+        harness.emitPower("resume");
+        yield* flushCallbacks;
+        assert.equal(harness.checkCount(), 2);
+
+        yield* TestClock.adjust(Duration.hours(1));
+        assert.equal(harness.checkCount(), 3);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
   it.effect("updates and broadcasts state from updater events", () => {

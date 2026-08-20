@@ -23,6 +23,7 @@ import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
+import * as ElectronPowerMonitor from "../electron/ElectronPowerMonitor.ts";
 import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
@@ -43,7 +44,7 @@ import {
 } from "./updateMachine.ts";
 
 const AUTO_UPDATE_STARTUP_DELAY = "15 seconds";
-const AUTO_UPDATE_POLL_INTERVAL = "4 minutes";
+const AUTO_UPDATE_POLL_INTERVAL = "1 hour";
 
 const AppUpdateYmlConfig = Schema.Record(Schema.String, Schema.String);
 type AppUpdateYmlConfig = typeof AppUpdateYmlConfig.Type;
@@ -92,7 +93,7 @@ export class DesktopUpdateChannelPersistenceError extends Schema.TaggedErrorClas
 export class DesktopUpdatePollerError extends Schema.TaggedErrorClass<DesktopUpdatePollerError>()(
   "DesktopUpdatePollerError",
   {
-    poller: Schema.Literals(["startup", "poll"]),
+    poller: Schema.Literals(["startup", "poll", "resume"]),
     cause: Schema.Defect(),
   },
 ) {
@@ -249,6 +250,7 @@ export const make = Effect.gen(function* () {
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
   const desktopState = yield* DesktopState.DesktopState;
   const electronUpdater = yield* ElectronUpdater.ElectronUpdater;
+  const electronPowerMonitor = yield* ElectronPowerMonitor.ElectronPowerMonitor;
   const electronWindow = yield* ElectronWindow.ElectronWindow;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -259,6 +261,7 @@ export const make = Effect.gen(function* () {
   const updateDownloadInFlightRef = yield* Ref.make(false);
   const updateInstallInFlightRef = yield* Ref.make(false);
   const updaterConfiguredRef = yield* Ref.make(false);
+  const systemSuspendedRef = yield* Ref.make(false);
   const lastLoggedDownloadMilestoneRef = yield* Ref.make(-1);
   const updateStateRef = yield* Ref.make<DesktopUpdateState>(
     createInitialDesktopUpdateState(
@@ -539,7 +542,14 @@ export const make = Effect.gen(function* () {
       Effect.forkScoped,
     );
     yield* Effect.sleep(AUTO_UPDATE_POLL_INTERVAL).pipe(
-      Effect.andThen(checkForUpdates("poll")),
+      Effect.andThen(
+        Effect.gen(function* () {
+          // A sleeping machine fires the elapsed timer immediately on wake;
+          // the resume listener already runs its own check at that point.
+          if (yield* Ref.get(systemSuspendedRef)) return;
+          yield* checkForUpdates("poll");
+        }),
+      ),
       Effect.forever,
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
@@ -765,6 +775,28 @@ export const make = Effect.gen(function* () {
       });
       yield* electronUpdater.on("update-downloaded", (info: unknown) => {
         runEffect(handleUpdateDownloaded(info));
+      });
+
+      yield* electronPowerMonitor.on("suspend", () => {
+        runEffect(Ref.set(systemSuspendedRef, true));
+      });
+      yield* electronPowerMonitor.on("resume", () => {
+        runEffect(
+          Ref.set(systemSuspendedRef, false).pipe(
+            Effect.andThen(checkForUpdates("resume")),
+            Effect.asVoid,
+            Effect.catchCause((cause) => {
+              if (Cause.hasInterruptsOnly(cause)) {
+                return Effect.void;
+              }
+              const error = new DesktopUpdatePollerError({ poller: "resume", cause });
+              return logUpdaterError(error.message, {
+                errorTag: error._tag,
+                poller: error.poller,
+              });
+            }),
+          ),
+        );
       });
 
       yield* startUpdatePollers;

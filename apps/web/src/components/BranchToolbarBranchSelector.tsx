@@ -234,10 +234,13 @@ export function BranchToolbarBranchSelector({
   const branchRefTarget = useMemo(
     () => ({
       environmentId,
-      cwd: branchCwd,
+      // Enumerate refs only while the picker is open: each subscribed target
+      // revalidates listRefs on an interval, and the closed toolbar's label is
+      // covered by the status query.
+      cwd: isBranchMenuOpen ? branchCwd : null,
       query: deferredTrimmedBranchQuery,
     }),
-    [branchCwd, deferredTrimmedBranchQuery, environmentId],
+    [branchCwd, deferredTrimmedBranchQuery, environmentId, isBranchMenuOpen],
   );
   const branchRefState = usePaginatedBranches(branchRefTarget);
   const refs = branchRefState.refs;

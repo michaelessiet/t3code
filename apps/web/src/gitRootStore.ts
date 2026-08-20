@@ -6,6 +6,7 @@ interface GitRootStoreState {
   /** Absolute path of the selected git root per thread; absent/null = primary. */
   selectedRootPathByThreadKey: Record<string, string | null>;
   selectGitRoot: (ref: ScopedThreadRef, rootPath: string | null) => void;
+  removeThread: (ref: ScopedThreadRef) => void;
 }
 
 /**
@@ -23,6 +24,14 @@ export const useGitRootStore = create<GitRootStoreState>()((set) => ({
         [scopedThreadKey(ref)]: rootPath,
       },
     })),
+  removeThread: (ref) =>
+    set((state) => {
+      const threadKey = scopedThreadKey(ref);
+      if (!(threadKey in state.selectedRootPathByThreadKey)) return state;
+      const { [threadKey]: _removed, ...selectedRootPathByThreadKey } =
+        state.selectedRootPathByThreadKey;
+      return { selectedRootPathByThreadKey };
+    }),
 }));
 
 /** Validated selection: only a currently-attached non-primary root sticks. */

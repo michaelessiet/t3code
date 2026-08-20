@@ -1,5 +1,11 @@
-import { type ServerLifecycleWelcomePayload } from "@t3tools/contracts";
-import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
+import { type EnvironmentId, type ServerLifecycleWelcomePayload } from "@t3tools/contracts";
+import {
+  parseScopedThreadKey,
+  scopedProjectKey,
+  scopedThreadKey,
+  scopeProjectRef,
+  scopeThreadRef,
+} from "@t3tools/client-runtime/environment";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
   Outlet,
@@ -38,8 +44,13 @@ import { syncBrowserChromeTheme } from "../hooks/useTheme";
 import { configureClientTracing } from "../observability/clientTracing";
 import { resolveInitialServerAuthGateState } from "../environments/primary";
 import { hasHostedPairingRequest, isHostedStaticApp } from "../hostedPairing";
-import { shellEnvironment } from "../state/shell";
+import { useComposerDraftStore } from "../composerDraftStore";
+import { collectActiveTerminalUiThreadKeys } from "../lib/terminalUiStateCleanup";
+import { appAtomRegistry } from "../rpc/atomRegistry";
+import { environmentShell, liveShellEnvironmentIdsAtom, shellEnvironment } from "../state/shell";
+import { useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useAtomValue } from "@effect/atom-react";
+import * as Option from "effect/Option";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
 import {
@@ -133,6 +144,7 @@ function RootRouteView() {
         <ConnectOnboardingDialog />
         <SshPasswordPromptDialog />
         <SlowRpcRequestToastCoordinator />
+        <TerminalUiStateOrphanSweep />
         <HostedStaticEnvironmentBootstrap />
         {primaryEnvironmentAuthenticated ? <EventRouter /> : null}
         {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
@@ -148,6 +160,54 @@ function GlassAppearanceSync() {
   useEffect(() => {
     document.documentElement.style.setProperty("--glass-opacity", `${glassOpacity}%`);
   }, [glassOpacity]);
+
+  return null;
+}
+
+/**
+ * Prunes persisted terminal UI state for threads that no longer exist, once
+ * per environment per session, as soon as that environment's shell stream is
+ * fully synchronized ("live") and its thread list is therefore authoritative.
+ * Only terminal UI state is swept here: the shell snapshot excludes archived
+ * threads, and the terminal store is the one place where archived threads are
+ * intentionally treated as inactive too.
+ */
+function TerminalUiStateOrphanSweep() {
+  const liveShellEnvironmentIds = useAtomValue(liveShellEnvironmentIdsAtom);
+  const sweptEnvironmentIdsRef = useRef(new Set<EnvironmentId>());
+
+  useEffect(() => {
+    for (const environmentId of liveShellEnvironmentIds) {
+      if (sweptEnvironmentIdsRef.current.has(environmentId)) {
+        continue;
+      }
+      sweptEnvironmentIdsRef.current.add(environmentId);
+      const shell = appAtomRegistry.get(environmentShell.stateValueAtom(environmentId));
+      if (shell.status !== "live" || Option.isNone(shell.snapshot)) {
+        continue;
+      }
+      const activeThreadKeys = collectActiveTerminalUiThreadKeys({
+        snapshotThreads: shell.snapshot.value.threads.map((thread) => ({
+          key: scopedThreadKey(scopeThreadRef(environmentId, thread.id)),
+          deletedAt: null,
+          archivedAt: thread.archivedAt,
+        })),
+        draftThreadKeys: useComposerDraftStore.getState().listDraftThreadKeys(),
+      });
+      const terminalUiState = useTerminalUiStateStore.getState();
+      // The snapshot is only authoritative for its own environment, so keys
+      // scoped to any other environment always survive this pass.
+      for (const threadKey of [
+        ...Object.keys(terminalUiState.terminalUiStateByThreadKey),
+        ...Object.keys(terminalUiState.suppressedTerminalIdsByThreadKey),
+      ]) {
+        if (parseScopedThreadKey(threadKey)?.environmentId !== environmentId) {
+          activeThreadKeys.add(threadKey);
+        }
+      }
+      terminalUiState.removeOrphanedTerminalUiStates(activeThreadKeys);
+    }
+  }, [liveShellEnvironmentIds]);
 
   return null;
 }
