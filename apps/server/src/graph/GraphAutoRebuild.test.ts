@@ -385,4 +385,103 @@ describe("GraphAutoRebuild", () => {
       expect(result.requests).toEqual([]);
     }),
   );
+
+  // The consumer-recency gate: `lastOpenedAt` in the seeded entry is 1, and the
+  // TestClock starts at 0, so how far the clock is advanced before the change
+  // event decides whether the graph counts as recently consumed. The default
+  // window is thirty minutes.
+
+  it.effect("keeps full cadence while the graph is being read", () =>
+    Effect.gen(function* () {
+      const requests = yield* Ref.make<ReadonlyArray<GraphBuildRequest>>([]);
+      const events = yield* Queue.unbounded<ProjectWatchStreamEvent>();
+      const state = world();
+
+      const result = yield* Effect.gen(function* () {
+        const store = yield* GraphStore;
+        const location = yield* store.locate({
+          projectId: PROJECT_ID,
+          branch: "main",
+          headSha: HEAD_SHA,
+        });
+        yield* store.ensure(location);
+        yield* store.writeEntry(location, entryFor("main"));
+
+        const reactor = yield* GraphAutoRebuild;
+        yield* reactor.reconcile;
+
+        // Twenty-nine minutes since the last read: inside the window.
+        yield* TestClock.adjust(Duration.minutes(29));
+        yield* pushChange(events, requests);
+
+        return { requests: yield* Ref.get(requests), dirty: yield* store.isDirty(location) };
+      }).pipe(Effect.scoped, Effect.provide(layersFor(state, requests, events)));
+
+      expect(result.requests).toHaveLength(1);
+      expect(result.dirty).toBe(false);
+    }),
+  );
+
+  it.effect("marks the graph dirty instead of rebuilding when nobody has read it lately", () =>
+    Effect.gen(function* () {
+      const requests = yield* Ref.make<ReadonlyArray<GraphBuildRequest>>([]);
+      const events = yield* Queue.unbounded<ProjectWatchStreamEvent>();
+      const state = world();
+
+      const result = yield* Effect.gen(function* () {
+        const store = yield* GraphStore;
+        const location = yield* store.locate({
+          projectId: PROJECT_ID,
+          branch: "main",
+          headSha: HEAD_SHA,
+        });
+        yield* store.ensure(location);
+        yield* store.writeEntry(location, entryFor("main"));
+
+        const reactor = yield* GraphAutoRebuild;
+        yield* reactor.reconcile;
+
+        // Thirty-one minutes since the last read: outside the window.
+        yield* TestClock.adjust(Duration.minutes(31));
+        yield* pushChange(events, requests);
+
+        return { requests: yield* Ref.get(requests), dirty: yield* store.isDirty(location) };
+      }).pipe(Effect.scoped, Effect.provide(layersFor(state, requests, events)));
+
+      expect(result.requests).toEqual([]);
+      expect(result.dirty).toBe(true);
+    }),
+  );
+
+  it.effect("a rebuild inside the window settles a leftover dirty mark", () =>
+    Effect.gen(function* () {
+      const requests = yield* Ref.make<ReadonlyArray<GraphBuildRequest>>([]);
+      const events = yield* Queue.unbounded<ProjectWatchStreamEvent>();
+      const state = world();
+
+      const result = yield* Effect.gen(function* () {
+        const store = yield* GraphStore;
+        const location = yield* store.locate({
+          projectId: PROJECT_ID,
+          branch: "main",
+          headSha: HEAD_SHA,
+        });
+        yield* store.ensure(location);
+        yield* store.writeEntry(location, entryFor("main"));
+        // Debt left over from an earlier deferral (or a previous run — the
+        // marker is a file, so a restart carries it over).
+        yield* store.markDirty(location);
+
+        const reactor = yield* GraphAutoRebuild;
+        yield* reactor.reconcile;
+
+        yield* pushChange(events, requests);
+
+        return { requests: yield* Ref.get(requests), dirty: yield* store.isDirty(location) };
+      }).pipe(Effect.scoped, Effect.provide(layersFor(state, requests, events)));
+
+      expect(result.requests).toHaveLength(1);
+      expect(result.dirty).toBe(false);
+    }),
+  );
 });

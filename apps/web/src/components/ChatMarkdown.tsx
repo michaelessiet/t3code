@@ -26,6 +26,7 @@ import React, {
   Suspense,
   type ClipboardEvent as ReactClipboardEvent,
   type MouseEvent as ReactMouseEvent,
+  createContext,
   isValidElement,
   use,
   useCallback,
@@ -36,7 +37,7 @@ import React, {
   useState,
   type ReactNode,
 } from "react";
-import type { Components, Options as ReactMarkdownOptions } from "react-markdown";
+import type { Components, ExtraProps, Options as ReactMarkdownOptions } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import { defaultUrlTransform } from "react-markdown";
 import rehypeRaw from "rehype-raw";
@@ -176,11 +177,130 @@ function findTaskListMarkerOffset(markdown: string, listItemStart: number): numb
   if (!match?.[1]) return null;
   return listItemStart + firstLine.indexOf(match[1]);
 }
-const CHAT_MARKDOWN_REMARK_PLUGINS = [
+
+export interface ChatMarkdownBlock {
+  /** Offset of the block's first character within the full message text. */
+  readonly start: number;
+  readonly content: string;
+}
+
+const FENCE_OPEN_LINE_REGEX = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const FENCE_CLOSE_LINE_REGEX = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+const LIST_MARKER_LINE_REGEX = /^ {0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/;
+// Link-reference and footnote definitions bind document-wide — even from
+// inside blockquotes or list items — so any candidate line forces whole-text
+// rendering. Greedy `.*` keeps escaped brackets in labels from slipping past.
+const REFERENCE_DEFINITION_LINE_REGEX = /^[ \t>]*(?:(?:[-+*]|\d{1,9}[.)])[ \t]+)?\[.*\]:/;
+// Raw HTML can open in one block and close in a later one (rehype-raw stitches
+// the fragments back together across blank lines), so its presence anywhere
+// outside a fence forces whole-text rendering. `<http(s)://…>` autolinks are
+// exempt; other `<`+letter sequences (including inside inline code spans) are
+// treated as HTML candidates — over-triggering only costs memoization.
+const RAW_HTML_CANDIDATE_REGEX = /<(?!https?:\/\/)[a-zA-Z!/?]/;
+
+/**
+ * Splits markdown into independently parseable top-level blocks at blank-line
+ * boundaries outside fenced code, so streaming re-parses only the trailing
+ * block. Returns null when a construct that requires whole-document parsing
+ * (reference definitions, raw HTML) is detected.
+ *
+ * A boundary is skipped — the chunks stay in one block — when the next line is
+ * indented (list/indented-code continuation) or starts with a list marker
+ * (blank-separated items form a single loose list). Merging is always safe:
+ * only the memoization granularity shrinks, never the rendered output.
+ */
+export function splitMarkdownIntoBlocks(text: string): ChatMarkdownBlock[] | null {
+  const blocks: ChatMarkdownBlock[] = [];
+  let fence: { readonly char: string; readonly length: number } | null = null;
+  let blockStart = -1;
+  let blockEnd = -1;
+  let atBoundary = false;
+  let offset = 0;
+
+  for (const line of text.split("\n")) {
+    const lineStart = offset;
+    const lineEnd = lineStart + line.length;
+    offset = lineEnd + 1;
+
+    if (fence !== null) {
+      const close = FENCE_CLOSE_LINE_REGEX.exec(line);
+      if (close?.[1] && close[1].startsWith(fence.char) && close[1].length >= fence.length) {
+        fence = null;
+      }
+      blockEnd = lineEnd;
+      continue;
+    }
+
+    if (line.trim().length === 0) {
+      if (blockStart !== -1) atBoundary = true;
+      continue;
+    }
+
+    if (REFERENCE_DEFINITION_LINE_REGEX.test(line) || RAW_HTML_CANDIDATE_REGEX.test(line)) {
+      return null;
+    }
+
+    if (atBoundary) {
+      atBoundary = false;
+      const continuesBlock = /^[ \t]/.test(line) || LIST_MARKER_LINE_REGEX.test(line);
+      if (!continuesBlock) {
+        blocks.push({ start: blockStart, content: text.slice(blockStart, blockEnd) });
+        blockStart = lineStart;
+      }
+    }
+    if (blockStart === -1) blockStart = lineStart;
+
+    const open = FENCE_OPEN_LINE_REGEX.exec(line);
+    // A backtick fence's info string cannot contain a backtick (that line is a
+    // paragraph with code spans, not a fence).
+    if (open?.[1] && !(open[1].startsWith("`") && open[2]?.includes("`"))) {
+      fence = { char: open[1].slice(0, 1), length: open[1].length };
+    }
+    blockEnd = lineEnd;
+  }
+
+  if (blockStart !== -1) {
+    blocks.push({ start: blockStart, content: text.slice(blockStart, blockEnd) });
+  }
+  return blocks;
+}
+
+interface MarkdownSourceContextValue {
+  /** Exact markdown source the enclosing ReactMarkdown instance parsed. */
+  readonly text: string;
+  /** Offset of that source within the full message text, so node positions
+      can be mapped back to document-global offsets. */
+  readonly offset: number;
+}
+
+const MarkdownSourceContext = createContext<MarkdownSourceContextValue>({ text: "", offset: 0 });
+
+function MarkdownListItem({
+  node,
+  skills,
+  children,
+  ...props
+}: React.ComponentPropsWithoutRef<"li"> &
+  ExtraProps & { skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> }) {
+  const source = use(MarkdownSourceContext);
+  const listItemStart = node?.position?.start.offset;
+  const markerOffset =
+    typeof listItemStart === "number" ? findTaskListMarkerOffset(source.text, listItemStart) : null;
+  return (
+    <li
+      {...props}
+      data-task-marker-offset={markerOffset === null ? undefined : markerOffset + source.offset}
+    >
+      {renderSkillInlineMarkdownChildren(children, skills)}
+    </li>
+  );
+}
+
+export const CHAT_MARKDOWN_REMARK_PLUGINS: NonNullable<ReactMarkdownOptions["remarkPlugins"]> = [
   remarkGfm,
   remarkNormalizeListItemIndentation,
   remarkPreserveCodeMeta,
-] satisfies NonNullable<ReactMarkdownOptions["remarkPlugins"]>;
+];
 
 const CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS = [
   remarkGfm,
@@ -189,10 +309,10 @@ const CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS = [
   remarkPreserveCodeMeta,
 ] satisfies NonNullable<ReactMarkdownOptions["remarkPlugins"]>;
 
-const CHAT_MARKDOWN_REHYPE_PLUGINS = [
+export const CHAT_MARKDOWN_REHYPE_PLUGINS: NonNullable<ReactMarkdownOptions["rehypePlugins"]> = [
   rehypeRaw,
   [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA],
-] satisfies NonNullable<ReactMarkdownOptions["rehypePlugins"]>;
+];
 
 function extractFenceLanguage(className: string | undefined): string {
   const match = className?.match(CODE_FENCE_LANGUAGE_REGEX);
@@ -1326,6 +1446,44 @@ function areMarkdownFileLinkPropsEqual(
   );
 }
 
+interface MemoizedChatMarkdownBlockProps {
+  content: string;
+  start: number;
+  components: Components | undefined;
+  remarkPlugins: NonNullable<ReactMarkdownOptions["remarkPlugins"]>;
+  urlTransform: ReactMarkdownOptions["urlTransform"];
+}
+
+/**
+ * One top-level markdown block. While its content and the shared renderer
+ * inputs are unchanged, React.memo skips it entirely — so during streaming
+ * only the trailing (still-growing) block re-parses per text commit.
+ */
+export const MemoizedChatMarkdownBlock = memo(function MemoizedChatMarkdownBlock({
+  content,
+  start,
+  components,
+  remarkPlugins,
+  urlTransform,
+}: MemoizedChatMarkdownBlockProps) {
+  const source = useMemo<MarkdownSourceContextValue>(
+    () => ({ text: content, offset: start }),
+    [content, start],
+  );
+  return (
+    <MarkdownSourceContext.Provider value={source}>
+      <ReactMarkdown
+        remarkPlugins={remarkPlugins}
+        rehypePlugins={CHAT_MARKDOWN_REHYPE_PLUGINS}
+        components={components}
+        urlTransform={urlTransform}
+      >
+        {content}
+      </ReactMarkdown>
+    </MarkdownSourceContext.Provider>
+  );
+});
+
 function ChatMarkdown({
   text,
   cwd,
@@ -1381,12 +1539,18 @@ function ChatMarkdown({
       ],
     ];
   }, [cwd, lineBreaks, workspaceFilePathIndex]);
+  // Keyed on the extracted hrefs rather than the raw text so streaming commits
+  // that don't complete a new `[..](..)` link keep the map identity — and the
+  // components map memoized on it — stable. Hrefs cannot contain whitespace,
+  // so "\n" is a safe join delimiter.
+  const markdownLinkHrefs = useMemo(() => extractMarkdownLinkHrefs(text).join("\n"), [text]);
   const markdownFileLinkMetaByHref = useMemo(() => {
     const metaByHref = new Map<
       string,
       NonNullable<ReturnType<typeof resolveMarkdownFileLinkMeta>>
     >();
-    for (const href of extractMarkdownLinkHrefs(text)) {
+    if (markdownLinkHrefs.length === 0) return metaByHref;
+    for (const href of markdownLinkHrefs.split("\n")) {
       const normalizedHref = normalizeMarkdownLinkHrefKey(href);
       if (metaByHref.has(normalizedHref)) continue;
       const meta = resolveMarkdownFileLinkMeta(normalizedHref, cwd, threadRoots.all);
@@ -1395,7 +1559,7 @@ function ChatMarkdown({
       }
     }
     return metaByHref;
-  }, [cwd, text, threadRoots.all]);
+  }, [cwd, markdownLinkHrefs, threadRoots.all]);
   const fileLinkParentSuffixByPath = useMemo(() => {
     const filePaths = [...markdownFileLinkMetaByHref.values()].map((meta) => meta.filePath);
     return buildFileLinkParentSuffixByPath(filePaths);
@@ -1464,13 +1628,12 @@ function ChatMarkdown({
         return <p {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</p>;
       },
       li({ node, children, ...props }) {
-        const listItemStart = node?.position?.start.offset;
-        const markerOffset =
-          typeof listItemStart === "number" ? findTaskListMarkerOffset(text, listItemStart) : null;
+        // Marker offsets come from MarkdownSourceContext (not a `text` dep
+        // here) so the components map survives streaming text commits.
         return (
-          <li {...props} data-task-marker-offset={markerOffset ?? undefined}>
-            {renderSkillInlineMarkdownChildren(children, skills)}
-          </li>
+          <MarkdownListItem node={node} skills={skills} {...props}>
+            {children}
+          </MarkdownListItem>
         );
       },
       input({ node: _node, type, checked, disabled: _disabled, ...props }) {
@@ -1686,11 +1849,19 @@ function ChatMarkdown({
       openMarkdownFileInPreview,
       resolvedTheme,
       skills,
-      text,
       threadRef,
       threadRoots.all,
     ],
   );
+
+  // Streaming-only: completed top-level blocks render from memoized elements
+  // so each text commit re-parses only the trailing (still-growing) block.
+  // The settled path renders the whole text in one pass, unchanged.
+  const markdownBlocks = useMemo(
+    () => (isStreaming ? splitMarkdownIntoBlocks(text) : null),
+    [isStreaming, text],
+  );
+  const wholeTextSource = useMemo<MarkdownSourceContextValue>(() => ({ text, offset: 0 }), [text]);
 
   return (
     <div
@@ -1700,14 +1871,36 @@ function ChatMarkdown({
       )}
       onCopy={handleCopy}
     >
-      <ReactMarkdown
-        remarkPlugins={remarkPlugins}
-        rehypePlugins={CHAT_MARKDOWN_REHYPE_PLUGINS}
-        components={markdownComponents}
-        urlTransform={markdownUrlTransform}
-      >
-        {text}
-      </ReactMarkdown>
+      {markdownBlocks !== null && markdownBlocks.length > 1 ? (
+        // Block starts are stable while streaming appends, so they are safe
+        // list keys; content changes (e.g. a later boundary merging into a
+        // block) re-render in place. The "\n" separators replicate the text
+        // nodes remark-rehype emits between top-level elements, keeping the
+        // DOM byte-identical to a whole-text render.
+        markdownBlocks.map((block, index) => (
+          <React.Fragment key={block.start}>
+            {index > 0 ? "\n" : null}
+            <MemoizedChatMarkdownBlock
+              content={block.content}
+              start={block.start}
+              components={markdownComponents}
+              remarkPlugins={remarkPlugins}
+              urlTransform={markdownUrlTransform}
+            />
+          </React.Fragment>
+        ))
+      ) : (
+        <MarkdownSourceContext.Provider value={wholeTextSource}>
+          <ReactMarkdown
+            remarkPlugins={remarkPlugins}
+            rehypePlugins={CHAT_MARKDOWN_REHYPE_PLUGINS}
+            components={markdownComponents}
+            urlTransform={markdownUrlTransform}
+          >
+            {text}
+          </ReactMarkdown>
+        </MarkdownSourceContext.Provider>
+      )}
     </div>
   );
 }

@@ -48,6 +48,7 @@ import { writeFileStringAtomically } from "../atomicWrite.ts";
 import { ServerConfig } from "../config.ts";
 import * as GraphAvailability from "./GraphAvailability.ts";
 import {
+  GRAPH_DIRTY_FILE_NAME,
   GRAPH_META_FILE_NAME,
   GRAPHIFY_OUT_DIR_NAME,
   type GraphStoreKeyInput,
@@ -61,6 +62,10 @@ const MAX_MEASURE_DEPTH = 16;
 
 const decodeEntry = Schema.decodeUnknownEffect(Schema.fromJsonString(GraphStoreEntrySchema));
 const encodeEntry = Schema.encodeEffect(Schema.fromJsonString(GraphStoreEntrySchema));
+
+/** Contents of the dirty marker. Never read back; existence is the datum. */
+const DirtyMarker = Schema.Struct({ markedAt: Schema.Number });
+const encodeDirtyMarker = Schema.encodeEffect(Schema.fromJsonString(DirtyMarker));
 
 /**
  * A validated place in the store. Only `GraphStore` can mint one, which is
@@ -102,6 +107,17 @@ export class GraphStore extends Context.Service<
     ) => Effect.Effect<void, GraphStorePathError>;
     /** Stamps `lastOpenedAt`; a no-op when the entry has no metadata yet. */
     readonly touch: (location: GraphStoreLocation) => Effect.Effect<void, GraphStorePathError>;
+    /** True when a deferred auto-rebuild is owed. See {@link markDirty}. */
+    readonly isDirty: (location: GraphStoreLocation) => Effect.Effect<boolean>;
+    /**
+     * Records that the checkout changed after the graph was built but the
+     * rebuild was deferred because nobody had read the graph recently. A
+     * marker file beside `meta.json`, so the debt survives a restart; the
+     * next consumer read settles it (see `GraphService`).
+     */
+    readonly markDirty: (location: GraphStoreLocation) => Effect.Effect<void, GraphStorePathError>;
+    /** Settles the debt. Called whenever a rebuild for the entry is queued. */
+    readonly clearDirty: (location: GraphStoreLocation) => Effect.Effect<void, GraphStorePathError>;
     /** Every well-formed entry on disk. Malformed names are skipped and logged. */
     readonly list: Effect.Effect<ReadonlyArray<GraphStoreListing>, GraphStorePathError>;
     /** Bytes on disk under `entryDir`. Walks the tree, so call it sparingly. */
@@ -300,6 +316,48 @@ export const make = Effect.gen(function* () {
     yield* writeEntry(location, { ...entry, lastOpenedAt: now });
   });
 
+  const dirtyPathOf = (location: GraphStoreLocation) =>
+    path.join(location.entryDir, GRAPH_DIRTY_FILE_NAME);
+
+  // A pure existence probe on a path this module computed, same trust level
+  // as `readEntry`'s read of `meta.json` — hence no guard and no error.
+  const isDirty: GraphStore["Service"]["isDirty"] = (location) =>
+    fs.exists(dirtyPathOf(location)).pipe(Effect.orElseSucceed(() => false));
+
+  const markDirty: GraphStore["Service"]["markDirty"] = Effect.fn("GraphStore.markDirty")(
+    function* (location) {
+      yield* guardedTargetPath([location.projectId, location.directoryName], location.entryDir);
+      const now = yield* Clock.currentTimeMillis;
+      // The timestamp is for a human reading the store, not for logic: the
+      // marker's existence is the datum, so an empty fallback is still a mark.
+      const contents = yield* encodeDirtyMarker({ markedAt: now }).pipe(
+        Effect.orElseSucceed(() => "{}"),
+      );
+      yield* fs.writeFileString(dirtyPathOf(location), contents).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("graph-store dirty-mark failed", {
+            entryDir: location.entryDir,
+            cause,
+          }),
+        ),
+      );
+    },
+  );
+
+  const clearDirty: GraphStore["Service"]["clearDirty"] = Effect.fn("GraphStore.clearDirty")(
+    function* (location) {
+      yield* guardedTargetPath([location.projectId, location.directoryName], location.entryDir);
+      yield* fs.remove(dirtyPathOf(location), { force: true }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("graph-store dirty-clear failed", {
+            entryDir: location.entryDir,
+            cause,
+          }),
+        ),
+      );
+    },
+  );
+
   const readDirectoryOrEmpty = (target: string) =>
     fs.readDirectory(target).pipe(Effect.catchCause(() => Effect.succeed([] as Array<string>)));
 
@@ -422,6 +480,9 @@ export const make = Effect.gen(function* () {
     readEntry,
     writeEntry,
     touch,
+    isDirty,
+    markDirty,
+    clearDirty,
     list,
     measure,
     evict,

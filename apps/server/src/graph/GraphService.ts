@@ -127,6 +127,60 @@ export const make = Effect.gen(function* () {
   const isStale = (resolved: ResolvedGraphWorkspace, entryHeadSha: string | null): boolean =>
     resolved.headSha === null || entryHeadSha === null || entryHeadSha !== resolved.headSha;
 
+  /**
+   * The consume-time half of auto-rebuild's consumer gating.
+   *
+   * `GraphAutoRebuild` defers rebuilds for graphs nobody has read within its
+   * recency window, leaving a dirty mark in the store instead of spending CPU.
+   * The first read after that settles the debt: serve the graph on disk *now*
+   * and queue one structural refresh in the background. Serving stale is the
+   * contract every read already has — the response carries a `stale` flag and
+   * the worker is fire-and-forget by design, so awaiting a minutes-long
+   * extraction here would only produce RPC timeouts.
+   *
+   * Deliberately total: a read must never fail because its background refresh
+   * could not be arranged. What cannot be arranged now (runtime missing,
+   * settings unreadable) leaves the mark in place for a later read.
+   */
+  const settleDeferredRebuild = Effect.fn("GraphService.settleDeferredRebuild")(function* (
+    resolved: ResolvedGraphWorkspace,
+  ) {
+    if (!(yield* store.isDirty(resolved.location))) return;
+
+    // The mark was made while auto-rebuild was on; honour the setting as it
+    // is *now* — switching it off must stop background builds immediately.
+    const autoRebuild = yield* settingsService.getSettings.pipe(
+      Effect.map((settings) => settings.knowledgeGraph.autoRebuild === true),
+      Effect.orElseSucceed(() => false),
+    );
+    if (!autoRebuild) return;
+
+    // A build already in flight will produce a fresh graph; leave the mark
+    // alone rather than clearing it against work that predates this read.
+    const status = yield* worker.statusFor(resolved.location);
+    if (status.state === "queued" || status.state === "running") return;
+
+    // Same rule as the watcher path: never queue a build that can only fail.
+    const ready = yield* runtime.resolve.pipe(
+      Effect.as(true),
+      Effect.catchCause(() => Effect.succeed(false)),
+    );
+    if (!ready) return;
+
+    yield* store.clearDirty(resolved.location).pipe(Effect.ignore);
+    yield* worker.request({
+      location: resolved.location,
+      workspaceRoot: resolved.workspaceRoot,
+      headSha: resolved.headSha,
+      mode: "structural",
+      force: false,
+    });
+    yield* Effect.logInfo("graph.autoRebuild.on-consume", {
+      projectId: resolved.location.projectId,
+      branch: resolved.branch,
+    });
+  });
+
   /** Reads and stamps the open — the part every read shares after resolution. */
   const openGraph = Effect.fn("GraphService.openGraph")(function* (
     resolved: ResolvedGraphWorkspace,
@@ -135,6 +189,7 @@ export const make = Effect.gen(function* () {
     if (loaded === null) return { loaded: null, snapshot: null } as const;
 
     yield* store.touch(resolved.location);
+    yield* settleDeferredRebuild(resolved);
     const entry = yield* store.readEntry(resolved.location);
     const snapshot = graphSnapshot(loaded.index, {
       // `meta.json` is T3's record of the build; `graph.json`'s mtime is the
@@ -172,13 +227,16 @@ export const make = Effect.gen(function* () {
       // Fail fast on a missing toolchain rather than queueing a job that can
       // only fail: the caller asked for a build and deserves the reason now.
       yield* runtime.resolve;
-      return yield* worker.request({
+      const status = yield* worker.request({
         location: resolved.location,
         workspaceRoot: resolved.workspaceRoot,
         headSha: resolved.headSha,
         mode: input.mode,
         force: input.force,
       });
+      // An explicit build settles any deferred auto-rebuild owed on the entry.
+      yield* store.clearDirty(resolved.location).pipe(Effect.ignore);
+      return status;
     },
   );
 
