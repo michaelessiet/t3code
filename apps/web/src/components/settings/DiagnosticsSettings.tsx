@@ -37,7 +37,8 @@ import { Button } from "../ui/button";
 import { ScrollArea } from "../ui/scroll-area";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
-import { SettingsPageContainer, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
+import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
+import { useNowMinute } from "../../hooks/useNowMinute";
 import { useAtomCommand } from "../../state/use-atom-command";
 
 const NUMBER_FORMAT = new Intl.NumberFormat();
@@ -753,7 +754,8 @@ function ProcessResourceHistoryTable({
 }
 
 function DiagnosticsLastChecked({ checkedAt }: { checkedAt: DateTime.Utc | null }) {
-  useRelativeTimeTick();
+  // Minute ticks are enough: the label never renders sub-minute precision.
+  useNowMinute();
   const relative = getRelativeTimeState(checkedAt ? DateTime.formatIso(checkedAt) : null);
 
   if (relative.status === "missing") {

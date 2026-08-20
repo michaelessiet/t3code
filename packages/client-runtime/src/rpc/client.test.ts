@@ -355,6 +355,72 @@ describe("environment RPC", () => {
     }),
   );
 
+  it.effect("backs off exponentially across consecutive expected failures", () =>
+    Effect.gen(function* () {
+      const domainError = new Error("thread not found yet");
+      const subscriptionCount = yield* Ref.make(0);
+      const expectedFailureCount = yield* Ref.make(0);
+      const client = {
+        [WS_METHODS.subscribeTerminalEvents]: () =>
+          Stream.unwrap(
+            Ref.getAndUpdate(subscriptionCount, (count) => count + 1).pipe(
+              Effect.map((count) => (count < 2 ? Stream.fail(domainError) : Stream.never)),
+            ),
+          ),
+      } as unknown as WsRpcProtocolClient;
+      const { activeSession, supervisor } = yield* makeHarness();
+
+      yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+      const subscriptionFiber = yield* subscribe(
+        WS_METHODS.subscribeTerminalEvents,
+        {},
+        {
+          onExpectedFailure: () => Ref.update(expectedFailureCount, (count) => count + 1),
+          retryExpectedFailureAfter: "100 millis",
+        },
+      ).pipe(
+        Stream.runDrain,
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.forkChild,
+      );
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if ((yield* Ref.get(expectedFailureCount)) >= 1) {
+          break;
+        }
+        yield* Effect.yieldNow;
+      }
+
+      yield* TestClock.adjust("100 millis");
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if ((yield* Ref.get(expectedFailureCount)) >= 2) {
+          break;
+        }
+        yield* Effect.yieldNow;
+      }
+      expect(yield* Ref.get(subscriptionCount)).toBe(2);
+      expect(yield* Ref.get(expectedFailureCount)).toBe(2);
+
+      // The second consecutive failure doubles the delay: 100ms is not enough.
+      yield* TestClock.adjust("100 millis");
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        yield* Effect.yieldNow;
+      }
+      expect(yield* Ref.get(subscriptionCount)).toBe(2);
+
+      yield* TestClock.adjust("100 millis");
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if ((yield* Ref.get(subscriptionCount)) >= 3) {
+          break;
+        }
+        yield* Effect.yieldNow;
+      }
+      yield* Fiber.interrupt(subscriptionFiber);
+
+      expect(yield* Ref.get(subscriptionCount)).toBe(3);
+      expect(yield* Ref.get(expectedFailureCount)).toBe(2);
+    }),
+  );
+
   it.effect("does not classify subscription defects as expected failures", () =>
     Effect.gen(function* () {
       const defect = new Error("subscription invariant failed");

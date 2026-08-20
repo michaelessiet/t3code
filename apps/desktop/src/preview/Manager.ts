@@ -105,6 +105,17 @@ const PICTURE_IN_PICTURE_INITIAL_HEIGHT = 320;
 const PICTURE_IN_PICTURE_MIN_WIDTH = 240;
 const PICTURE_IN_PICTURE_MIN_HEIGHT = 160;
 const DIAGNOSTIC_BUFFER_LIMIT = 200;
+// In-flight request bookkeeping is normally pruned on loadingFinished /
+// loadingFailed, but long-lived requests (SSE, websockets) never emit those,
+// so the map is additionally bounded to the newest entries.
+const REQUEST_TRACKING_LIMIT = 500;
+// Diagnostics never call Network.getResponseBody, so keep Chromium's
+// per-target response-body retention buffers as small as practical instead of
+// the multi-megabyte defaults.
+const NETWORK_BUFFER_LIMITS = {
+  maxTotalBufferSize: 1_000_000,
+  maxResourceBufferSize: 200_000,
+} as const;
 const MAX_ARTIFACT_SITE_SLUG_LENGTH = 80;
 const AGENT_CURSOR_MOVE_MS = 160;
 const AGENT_CURSOR_CLICK_LEAD_MS = 40;
@@ -369,6 +380,10 @@ interface BrowserControlSession {
   readonly webContentsId: number;
   readonly semaphore: Semaphore.Semaphore;
   readonly scope: Scope.Closeable;
+  // Network capture is deferred until the first automation action so a
+  // session attached only to hold an emulation override (color scheme) does
+  // not stream a CDP event for every request the previewed app makes.
+  readonly networkEnabledRef: Ref.Ref<boolean>;
   readonly onMessage: (
     event: Electron.Event,
     method: string,
@@ -765,6 +780,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
                 url: String(request["url"] ?? ""),
                 method: String(request["method"] ?? "GET"),
               });
+              // Evict the oldest in-flight entries: streaming requests never
+              // emit loadingFinished/loadingFailed and would leak otherwise.
+              for (const oldestRequestId of copy.keys()) {
+                if (copy.size <= REQUEST_TRACKING_LIMIT) break;
+                copy.delete(oldestRequestId);
+              }
             }),
           };
         }
@@ -870,6 +891,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         }
         const createControlSession = Effect.fn("PreviewManager.createControlSession")(function* () {
           const semaphore = yield* Semaphore.make(1);
+          const networkEnabledRef = yield* Ref.make(false);
           const scope = yield* Scope.fork(parentScope, "sequential");
           const handleDebuggerMessage = Effect.fn("PreviewManager.handleDebuggerMessage")(
             function* (method: string, params: Record<string, unknown>) {
@@ -900,6 +922,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             webContentsId: wc.id,
             semaphore,
             scope,
+            networkEnabledRef,
             onMessage,
           };
           const initialize = Effect.fn("PreviewManager.initializeControlSession")(function* () {
@@ -916,13 +939,21 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
               wc.debugger.on("message", onMessage);
               wc.debugger.attach("1.3");
             });
+            // Standing domains are deliberately minimal. Runtime + Log feed
+            // the console diagnostics buffer (and CDP replays buffered console
+            // messages on enable, so history predating the attach survives).
+            // Network is enabled by the first automation action (see
+            // ensureNetworkDomain): network failures have no replay-on-enable,
+            // so it must stay on between actions of an agent-controlled tab,
+            // but tabs that only carry an emulation override skip it entirely.
+            // Accessibility is enabled only around snapshot capture — keeping
+            // it on forces full AX-tree maintenance on every DOM mutation.
             yield* Effect.all(
-              ["Runtime.enable", "Accessibility.enable", "Network.enable", "Log.enable"].map(
-                (method) =>
-                  attemptPromise(
-                    { operation: `initializeDebugger.${method}`, webContentsId: wc.id },
-                    () => wc.debugger.sendCommand(method),
-                  ),
+              ["Runtime.enable", "Log.enable"].map((method) =>
+                attemptPromise(
+                  { operation: `initializeDebugger.${method}`, webContentsId: wc.id },
+                  () => wc.debugger.sendCommand(method),
+                ),
               ),
               { concurrency: "unbounded", discard: true },
             );
@@ -940,6 +971,22 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         return createControlSession();
       },
     );
+  });
+
+  // Enables network-failure capture for an agent-controlled session. Runs
+  // once per control session (on its first automation action) and stays on
+  // until the session detaches, so failures that happen between an agent's
+  // actions are still visible to a later diagnostics query.
+  const ensureNetworkDomain = Effect.fn("PreviewManager.ensureNetworkDomain")(function* (
+    control: BrowserControlSession,
+    wc: Electron.WebContents,
+  ) {
+    if (yield* Ref.get(control.networkEnabledRef)) return;
+    yield* attemptPromise(
+      { operation: "initializeDebugger.Network.enable", webContentsId: wc.id },
+      () => wc.debugger.sendCommand("Network.enable", NETWORK_BUFFER_LIMITS),
+    );
+    yield* Ref.set(control.networkEnabledRef, true);
   });
 
   const pushAction = (tabId: string, event: PreviewAutomationActionEvent) =>
@@ -998,6 +1045,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const control = yield* ensureControlSession(wc);
     const execute = Effect.fn("PreviewManager.executeControlAction")(function* () {
       yield* update(tabId, { controller: "agent" });
+      yield* ensureNetworkDomain(control, wc);
       const send: SendCommand = Effect.fn("PreviewManager.sendCommand")(
         function* (method, commandParams) {
           const before = (yield* Ref.get(controlEpochRef)).get(tabId) ?? 0;
@@ -1535,6 +1583,9 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     }
     const replacedWebContentsId =
       tab.webContentsId != null && tab.webContentsId !== webContentsId ? tab.webContentsId : null;
+    const hadControlSession =
+      replacedWebContentsId !== null &&
+      (yield* SynchronizedRef.get(controlSessionsRef)).has(replacedWebContentsId);
     if (replacedWebContentsId !== null) {
       yield* Effect.all(
         [
@@ -1609,7 +1660,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       return yield* new PreviewTabNotFoundError({ tabId });
     }
     const { state: registered, pendingUrl } = registration.value;
-    runFork(restoreControlSession(tabId, wc));
+    runFork(restoreControlSession(tabId, wc, hadControlSession));
     yield* emit(tabId, registered);
     yield* attempt({ operation: "registerWebview.sendTheme", tabId, webContentsId }, () =>
       wc.send(ANNOTATION_THEME_CHANNEL, annotationTheme),
@@ -1725,10 +1776,11 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       );
       return;
     }
+    const hadControlSession = (yield* SynchronizedRef.get(controlSessionsRef)).has(wc.id);
     yield* detachControlSession(wc.id);
     yield* attempt({ operation: "openDevTools", tabId, webContentsId: wc.id }, () => {
       wc.once("devtools-closed", () => {
-        if (!wc.isDestroyed()) runFork(restoreControlSession(tabId, wc));
+        if (!wc.isDestroyed()) runFork(restoreControlSession(tabId, wc, hadControlSession));
       });
       wc.openDevTools({ mode: "detach" });
     });
@@ -1895,6 +1947,13 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     wc: Electron.WebContents,
     colorScheme: DesktopPreviewColorScheme,
   ) {
+    if (colorScheme === "system") {
+      // Emulated media overrides die with the CDP session, so with no session
+      // attached there is nothing to clear — don't attach a debugger just to
+      // reset emulation to its default.
+      const sessions = yield* SynchronizedRef.get(controlSessionsRef);
+      if (!sessions.has(wc.id)) return;
+    }
     yield* ensureControlSession(wc);
     yield* attemptPromise({ operation: "applyColorScheme", tabId, webContentsId: wc.id }, () =>
       wc.debugger.sendCommand("Emulation.setEmulatedMedia", {
@@ -1913,10 +1972,25 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   // color-scheme override the tab carries. The scheme is read after the
   // session attaches so a concurrent setColorScheme is not overwritten with
   // a stale snapshot.
-  const restoreControlSession = (tabId: string, wc: Electron.WebContents) =>
+  //
+  // The attach is lazy: a fresh webview with no automation history and no
+  // emulation override gets NO debugger session (Chromium would otherwise
+  // maintain CDP state and stream events for every preview tab forever).
+  // `hadControlSession` marks that the guest being replaced (webview swap,
+  // DevTools open/close) carried a session — i.e. an agent or an emulation
+  // override was already using this tab — so the session is re-established.
+  // Everything else attaches on demand via ensureControlSession the first
+  // time an automation action or color-scheme override needs it; diagnostics
+  // history therefore starts at the first sign of agent interest.
+  const restoreControlSession = (
+    tabId: string,
+    wc: Electron.WebContents,
+    hadControlSession: boolean,
+  ) =>
     Effect.gen(function* () {
       const beforeAttach = (yield* SynchronizedRef.get(tabsRef)).get(tabId);
       if (beforeAttach?.webContentsId !== wc.id) return;
+      if (!hadControlSession && beforeAttach.colorScheme === "system") return;
       yield* ensureControlSession(wc);
       const afterAttach = (yield* SynchronizedRef.get(tabsRef)).get(tabId);
       if (afterAttach?.webContentsId !== wc.id) {
@@ -2677,8 +2751,13 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     tabId: string,
   ) {
     const wc = yield* requireWebContents(tabId);
-    return yield* withControlSession(tabId, wc, "snapshot", (send) =>
-      captureAutomationSnapshot(tabId, wc, send),
+    return yield* withControlSession(tabId, wc, "snapshot", (send, sendCleanup) =>
+      captureAutomationSnapshot(tabId, wc, send).pipe(
+        // AX-tree maintenance is expensive on DOM-heavy apps, so the
+        // Accessibility domain is enabled only for the duration of a snapshot
+        // (captureAutomationSnapshot re-enables it at the start of each one).
+        Effect.ensuring(sendCleanup("Accessibility.disable").pipe(Effect.ignore)),
+      ),
     );
   });
 

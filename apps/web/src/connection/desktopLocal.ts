@@ -89,9 +89,32 @@ export function createDesktopSecondaryBootstrapsReader(
   };
 }
 
+/**
+ * Build a subscription to the desktop's bootstrap-changed ping. The bridge
+ * event carries no payload; listeners re-read through the sync getters. When
+ * the bridge is absent (web builds) or predates the change event (an older
+ * desktop main under dev version skew), subscribing is a no-op and callers
+ * must rely on their own slow safety re-reads.
+ */
+export function createDesktopLocalBootstrapsChangeSubscription(
+  resolveBridge: () => Pick<DesktopBridge, "onLocalEnvironmentBootstrapsChanged"> | undefined,
+): (listener: () => void) => () => void {
+  return (listener) => {
+    const subscribe = resolveBridge()?.onLocalEnvironmentBootstrapsChanged;
+    if (subscribe === undefined) {
+      return () => {};
+    }
+    return subscribe(listener);
+  };
+}
+
 const desktopSecondaryBootstrapsReader = createDesktopSecondaryBootstrapsReader(
   () => window.desktopBridge,
 );
+
+/** Subscribe to bootstrap-changed pings from the desktop bridge. */
+export const subscribeDesktopLocalBootstrapsChanged: (listener: () => void) => () => void =
+  createDesktopLocalBootstrapsChangeSubscription(() => window.desktopBridge);
 
 /** Read the topology while preserving failures for platform cache policy. */
 export function readDesktopSecondaryBootstrapsResult(): DesktopSecondaryBootstrapsRead {

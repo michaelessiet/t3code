@@ -107,8 +107,8 @@ import {
   SettingsPageContainer,
   SettingsRow,
   SettingsSection,
-  useRelativeTimeTick,
 } from "./settingsLayout";
+import { useNowMinute } from "../../hooks/useNowMinute";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { useAtomCommand } from "../../state/use-atom-command";
 
@@ -194,7 +194,8 @@ const PROVIDER_SETTINGS = DRIVER_OPTIONS.map((definition) => ({
 }));
 
 function ProviderLastChecked({ lastCheckedAt }: { lastCheckedAt: string | null }) {
-  useRelativeTimeTick();
+  // Minute ticks are enough: the label never renders sub-minute precision.
+  useNowMinute();
   const lastCheckedRelative = getRelativeTimeState(lastCheckedAt);
 
   if (lastCheckedRelative.status === "missing") {

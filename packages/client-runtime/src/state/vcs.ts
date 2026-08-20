@@ -22,6 +22,7 @@ import type { EnvironmentRegistry } from "../connection/registry.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
 import { EnvironmentCacheStore } from "../platform/persistence.ts";
+import { pauseWhileDocumentHidden } from "../platform/visibility.ts";
 import { request, subscribe, type EnvironmentRpcInput } from "../rpc/client.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
 import { vcsCommandConcurrency, vcsCommandScheduler } from "./vcsCommandScheduler.ts";
@@ -175,8 +176,15 @@ export function createVcsEnvironmentAtoms<R, E>(
     listRefs,
     status: createEnvironmentSubscriptionAtomFamily(runtime, {
       label: "environment-data:vcs:status",
+      // Every status subscriber retains a server-side remote poller that runs
+      // `git fetch` on an interval, so drop the subscription once the window
+      // has been hidden for a while — the poller is retain-counted and stops
+      // with the last subscriber, and resubscribing on return to visible
+      // starts from a fresh snapshot (which fully rebuilds the status).
       subscribe: (input: EnvironmentRpcInput<typeof WS_METHODS.subscribeVcsStatus>) =>
-        subscribe(WS_METHODS.subscribeVcsStatus, input).pipe(
+        pauseWhileDocumentHidden(subscribe(WS_METHODS.subscribeVcsStatus, input), {
+          hiddenGrace: "2 minutes",
+        }).pipe(
           Stream.mapAccum(
             () => null as VcsStatusResult | null,
             (current, event) => {

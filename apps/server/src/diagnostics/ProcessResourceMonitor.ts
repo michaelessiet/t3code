@@ -18,12 +18,32 @@ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawne
 import * as ProcessDiagnostics from "./ProcessDiagnostics.ts";
 
 const SAMPLE_INTERVAL_MS = 5_000;
+const IDLE_SAMPLE_INTERVAL_MS = 60_000;
+const ACTIVE_SAMPLE_WINDOW_MS = 2 * 60_000;
 const RETENTION_MS = 60 * 60_000;
 const MAX_RETAINED_SAMPLES = 20_000;
+
+/**
+ * Sampling cadence. Each sample spawns `ps`, so sample densely only while
+ * diagnostics history is actively being consumed (the client polls
+ * `readHistory` while the diagnostics panel is open) and fall back to a
+ * sparse baseline otherwise — the baseline keeps enough history that the
+ * panel is useful the moment it opens, without spawning a process every five
+ * seconds forever on servers nobody is inspecting.
+ */
+export function currentSampleIntervalMs(input: {
+  readonly nowMs: number;
+  readonly lastReadAtMs: number | null;
+}): number {
+  return input.lastReadAtMs !== null && input.nowMs - input.lastReadAtMs <= ACTIVE_SAMPLE_WINDOW_MS
+    ? SAMPLE_INTERVAL_MS
+    : IDLE_SAMPLE_INTERVAL_MS;
+}
 
 export interface ProcessResourceSample {
   readonly sampledAt: DateTime.Utc;
   readonly sampledAtMs: number;
+  readonly intervalMs: number;
   readonly processKey: string;
   readonly pid: number;
   readonly ppid: number;
@@ -49,6 +69,8 @@ export class ProcessResourceSamplingError extends Schema.TaggedErrorClass<Proces
 interface MonitorState {
   readonly samples: ReadonlyArray<ProcessResourceSample>;
   readonly lastFailure: ProcessResourceSamplingError | null;
+  readonly lastSampledAtMs: number | null;
+  readonly lastReadAtMs: number | null;
 }
 
 export class ProcessResourceMonitor extends Context.Service<
@@ -80,6 +102,7 @@ export function collectMonitoredSamples(input: {
   readonly serverPid: number;
   readonly sampledAt: DateTime.Utc;
   readonly sampledAtMs: number;
+  readonly intervalMs: number;
 }): ReadonlyArray<ProcessResourceSample> {
   const rows = input.rows.filter(
     (row) => !ProcessDiagnostics.isDiagnosticsQueryProcess(row, input.serverPid),
@@ -92,6 +115,7 @@ export function collectMonitoredSamples(input: {
     samples.push({
       sampledAt: input.sampledAt,
       sampledAtMs: input.sampledAtMs,
+      intervalMs: input.intervalMs,
       processKey: sampleKey(root),
       pid: root.pid,
       ppid: root.ppid,
@@ -107,6 +131,7 @@ export function collectMonitoredSamples(input: {
     samples.push({
       sampledAt: input.sampledAt,
       sampledAtMs: input.sampledAtMs,
+      intervalMs: input.intervalMs,
       processKey: sampleKey(process),
       pid: process.pid,
       ppid: process.ppid,
@@ -151,7 +176,7 @@ function summarizeProcesses(
       const maxCpuPercent = Math.max(...sorted.map((sample) => sample.cpuPercent));
       const maxRssBytes = Math.max(...sorted.map((sample) => sample.rssBytes));
       const cpuSecondsApprox = sorted.reduce(
-        (total, sample) => total + (sample.cpuPercent / 100) * (SAMPLE_INTERVAL_MS / 1_000),
+        (total, sample) => total + (sample.cpuPercent / 100) * (sample.intervalMs / 1_000),
         0,
       );
 
@@ -241,7 +266,7 @@ export function aggregateProcessResourceHistory(input: {
   const samples = input.samples.filter((sample) => sample.sampledAtMs >= minSampledAtMs);
   const topProcesses = summarizeProcesses(samples);
   const totalCpuSecondsApprox = samples.reduce(
-    (total, sample) => total + (sample.cpuPercent / 100) * (SAMPLE_INTERVAL_MS / 1_000),
+    (total, sample) => total + (sample.cpuPercent / 100) * (sample.intervalMs / 1_000),
     0,
   );
 
@@ -265,7 +290,12 @@ export function aggregateProcessResourceHistory(input: {
 
 export const make = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const state = yield* Ref.make<MonitorState>({ samples: [], lastFailure: null });
+  const state = yield* Ref.make<MonitorState>({
+    samples: [],
+    lastFailure: null,
+    lastSampledAtMs: null,
+    lastReadAtMs: null,
+  });
 
   const recordSamplingFailure = (cause: {
     readonly _tag: ServerProcessResourceHistoryFailureTagType;
@@ -278,33 +308,51 @@ export const make = Effect.gen(function* () {
       }),
     }));
 
-  const sampleOnce = Effect.gen(function* () {
-    const sampledAt = yield* DateTime.now;
-    const sampledAtMs = DateTime.toEpochMillis(sampledAt);
-    const rows = yield* ProcessDiagnostics.readProcessRows.pipe(
-      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+  const sampleOnce = (intervalMs: number) =>
+    Effect.gen(function* () {
+      const sampledAt = yield* DateTime.now;
+      const sampledAtMs = DateTime.toEpochMillis(sampledAt);
+      const rows = yield* ProcessDiagnostics.readProcessRows.pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+      const samples = collectMonitoredSamples({
+        rows,
+        serverPid: process.pid,
+        sampledAt,
+        sampledAtMs,
+        intervalMs,
+      });
+      yield* Ref.update(state, (current) => ({
+        ...current,
+        samples: trimSamples([...current.samples, ...samples], sampledAtMs),
+        lastFailure: null,
+      }));
+    }).pipe(
+      Effect.catchTags({
+        ProcessDiagnosticsQueryTimeoutError: recordSamplingFailure,
+        ProcessDiagnosticsQueryFailedError: recordSamplingFailure,
+        ProcessDiagnosticsServerProcessSignalError: recordSamplingFailure,
+        ProcessDiagnosticsNotDescendantError: recordSamplingFailure,
+        ProcessDiagnosticsSignalFailedError: recordSamplingFailure,
+      }),
     );
-    const samples = collectMonitoredSamples({
-      rows,
-      serverPid: process.pid,
-      sampledAt,
-      sampledAtMs,
-    });
-    yield* Ref.update(state, (current) => ({
-      samples: trimSamples([...current.samples, ...samples], sampledAtMs),
-      lastFailure: null,
-    }));
-  }).pipe(
-    Effect.catchTags({
-      ProcessDiagnosticsQueryTimeoutError: recordSamplingFailure,
-      ProcessDiagnosticsQueryFailedError: recordSamplingFailure,
-      ProcessDiagnosticsServerProcessSignalError: recordSamplingFailure,
-      ProcessDiagnosticsNotDescendantError: recordSamplingFailure,
-      ProcessDiagnosticsSignalFailedError: recordSamplingFailure,
-    }),
-  );
 
-  yield* Effect.forever(sampleOnce.pipe(Effect.andThen(Effect.sleep(SAMPLE_INTERVAL_MS)))).pipe(
+  // The tick fiber wakes every SAMPLE_INTERVAL_MS, but a tick that isn't due
+  // yet is a couple of Ref reads — the `ps` spawn only happens on the current
+  // cadence (dense while readHistory is being polled, sparse baseline
+  // otherwise). This mirrors the retain-gated PortScanner poll loop.
+  const sampleTick = Effect.gen(function* () {
+    const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+    const current = yield* Ref.get(state);
+    const intervalMs = currentSampleIntervalMs({ nowMs, lastReadAtMs: current.lastReadAtMs });
+    if (current.lastSampledAtMs !== null && nowMs - current.lastSampledAtMs < intervalMs) {
+      return;
+    }
+    yield* Ref.update(state, (previous) => ({ ...previous, lastSampledAtMs: nowMs }));
+    yield* sampleOnce(intervalMs);
+  });
+
+  yield* Effect.forever(sampleTick.pipe(Effect.andThen(Effect.sleep(SAMPLE_INTERVAL_MS)))).pipe(
     Effect.forkScoped,
   );
 
@@ -312,7 +360,10 @@ export const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const readAt = yield* DateTime.now;
       const readAtMs = DateTime.toEpochMillis(readAt);
-      const current = yield* Ref.get(state);
+      const current = yield* Ref.modify(state, (previous) => [
+        previous,
+        { ...previous, lastReadAtMs: readAtMs },
+      ]);
       return aggregateProcessResourceHistory({
         samples: current.samples,
         readAt,

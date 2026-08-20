@@ -6,6 +6,7 @@ import { EnvironmentId, PRIMARY_LOCAL_ENVIRONMENT_ID } from "@t3tools/contracts"
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  createDesktopLocalBootstrapsChangeSubscription,
   createDesktopSecondaryBootstrapsReader,
   desktopLocalBackendId,
   desktopLocalConnectionId,
@@ -34,6 +35,44 @@ describe("desktop local connection identity", () => {
 
     expect(isDesktopLocalConnectionTarget(target)).toBe(false);
     expect(desktopLocalBackendId(target)).toBeNull();
+  });
+});
+
+describe("desktop local bootstrap change subscription", () => {
+  it("forwards the listener to the bridge and returns its unsubscribe", () => {
+    const listeners: Array<() => void> = [];
+    let unsubscribed = 0;
+    const subscribe = createDesktopLocalBootstrapsChangeSubscription(() => ({
+      onLocalEnvironmentBootstrapsChanged: (listener) => {
+        listeners.push(listener);
+        return () => {
+          unsubscribed += 1;
+        };
+      },
+    }));
+
+    let notified = 0;
+    const unsubscribe = subscribe(() => {
+      notified += 1;
+    });
+
+    expect(listeners).toHaveLength(1);
+    listeners[0]!();
+    expect(notified).toBe(1);
+
+    unsubscribe();
+    expect(unsubscribed).toBe(1);
+  });
+
+  it("is a no-op without a bridge or on an older desktop main lacking the event", () => {
+    const withoutBridge = createDesktopLocalBootstrapsChangeSubscription(() => undefined);
+    expect(() => withoutBridge(() => {})()).not.toThrow();
+
+    // Version skew: the renderer may run against a desktop main that predates
+    // onLocalEnvironmentBootstrapsChanged; consumers then rely on their slow
+    // safety re-reads.
+    const withoutEvent = createDesktopLocalBootstrapsChangeSubscription(() => ({}));
+    expect(() => withoutEvent(() => {})()).not.toThrow();
   });
 });
 

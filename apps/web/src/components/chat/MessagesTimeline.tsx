@@ -39,6 +39,7 @@ import {
 } from "../../lib/diffRendering";
 import ChatMarkdown from "../ChatMarkdown";
 import { useSmoothedStreamingText } from "~/hooks/useSmoothedStreamingText";
+import { subscribeToNowSecond } from "~/hooks/useNowSecond";
 import {
   BotIcon,
   CheckIcon,
@@ -1227,8 +1228,11 @@ function WorkingTimer({ createdAt }: { createdAt: string }) {
       }
     };
     updateText();
-    const id = setInterval(updateText, 1000);
-    return () => clearInterval(id);
+    // Driven by the shared visibility-aware second ticker instead of an own
+    // setInterval: still a direct textContent write (no React commit per
+    // second), but one timer app-wide that pauses while the window is hidden
+    // and self-corrects the label on return to visible.
+    return subscribeToNowSecond(updateText);
   }, [createdAt]);
 
   return (

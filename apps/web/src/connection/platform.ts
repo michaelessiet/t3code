@@ -55,6 +55,7 @@ import { acknowledgeRpcRequest, trackRpcRequestSent } from "../rpc/requestLatenc
 import {
   desktopLocalConnectionId,
   readDesktopSecondaryBootstrapsResult,
+  subscribeDesktopLocalBootstrapsChanged,
   type DesktopSecondaryBootstrapsRead,
 } from "./desktopLocal";
 import { connectionStorageLayer } from "./storage";
@@ -357,11 +358,42 @@ const loadSecondaryConnectionRegistration = Effect.fn(
   };
 });
 
-// Poll cadence for the desktop bootstrap topology. There is no change event on
-// the bridge, so the renderer polls; successful registrations are cached by a
-// signature of their endpoint + token until bearer credentials approach expiry.
-const PLATFORM_POLL_INTERVAL = "3 seconds";
+// Safety cadence for the desktop bootstrap topology. The desktop bridge pushes
+// a change ping whenever the topology may have changed (backend ready/stopped,
+// WSL toggled, pool instance registered/unregistered), so registrations
+// rebuild on demand; this slow tick only catches anything the event misses.
+// It is also the sole trigger on web builds (no bridge) and against older
+// desktop mains that predate the change event (version skew in dev), which
+// therefore degrade to a 60-second poll instead of breaking. Successful
+// registrations are cached by a signature of their endpoint + token until
+// bearer credentials approach expiry, so a rebuild without topology changes
+// is cheap.
+const PLATFORM_SAFETY_POLL_INTERVAL = "60 seconds";
 const SECONDARY_BEARER_REFRESH_SKEW_MS = 5_000;
+
+/**
+ * Trigger stream for (re)building platform registrations: emits immediately
+ * (Stream.tick's first element is instant), then on every bridge
+ * bootstrap-changed ping, plus the slow safety tick. Exported for tests.
+ */
+export function makePlatformRegistrationTriggers(
+  subscribeToBootstrapChanges: (listener: () => void) => () => void,
+  safetyInterval: Parameters<typeof Stream.tick>[0] = PLATFORM_SAFETY_POLL_INTERVAL,
+): Stream.Stream<void> {
+  return Stream.merge(
+    Stream.tick(safetyInterval),
+    Stream.callback<void>((queue) =>
+      Effect.acquireRelease(
+        Effect.sync(() =>
+          subscribeToBootstrapChanges(() => {
+            Queue.offerUnsafe(queue, undefined);
+          }),
+        ),
+        (unsubscribe) => Effect.sync(() => unsubscribe()),
+      ).pipe(Effect.asVoid),
+    ),
+  );
+}
 
 export function secondaryBearerExpiresAtEpochMs(
   issuedAtEpochMs: number,
@@ -466,7 +498,8 @@ const platformConnectionSourceLayer = Layer.effect(
     // Resolve the full set of platform-managed environments the host currently
     // reports: the primary (same-origin cookie auth) plus any desktop-local
     // backends running alongside it (bearer auth). Reused registrations come
-    // from the cache; a failed entry is skipped and retried on the next poll.
+    // from the cache; a failed entry is skipped and retried on the next
+    // trigger (bridge change ping or safety tick).
     const buildPlatformRegistrations = Effect.gen(function* () {
       const previous = yield* Ref.get(cacheRef);
       const nowEpochMs = yield* Clock.currentTimeMillis;
@@ -566,7 +599,7 @@ const platformConnectionSourceLayer = Layer.effect(
     }).pipe(Effect.provide(FetchHttpClient.layer));
 
     return PlatformConnectionSource.of({
-      registrations: Stream.tick(PLATFORM_POLL_INTERVAL).pipe(
+      registrations: makePlatformRegistrationTriggers(subscribeDesktopLocalBootstrapsChanged).pipe(
         Stream.mapEffect(() => buildPlatformRegistrations),
       ),
     });

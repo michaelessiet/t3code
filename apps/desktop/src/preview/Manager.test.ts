@@ -134,6 +134,7 @@ const makeTestPreviewWebContents = (
   ({
     id,
     isDestroyed: () => false,
+    isDevToolsOpened: () => false,
     getType: () => "webview",
     getURL: () => "https://example.com",
     getTitle: () => "Example",
@@ -515,6 +516,197 @@ describe("PreviewManager", () => {
           features: [{ name: "prefers-color-scheme", value: "" }],
         });
         expect(states.at(-1)?.colorScheme).toBe("system");
+      }),
+    ),
+  );
+
+  const makeAutomationWebContents = (
+    id: number,
+    sendCommand: ReturnType<typeof vi.fn> = vi.fn(async () => undefined),
+  ) => {
+    const debuggerListeners = new Map<string, (...args: unknown[]) => void>();
+    const attach = vi.fn();
+    return {
+      attach,
+      sendCommand,
+      debuggerListeners,
+      wc: {
+        id,
+        isDestroyed: () => false,
+        isDevToolsOpened: () => false,
+        getType: () => "webview",
+        getURL: () => "https://example.com",
+        getTitle: () => "Example",
+        isLoading: () => false,
+        getZoomFactor: () => 1,
+        setZoomFactor: vi.fn(),
+        on: vi.fn(),
+        off: vi.fn(),
+        ipc: { on: vi.fn(), off: vi.fn() },
+        send: webviewSend,
+        navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+        setWindowOpenHandler: vi.fn(),
+        debugger: {
+          isAttached: () => false,
+          attach,
+          sendCommand,
+          on: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
+            debuggerListeners.set(event, listener);
+          }),
+          off: vi.fn(),
+        },
+      } as never,
+    };
+  };
+
+  effectIt.effect("does not attach a debugger to a freshly registered webview", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const guest = makeAutomationWebContents(42);
+        fromId.mockReturnValue(guest.wc);
+
+        yield* manager.createTab("tab_plain");
+        yield* manager.registerWebview("tab_plain", 42);
+        yield* Effect.yieldNow;
+
+        expect(guest.attach).not.toHaveBeenCalled();
+        expect(guest.sendCommand).not.toHaveBeenCalled();
+
+        // A swap of a never-automated tab must not attach either.
+        const replacement = makeAutomationWebContents(43);
+        fromId.mockImplementation((id) => (id === 43 ? replacement.wc : guest.wc));
+        yield* manager.registerWebview("tab_plain", 43);
+        yield* Effect.yieldNow;
+
+        expect(replacement.attach).not.toHaveBeenCalled();
+        expect(replacement.sendCommand).not.toHaveBeenCalled();
+      }),
+    ),
+  );
+
+  effectIt.effect("attaches the debugger on the first automation action", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const sendCommand = vi.fn(async (method: string) =>
+          method === "Runtime.evaluate" ? { result: { value: 7 } } : undefined,
+        );
+        const guest = makeAutomationWebContents(42, sendCommand);
+        fromId.mockReturnValue(guest.wc);
+
+        yield* manager.createTab("tab_lazy");
+        yield* manager.registerWebview("tab_lazy", 42);
+        yield* Effect.yieldNow;
+        expect(guest.attach).not.toHaveBeenCalled();
+
+        const result = yield* manager.automationEvaluate("tab_lazy", { expression: "1 + 6" });
+
+        expect(result).toBe(7);
+        expect(guest.attach).toHaveBeenCalledOnce();
+        const methods = sendCommand.mock.calls.map(([method]) => method);
+        expect(methods).toContain("Runtime.enable");
+        expect(methods).toContain("Log.enable");
+        // Network capture starts with the first automation action, with
+        // bounded response-body buffers, and is not re-enabled per action.
+        expect(sendCommand).toHaveBeenCalledWith("Network.enable", {
+          maxTotalBufferSize: 1_000_000,
+          maxResourceBufferSize: 200_000,
+        });
+        // The accessibility tree is only maintained while a snapshot runs.
+        expect(methods).not.toContain("Accessibility.enable");
+
+        yield* manager.automationEvaluate("tab_lazy", { expression: "1 + 6" });
+        expect(guest.attach).toHaveBeenCalledOnce();
+        expect(
+          sendCommand.mock.calls.filter(([method]) => method === "Network.enable"),
+        ).toHaveLength(1);
+      }),
+    ),
+  );
+
+  effectIt.effect("restores a control session across webview swaps for automated tabs", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const sendCommand = vi.fn(async (method: string) =>
+          method === "Runtime.evaluate" ? { result: { value: 1 } } : undefined,
+        );
+        const first = makeAutomationWebContents(42, sendCommand);
+        const second = makeAutomationWebContents(43);
+        fromId.mockImplementation((id) => (id === 43 ? second.wc : first.wc));
+
+        yield* manager.createTab("tab_swap");
+        yield* manager.registerWebview("tab_swap", 42);
+        yield* Effect.yieldNow;
+        yield* manager.automationEvaluate("tab_swap", { expression: "1" });
+        expect(first.attach).toHaveBeenCalledOnce();
+
+        yield* manager.registerWebview("tab_swap", 43);
+        yield* Effect.yieldNow;
+
+        expect(second.attach).toHaveBeenCalledOnce();
+        const methods = second.sendCommand.mock.calls.map((call) => call[0] as string);
+        expect(methods).toContain("Runtime.enable");
+        expect(methods).toContain("Log.enable");
+      }),
+    ),
+  );
+
+  effectIt.effect("bounds in-flight network request tracking and scopes the AX domain", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const page = {
+          url: "https://example.com",
+          title: "Example",
+          loading: false,
+          visibleText: "",
+          interactiveElements: [],
+        };
+        const sendCommand = vi.fn(async (method: string) =>
+          method === "Runtime.evaluate" ? { result: { value: page } } : undefined,
+        );
+        const capturePage = vi.fn(async () => ({
+          getSize: () => ({ width: 800, height: 600 }),
+          toPNG: () => Buffer.from("snapshot-png"),
+        }));
+        const guest = makeAutomationWebContents(42, sendCommand);
+        (guest.wc as { capturePage: typeof capturePage }).capturePage = capturePage;
+        fromId.mockReturnValue(guest.wc);
+
+        yield* manager.createTab("tab_requests");
+        yield* manager.registerWebview("tab_requests", 42);
+        yield* manager.automationSnapshot("tab_requests");
+
+        expect(sendCommand).toHaveBeenCalledWith("Accessibility.enable", undefined);
+        expect(sendCommand).toHaveBeenCalledWith("Accessibility.disable", undefined);
+
+        const onDebuggerMessage = guest.debuggerListeners.get("message");
+        expect(onDebuggerMessage).toBeDefined();
+        for (let index = 0; index <= 500; index += 1) {
+          onDebuggerMessage?.({}, "Network.requestWillBeSent", {
+            requestId: `request_${index}`,
+            request: { url: `https://example.com/${index}`, method: "GET" },
+          });
+        }
+        // request_0 was evicted by the 500-entry bound; request_500 was kept.
+        onDebuggerMessage?.({}, "Network.responseReceived", {
+          requestId: "request_0",
+          response: { status: 500 },
+        });
+        onDebuggerMessage?.({}, "Network.responseReceived", {
+          requestId: "request_500",
+          response: { status: 500 },
+        });
+        yield* Effect.yieldNow;
+
+        const snapshot = yield* manager.automationSnapshot("tab_requests");
+
+        expect(snapshot.networkEntries).toEqual([
+          expect.objectContaining({
+            url: "https://example.com/500",
+            method: "GET",
+            status: 500,
+            failed: true,
+          }),
+        ]);
       }),
     ),
   );
