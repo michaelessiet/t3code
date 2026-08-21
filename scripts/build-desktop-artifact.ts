@@ -596,13 +596,39 @@ export const BUILDER_HOOKS_FILENAME = "electron-builder-hooks.cjs";
  * file, and is only honored when the config also declares a `files` matcher.
  *
  * afterPack asserts the libs actually landed in app.asar.unpacked (before
- * signing), so the stripping can never silently regress again.
+ * signing), so the stripping can never silently regress again. It also
+ * asserts the inverse for sourcemaps: staging strips every *.map (they have
+ * no runtime consumers and cost ~75MB installed), and afterPack fails the
+ * build if any ships in app.asar.unpacked again.
  */
 export const BUILDER_HOOKS_SOURCE = String.raw`"use strict";
 const fs = require("fs");
 const path = require("path");
 
 const TYPESCRIPT_LIB_DTS = /[\\/]node_modules[\\/]typescript[\\/]lib[\\/][^\\/]+\.d\.ts$/;
+
+const SOURCEMAP_FILE_EXTENSIONS = [
+  ".js.map",
+  ".mjs.map",
+  ".cjs.map",
+  ".jsx.map",
+  ".css.map",
+  ".ts.map",
+  ".tsx.map",
+];
+
+function findShippedSourcemap(rootDir) {
+  if (!fs.existsSync(rootDir)) {
+    return null;
+  }
+  for (const entry of fs.readdirSync(rootDir, { recursive: true })) {
+    const entryPath = String(entry);
+    if (SOURCEMAP_FILE_EXTENSIONS.some((extension) => entryPath.endsWith(extension))) {
+      return path.join(rootDir, entryPath);
+    }
+  }
+  return null;
+}
 
 exports.onNodeModuleFile = (filePath) => TYPESCRIPT_LIB_DTS.test(filePath);
 
@@ -640,6 +666,22 @@ exports.afterPack = async (context) => {
           probe +
           "). electron-builder stripped node_modules *.d.ts files, so the " +
           'packaged vtsls would report every JS/TS global (Error, JSON, ...) as "Cannot find name".',
+      );
+    }
+  }
+  const unpackedDir = path.join(resourcesDir, "app.asar.unpacked");
+  const sourcemapScanRoots = [
+    path.join(unpackedDir, "apps", "server", "dist"),
+    path.join(unpackedDir, "node_modules"),
+  ];
+  for (const scanRoot of sourcemapScanRoots) {
+    const shippedSourcemap = findShippedSourcemap(scanRoot);
+    if (shippedSourcemap) {
+      throw new Error(
+        "Sourcemap shipped in packaged app (" +
+          shippedSourcemap +
+          "). Desktop staging strips *.map files (~75MB installed with no runtime " +
+          "consumers); a build-pipeline change reintroduced them.",
       );
     }
   }
@@ -916,6 +958,50 @@ export function resolveClerkPasskeyNativeArtifacts(
 
   return [];
 }
+
+export const SOURCEMAP_FILE_EXTENSIONS = [
+  ".js.map",
+  ".mjs.map",
+  ".cjs.map",
+  ".jsx.map",
+  ".css.map",
+  ".ts.map",
+  ".tsx.map",
+] as const;
+
+export const isSourcemapArtifact = (filePath: string): boolean =>
+  SOURCEMAP_FILE_EXTENSIONS.some((extension) => filePath.endsWith(extension));
+
+// Sourcemaps are debugging aids with no runtime or release-pipeline consumers
+// (there is no crash symbolication or map-upload step), yet they account for
+// ~75MB of the installed app. Strip them from the staged tree so neither the
+// asar nor app.asar.unpacked ships them; afterPack asserts they stay gone.
+export const stripStagedSourcemaps = Effect.fn("stripStagedSourcemaps")(function* (
+  rootDir: string,
+  label: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const entries = yield* fs.readDirectory(rootDir, { recursive: true });
+  let removedCount = 0;
+  let removedBytes = 0;
+  for (const entry of entries) {
+    if (!isSourcemapArtifact(entry)) {
+      continue;
+    }
+    const filePath = path.join(rootDir, entry);
+    const info = yield* fs.stat(filePath);
+    if (info.type !== "File") {
+      continue;
+    }
+    yield* fs.remove(filePath);
+    removedCount += 1;
+    removedBytes += Number(info.size);
+  }
+  yield* Effect.log(
+    `[desktop-artifact] Stripped ${removedCount} sourcemaps (${(removedBytes / (1024 * 1024)).toFixed(1)} MB) from ${label}.`,
+  );
+});
 
 // pnpm nests the architecture package under @clerk/electron-passkeys, while electron-builder only
 // retains collected top-level dependencies. The SDK loader checks beside index.js first, so stage
@@ -1761,6 +1847,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   yield* fs.copy(distDirs.desktopDist, path.join(stageAppDir, "apps/desktop/dist-electron"));
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
   yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
+  yield* stripStagedSourcemaps(path.join(stageAppDir, "apps/server/dist"), "apps/server/dist");
 
   yield* assertPlatformBuildResources(
     options.platform,
@@ -1889,6 +1976,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     }),
     { label: "vp install --prod", verbose: options.verbose },
   );
+  yield* stripStagedSourcemaps(path.join(stageAppDir, "node_modules"), "node_modules");
   yield* stageClerkPasskeyNativeBinaries(stageAppDir, options.platform, options.arch);
 
   // WSL is Windows-only, so only the Windows artifact carries the Linux backend
