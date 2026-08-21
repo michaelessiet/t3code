@@ -600,8 +600,10 @@ export const BUILDER_HOOKS_FILENAME = "electron-builder-hooks.cjs";
  * asserts the inverse for sourcemaps: staging strips every *.map (they have
  * no runtime consumers and cost ~75MB installed), and afterPack fails the
  * build if any ships in app.asar.unpacked again. The same guard covers the
- * Claude Agent SDK platform binary packages (~300MB, pruned at staging) and
- * the SDK metadata files the managed installer needs at runtime.
+ * Claude Agent SDK platform binary packages (~300MB, pruned at staging), the
+ * SDK metadata files the managed installer needs at runtime, and the staged
+ * node_modules prune (clerk-js legacy/native variants gone but
+ * clerk.browser.js kept; playwright-core trimmed to lib/coreBundle.js).
  */
 export const BUILDER_HOOKS_SOURCE = String.raw`"use strict";
 const fs = require("fs");
@@ -648,6 +650,48 @@ function findShippedClaudeSdkPlatformPackage(nodeModulesDir) {
     }
   }
   return null;
+}
+
+const CLERK_JS_PRUNED_VARIANT_MARKERS = ["clerk.legacy.browser", "clerk.native"];
+const PLAYWRIGHT_CORE_ALLOWED_SUBPATHS = ["package.json", "lib", "lib/coreBundle.js"];
+
+function scanPrunedVendorFiles(nodeModulesDir) {
+  const scan = { clerkBrowserBundle: null, playwrightCoreBundle: null, violation: null };
+  if (!fs.existsSync(nodeModulesDir)) {
+    return scan;
+  }
+  for (const entry of fs.readdirSync(nodeModulesDir, { recursive: true })) {
+    const normalized = String(entry).split(path.sep).join("/");
+    const segments = normalized.split("/");
+    const basename = segments[segments.length - 1];
+    if (normalized.endsWith("@clerk/clerk-js/dist/clerk.browser.js")) {
+      scan.clerkBrowserBundle = path.join(nodeModulesDir, String(entry));
+    } else if (
+      !scan.violation &&
+      normalized.includes("@clerk/clerk-js/dist/") &&
+      CLERK_JS_PRUNED_VARIANT_MARKERS.some((marker) => basename.includes(marker))
+    ) {
+      scan.violation = "@clerk/clerk-js variant chunk " + path.join(nodeModulesDir, String(entry));
+    }
+    const packageIndex = segments.lastIndexOf("playwright-core");
+    if (
+      packageIndex === -1 ||
+      (packageIndex !== 0 && segments[packageIndex - 1] !== "node_modules")
+    ) {
+      continue;
+    }
+    const subpath = segments.slice(packageIndex + 1).join("/");
+    if (subpath === "lib/coreBundle.js") {
+      scan.playwrightCoreBundle = path.join(nodeModulesDir, String(entry));
+    } else if (
+      !scan.violation &&
+      subpath.length > 0 &&
+      !PLAYWRIGHT_CORE_ALLOWED_SUBPATHS.includes(subpath)
+    ) {
+      scan.violation = "playwright-core file " + path.join(nodeModulesDir, String(entry));
+    }
+  }
+  return scan;
 }
 
 exports.onNodeModuleFile = (filePath) => TYPESCRIPT_LIB_DTS.test(filePath);
@@ -731,6 +775,28 @@ exports.afterPack = async (context) => {
           "to pick and verify the binary it downloads.",
       );
     }
+  }
+  const vendorScan = scanPrunedVendorFiles(unpackedNodeModules);
+  if (vendorScan.violation) {
+    throw new Error(
+      "Pruned vendor file shipped in packaged app (" +
+        vendorScan.violation +
+        "). Desktop staging prunes @clerk/clerk-js legacy/native dist variants and " +
+        "trims playwright-core to lib/coreBundle.js; a build-pipeline change " +
+        "reintroduced them.",
+    );
+  }
+  if (!vendorScan.clerkBrowserBundle) {
+    throw new Error(
+      "@clerk/clerk-js/dist/clerk.browser.js missing from packaged app. The " +
+        "staged-node_modules prune must keep the modern browser bundle Electron loads.",
+    );
+  }
+  if (!vendorScan.playwrightCoreBundle) {
+    throw new Error(
+      "playwright-core/lib/coreBundle.js missing from packaged app. " +
+        "PlaywrightInjectedRuntime extracts the preview InjectedScript from it at runtime.",
+    );
   }
 };
 `;
@@ -1112,6 +1178,126 @@ export const pruneClaudeSdkPlatformPackages = Effect.fn("pruneClaudeSdkPlatformP
     );
   },
 );
+
+const CLERK_JS_DIST_SEGMENT = "@clerk/clerk-js/dist/";
+const CLERK_JS_PRUNED_VARIANT_MARKERS = ["clerk.legacy.browser", "clerk.native"] as const;
+const PLAYWRIGHT_CORE_KEEP_TOP_LEVEL: ReadonlySet<string> = new Set(["package.json", "lib"]);
+const PLAYWRIGHT_CORE_KEEP_LIB: ReadonlySet<string> = new Set(["coreBundle.js"]);
+
+/**
+ * True for a @clerk/clerk-js dist chunk from the legacy-browser or
+ * react-native build variants. Electron only loads the modern browser
+ * bundles (prebundled by vite from the module entries), so these variants
+ * are dead weight in the staged tree.
+ */
+export const isClerkJsPrunableDistChunkPath = (entry: string): boolean => {
+  const normalized = entry.replaceAll("\\", "/");
+  const basename = normalized.split("/").at(-1) ?? "";
+  return (
+    (normalized.startsWith(CLERK_JS_DIST_SEGMENT) ||
+      normalized.includes(`/${CLERK_JS_DIST_SEGMENT}`)) &&
+    CLERK_JS_PRUNED_VARIANT_MARKERS.some((marker) => basename.includes(marker))
+  );
+};
+
+/**
+ * True for a playwright-core package directory: either a top-level entry or
+ * one directly under any node_modules segment (covers pnpm virtual-store
+ * payload dirs and hoisted layouts alike).
+ */
+export const isPlaywrightCorePackageDirPath = (entry: string): boolean => {
+  const segments = entry.replaceAll("\\", "/").split("/");
+  const index = segments.lastIndexOf("playwright-core");
+  return index === segments.length - 1 && (index === 0 || segments[index - 1] === "node_modules");
+};
+
+export class StagedNodeModulesPruneTargetNotFoundError extends Schema.TaggedErrorClass<StagedNodeModulesPruneTargetNotFoundError>()(
+  "StagedNodeModulesPruneTargetNotFoundError",
+  {
+    nodeModulesDir: Schema.String,
+    target: Schema.String,
+  },
+) {
+  override get message(): string {
+    return (
+      `Expected to find ${this.target} under ${this.nodeModulesDir} while pruning staged node_modules. ` +
+      "The dependency layout may have changed; revisit pruneStagedNodeModules before shipping."
+    );
+  }
+}
+
+// Two renderer-vendor payloads in the staged tree are mostly dead weight:
+// @clerk/clerk-js ships legacy-browser and react-native dist variants that
+// Electron never loads, and playwright-core is consumed only by
+// PlaywrightInjectedRuntime, which reads lib/coreBundle.js as text to extract
+// the preview InjectedScript — no browser launch, no server. afterPack asserts
+// the kept files still ship and the pruned ones stay gone.
+export const pruneStagedNodeModules = Effect.fn("pruneStagedNodeModules")(function* (
+  stageAppDir: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const nodeModulesDir = path.join(stageAppDir, "node_modules");
+  const entries = yield* fs.readDirectory(nodeModulesDir, { recursive: true });
+
+  const clerkChunks = entries.filter(isClerkJsPrunableDistChunkPath);
+  if (clerkChunks.length === 0) {
+    return yield* new StagedNodeModulesPruneTargetNotFoundError({
+      nodeModulesDir,
+      target: "@clerk/clerk-js legacy-browser/native dist chunks",
+    });
+  }
+  let removedBytes = 0;
+  for (const entry of clerkChunks) {
+    const filePath = path.join(nodeModulesDir, entry);
+    const info = yield* fs.stat(filePath);
+    if (info.type !== "File") {
+      continue;
+    }
+    yield* fs.remove(filePath);
+    removedBytes += Number(info.size);
+  }
+
+  // The scope entry is a symlink into .pnpm; dedupe candidates by real path so
+  // the physical package dir is only trimmed once.
+  const playwrightPackageDirs = new Set<string>();
+  for (const entry of entries.filter(isPlaywrightCorePackageDirPath)) {
+    playwrightPackageDirs.add(yield* fs.realPath(path.join(nodeModulesDir, entry)));
+  }
+  if (playwrightPackageDirs.size === 0) {
+    return yield* new StagedNodeModulesPruneTargetNotFoundError({
+      nodeModulesDir,
+      target: "the playwright-core package",
+    });
+  }
+  for (const packageDir of playwrightPackageDirs) {
+    const libDir = path.join(packageDir, "lib");
+    const coreBundleExists = yield* fs.exists(path.join(libDir, "coreBundle.js"));
+    if (!coreBundleExists) {
+      return yield* new StagedNodeModulesPruneTargetNotFoundError({
+        nodeModulesDir,
+        target: `${path.join(packageDir, "lib", "coreBundle.js")} (PlaywrightInjectedRuntime reads it at runtime)`,
+      });
+    }
+    for (const child of yield* fs.readDirectory(packageDir)) {
+      if (PLAYWRIGHT_CORE_KEEP_TOP_LEVEL.has(child)) {
+        continue;
+      }
+      yield* fs.remove(path.join(packageDir, child), { recursive: true, force: true });
+    }
+    for (const child of yield* fs.readDirectory(libDir)) {
+      if (PLAYWRIGHT_CORE_KEEP_LIB.has(child)) {
+        continue;
+      }
+      yield* fs.remove(path.join(libDir, child), { recursive: true, force: true });
+    }
+  }
+  yield* Effect.log(
+    `[desktop-artifact] Pruned ${clerkChunks.length} @clerk/clerk-js variant chunks ` +
+      `(${(removedBytes / (1024 * 1024)).toFixed(1)} MB) and trimmed ` +
+      `${playwrightPackageDirs.size} playwright-core package dir(s) to lib/coreBundle.js.`,
+  );
+});
 
 // pnpm nests the architecture package under @clerk/electron-passkeys, while electron-builder only
 // retains collected top-level dependencies. The SDK loader checks beside index.js first, so stage
@@ -2088,6 +2274,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   );
   yield* stripStagedSourcemaps(path.join(stageAppDir, "node_modules"), "node_modules");
   yield* pruneClaudeSdkPlatformPackages(stageAppDir);
+  yield* pruneStagedNodeModules(stageAppDir);
   yield* stageClerkPasskeyNativeBinaries(stageAppDir, options.platform, options.arch);
 
   // WSL is Windows-only, so only the Windows artifact carries the Linux backend
