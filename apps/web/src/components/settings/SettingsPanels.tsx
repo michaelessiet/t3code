@@ -61,6 +61,7 @@ import {
   deriveProviderInstanceEntries,
   sortProviderInstanceEntries,
 } from "../../providerInstances";
+import { installClaudeBinary } from "../../claudeBinaryInstallAtoms";
 import { ensureLocalApi, readLocalApi } from "../../localApi";
 import {
   primaryServerObservabilityAtom,
@@ -1559,6 +1560,41 @@ export function ProviderSettingsPanel() {
     })();
   }, [primaryEnvironment, refreshServerProviders]);
 
+  const installClaudeBinaryCommand = useAtomCommand(installClaudeBinary, {
+    reportFailure: false,
+  });
+  const [isInstallingClaudeBinary, setIsInstallingClaudeBinary] = useState(false);
+  const runClaudeBinaryInstall = useCallback(async () => {
+    if (!primaryEnvironment || isInstallingClaudeBinary) return;
+    setIsInstallingClaudeBinary(true);
+    const result = await installClaudeBinaryCommand({
+      environmentId: primaryEnvironment.environmentId,
+    });
+    setIsInstallingClaudeBinary(false);
+    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not install Claude Code",
+          description:
+            error instanceof Error ? error.message : "The Claude Code download did not complete.",
+        }),
+      );
+      return;
+    }
+    // Flip the provider card to healthy without waiting for the next probe.
+    void refreshServerProviders({
+      environmentId: primaryEnvironment.environmentId,
+      input: {},
+    });
+  }, [
+    primaryEnvironment,
+    isInstallingClaudeBinary,
+    installClaudeBinaryCommand,
+    refreshServerProviders,
+  ]);
+
   const runProviderUpdate = useCallback(
     async (candidate: ProviderUpdateCandidate) => {
       if (!primaryEnvironment) return;
@@ -1921,6 +1957,14 @@ export function ProviderSettingsPanel() {
                   : undefined
               }
               isUpdating={showInlineUpdateButton ? isDriverUpdateRunning : undefined}
+              onInstallBinary={
+                row.driver === "claudeAgent" && liveProvider && !liveProvider.installed
+                  ? () => void runClaudeBinaryInstall()
+                  : undefined
+              }
+              isInstallingBinary={
+                row.driver === "claudeAgent" ? isInstallingClaudeBinary : undefined
+              }
             />
           );
         })}

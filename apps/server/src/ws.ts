@@ -51,6 +51,9 @@ import {
   ProjectSearchEntriesError,
   ProjectWatchError,
   ProjectWriteFileError,
+  ClaudeBinaryInstallFailedError,
+  type ClaudeBinaryInstallProgressEvent,
+  DEFAULT_CLAUDE_BINARY_PATH,
   RelayClientInstallFailedError,
   type RelayClientInstallProgressEvent,
   type GraphCommandFailedError,
@@ -95,6 +98,8 @@ import {
   observeRpcStreamEffect as instrumentRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
 import { wsThreadEventDeliveryLag } from "./observability/Metrics.ts";
+import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import { ClaudeManagedBinary } from "./provider/Drivers/ClaudeManagedBinary.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
@@ -375,6 +380,8 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.serverSignalProcess, AuthOrchestrationOperateScope],
   [WS_METHODS.cloudGetRelayClientStatus, AuthRelayWriteScope],
   [WS_METHODS.cloudInstallRelayClient, AuthRelayWriteScope],
+  [WS_METHODS.claudeGetBinaryStatus, AuthOrchestrationReadScope],
+  [WS_METHODS.claudeInstallBinary, AuthOrchestrationOperateScope],
   [WS_METHODS.graphRuntimeStatus, AuthOrchestrationReadScope],
   [WS_METHODS.graphInstallRuntime, AuthOrchestrationOperateScope],
   [WS_METHODS.graphStatus, AuthOrchestrationReadScope],
@@ -546,6 +553,7 @@ const makeWsRpcLayer = (
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const relayClient = yield* RelayClient.RelayClient;
+      const claudeManagedBinary = yield* ClaudeManagedBinary;
       const graphifyRuntime = yield* GraphifyRuntime;
       const graphService = yield* GraphService;
       const authorizationError = (requiredScope: AuthEnvironmentScope) =>
@@ -1743,6 +1751,48 @@ const makeWsRpcLayer = (
                   ),
             ),
             { "rpc.aggregate": "cloud" },
+          ),
+        [WS_METHODS.claudeGetBinaryStatus]: (_input) =>
+          observeRpcEffect(
+            WS_METHODS.claudeGetBinaryStatus,
+            // Status for the default (auto) resolution chain: instances with an
+            // explicit binaryPath never need the managed download dialog.
+            Effect.gen(function* () {
+              const environment = yield* HostProcessEnvironment;
+              return yield* claudeManagedBinary.status(DEFAULT_CLAUDE_BINARY_PATH, environment);
+            }),
+            { "rpc.aggregate": "claude" },
+          ),
+        [WS_METHODS.claudeInstallBinary]: (_input) =>
+          observeRpcStream(
+            WS_METHODS.claudeInstallBinary,
+            Stream.callback<ClaudeBinaryInstallProgressEvent, ClaudeBinaryInstallFailedError>(
+              (queue) =>
+                claudeManagedBinary
+                  .installWithProgress((progress) =>
+                    Queue.offer(queue, { type: "progress", ...progress }).pipe(Effect.asVoid),
+                  )
+                  .pipe(
+                    Effect.flatMap((status) =>
+                      Queue.offer(queue, {
+                        type: "complete",
+                        status,
+                      }),
+                    ),
+                    Effect.catchTag("ClaudeBinaryInstallError", (error) =>
+                      Queue.fail(
+                        queue,
+                        new ClaudeBinaryInstallFailedError({
+                          reason: error.reason,
+                          message: error.message,
+                        }),
+                      ),
+                    ),
+                    Effect.andThen(Queue.end(queue)),
+                    Effect.forkScoped,
+                  ),
+            ),
+            { "rpc.aggregate": "claude" },
           ),
         [WS_METHODS.graphRuntimeStatus]: (_input) =>
           observeRpcEffect(WS_METHODS.graphRuntimeStatus, graphifyRuntime.status, {

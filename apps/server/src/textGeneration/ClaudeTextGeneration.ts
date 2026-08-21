@@ -18,6 +18,7 @@ import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shar
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 
 import { TextGenerationError } from "@t3tools/contracts";
+import { resolveEffectiveClaudeExecutablePath } from "../provider/Drivers/ClaudeManagedBinary.ts";
 import * as TextGeneration from "./TextGeneration.ts";
 import {
   buildBranchNamePrompt,
@@ -157,8 +158,12 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
         : undefined;
 
     const runClaudeCommand = Effect.fn("runClaudeJson.runClaudeCommand")(function* () {
-      const spawnCommand = yield* resolveSpawnCommand(
+      const executablePath = yield* resolveEffectiveClaudeExecutablePath(
         claudeSettings.binaryPath || "claude",
+        claudeEnvironment,
+      );
+      const spawnCommand = yield* resolveSpawnCommand(
+        executablePath,
         [
           "-p",
           "--output-format",

@@ -16,6 +16,9 @@ import {
   BUILDER_HOOKS_FILENAME,
   BUILDER_HOOKS_SOURCE,
   BuildCommandFailedError,
+  ClaudeSdkPlatformPackagesNotFoundError,
+  isClaudeSdkPlatformPackagePath,
+  pruneClaudeSdkPlatformPackages,
   createStageWorkspaceConfig,
   createStagePatchedDependencies,
   createBuildConfig,
@@ -565,6 +568,19 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }).pipe(Effect.scoped),
   );
 
+  // Satisfies the afterPack probe for the SDK metadata the managed Claude Code
+  // installer reads at runtime.
+  const stageClaudeSdkRuntimeFixtures = Effect.fn("stageClaudeSdkRuntimeFixtures")(function* (
+    unpackedDir: string,
+  ) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const sdkDir = path.join(unpackedDir, "node_modules", "@anthropic-ai", "claude-agent-sdk");
+    yield* fs.makeDirectory(sdkDir, { recursive: true });
+    yield* fs.writeFileString(path.join(sdkDir, "sdk.mjs"), "export {};");
+    yield* fs.writeFileString(path.join(sdkDir, "manifest.json"), "{}");
+  });
+
   it.effect("afterPack asserts both packaged TypeScript standard-library copies", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -606,6 +622,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
       yield* fs.makeDirectory(path.dirname(nestedLib), { recursive: true });
       yield* fs.writeFileString(nestedLib, "declare interface Object {}");
+      yield* stageClaudeSdkRuntimeFixtures(path.join(appOutDir, "resources", "app.asar.unpacked"));
       yield* Effect.promise(() => hooks.afterPack(context));
     }).pipe(Effect.scoped),
   );
@@ -668,6 +685,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         yield* fs.makeDirectory(path.dirname(libPath), { recursive: true });
         yield* fs.writeFileString(libPath, "declare interface Object {}");
       }
+      yield* stageClaudeSdkRuntimeFixtures(unpackedDir);
       yield* Effect.promise(() => hooks.afterPack(context));
 
       const serverDistMap = path.join(unpackedDir, "apps", "server", "dist", "bin.mjs.map");
@@ -700,6 +718,137 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       );
       assert.include(nodeModulesFailure, "Sourcemap shipped");
       yield* fs.remove(nodeModulesMap);
+
+      yield* Effect.promise(() => hooks.afterPack(context));
+    }).pipe(Effect.scoped),
+  );
+
+  it("matches Claude SDK platform packages in scope and pnpm-store layouts", () => {
+    assert.isTrue(isClaudeSdkPlatformPackagePath("@anthropic-ai/claude-agent-sdk-darwin-arm64"));
+    assert.isTrue(
+      isClaudeSdkPlatformPackagePath(".pnpm/@anthropic-ai+claude-agent-sdk-darwin-arm64@0.3.170"),
+    );
+    assert.isTrue(
+      isClaudeSdkPlatformPackagePath(
+        ".pnpm/@anthropic-ai+claude-agent-sdk@0.3.170_abc/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64",
+      ),
+    );
+    // The SDK package itself (and its files) must never match.
+    assert.isFalse(isClaudeSdkPlatformPackagePath("@anthropic-ai/claude-agent-sdk"));
+    assert.isFalse(isClaudeSdkPlatformPackagePath("@anthropic-ai/claude-agent-sdk/sdk.mjs"));
+    assert.isFalse(
+      isClaudeSdkPlatformPackagePath(".pnpm/@anthropic-ai+claude-agent-sdk@0.3.170_abc"),
+    );
+    assert.isFalse(isClaudeSdkPlatformPackagePath("@anthropic-ai/sdk"));
+  });
+
+  it.effect("pruneClaudeSdkPlatformPackages removes platform payloads but keeps the SDK", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const stageAppDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-prune-" });
+      const nodeModulesDir = path.join(stageAppDir, "node_modules");
+      const sdkDir = path.join(nodeModulesDir, "@anthropic-ai", "claude-agent-sdk");
+      const scopePlatformDir = path.join(
+        nodeModulesDir,
+        "@anthropic-ai",
+        "claude-agent-sdk-darwin-arm64",
+      );
+      const storePlatformDir = path.join(
+        nodeModulesDir,
+        ".pnpm",
+        "@anthropic-ai+claude-agent-sdk-darwin-arm64@0.3.170",
+        "node_modules",
+        "@anthropic-ai",
+        "claude-agent-sdk-darwin-arm64",
+      );
+      for (const dir of [sdkDir, scopePlatformDir, storePlatformDir]) {
+        yield* fs.makeDirectory(dir, { recursive: true });
+      }
+      yield* fs.writeFileString(path.join(sdkDir, "sdk.mjs"), "export {};");
+      yield* fs.writeFileString(path.join(sdkDir, "manifest.json"), "{}");
+      yield* fs.writeFileString(path.join(scopePlatformDir, "claude"), "binary");
+      yield* fs.writeFileString(path.join(storePlatformDir, "claude"), "binary");
+
+      yield* pruneClaudeSdkPlatformPackages(stageAppDir);
+
+      assert.isTrue(yield* fs.exists(path.join(sdkDir, "sdk.mjs")));
+      assert.isTrue(yield* fs.exists(path.join(sdkDir, "manifest.json")));
+      assert.isFalse(yield* fs.exists(scopePlatformDir));
+      assert.isFalse(
+        yield* fs.exists(
+          path.join(nodeModulesDir, ".pnpm", "@anthropic-ai+claude-agent-sdk-darwin-arm64@0.3.170"),
+        ),
+      );
+
+      // A tree with no platform packages means the SDK layout changed; the
+      // build must fail rather than silently ship the bundled binary again.
+      const failure = yield* pruneClaudeSdkPlatformPackages(stageAppDir).pipe(Effect.flip);
+      assert.instanceOf(failure, ClaudeSdkPlatformPackagesNotFoundError);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("afterPack rejects shipped Claude platform packages and requires SDK metadata", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const hooksDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-builder-hooks-" });
+      const hooksPath = path.join(hooksDir, BUILDER_HOOKS_FILENAME);
+      yield* fs.writeFileString(hooksPath, BUILDER_HOOKS_SOURCE);
+      const hooks = NodeModule.createRequire(import.meta.url)(hooksPath) as {
+        afterPack: (context: unknown) => Promise<void>;
+      };
+
+      const appOutDir = path.join(hooksDir, "out");
+      const unpackedDir = path.join(appOutDir, "resources", "app.asar.unpacked");
+      const context = { electronPlatformName: "linux", appOutDir };
+
+      for (const libSegments of [
+        ["node_modules", "typescript", "lib", "lib.es5.d.ts"],
+        [
+          "node_modules",
+          "@vtsls",
+          "language-service",
+          "node_modules",
+          "typescript",
+          "lib",
+          "lib.es5.d.ts",
+        ],
+      ]) {
+        const libPath = path.join(unpackedDir, ...libSegments);
+        yield* fs.makeDirectory(path.dirname(libPath), { recursive: true });
+        yield* fs.writeFileString(libPath, "declare interface Object {}");
+      }
+
+      // Missing SDK metadata must fail: the managed installer reads it at runtime.
+      const missingMetadata = yield* Effect.promise(() =>
+        hooks.afterPack(context).then(
+          () => "resolved",
+          (error: unknown) => String(error),
+        ),
+      );
+      assert.include(missingMetadata, "Claude Agent SDK runtime file missing");
+
+      yield* stageClaudeSdkRuntimeFixtures(unpackedDir);
+      yield* Effect.promise(() => hooks.afterPack(context));
+
+      const platformPackageFile = path.join(
+        unpackedDir,
+        "node_modules",
+        "@anthropic-ai",
+        "claude-agent-sdk-darwin-arm64",
+        "claude",
+      );
+      yield* fs.makeDirectory(path.dirname(platformPackageFile), { recursive: true });
+      yield* fs.writeFileString(platformPackageFile, "binary");
+      const shippedPlatformPackage = yield* Effect.promise(() =>
+        hooks.afterPack(context).then(
+          () => "resolved",
+          (error: unknown) => String(error),
+        ),
+      );
+      assert.include(shippedPlatformPackage, "Claude Agent SDK platform binary package shipped");
+      yield* fs.remove(path.dirname(platformPackageFile), { recursive: true });
 
       yield* Effect.promise(() => hooks.afterPack(context));
     }).pipe(Effect.scoped),

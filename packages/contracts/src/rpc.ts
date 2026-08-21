@@ -70,6 +70,11 @@ import {
   RelayClientStatusSchema,
 } from "./relayClient.ts";
 import {
+  ClaudeBinaryInstallFailedError,
+  ClaudeBinaryInstallProgressEventSchema,
+  ClaudeBinaryStatusSchema,
+} from "./claudeBinary.ts";
+import {
   ProjectListEntriesError,
   ProjectListEntriesInput,
   ProjectListEntriesResult,
@@ -306,6 +311,10 @@ export const WS_METHODS = {
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
   cloudInstallRelayClient: "cloud.installRelayClient",
 
+  // Claude managed binary methods
+  claudeGetBinaryStatus: "claude.getBinaryStatus",
+  claudeInstallBinary: "claude.installBinary",
+
   // Knowledge graph methods
   graphRuntimeStatus: "graph.runtimeStatus",
   graphInstallRuntime: "graph.installRuntime",
@@ -440,6 +449,24 @@ export const WsCloudInstallRelayClientRpc = Rpc.make(WS_METHODS.cloudInstallRela
   payload: Schema.Struct({}),
   success: RelayClientInstallProgressEventSchema,
   error: Schema.Union([RelayClientInstallFailedError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+export const WsClaudeGetBinaryStatusRpc = Rpc.make(WS_METHODS.claudeGetBinaryStatus, {
+  payload: Schema.Struct({}),
+  success: ClaudeBinaryStatusSchema,
+  error: EnvironmentAuthorizationError,
+});
+
+/**
+ * Streams install stages plus download byte counts: the CLI download is
+ * ~120MB compressed and a non-streaming call would show an unresolving
+ * spinner. Mirrors `cloud.installRelayClient`.
+ */
+export const WsClaudeInstallBinaryRpc = Rpc.make(WS_METHODS.claudeInstallBinary, {
+  payload: Schema.Struct({}),
+  success: ClaudeBinaryInstallProgressEventSchema,
+  error: Schema.Union([ClaudeBinaryInstallFailedError, EnvironmentAuthorizationError]),
   stream: true,
 });
 
@@ -1035,6 +1062,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerSignalProcessRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,
+  WsClaudeGetBinaryStatusRpc,
+  WsClaudeInstallBinaryRpc,
   WsGraphRuntimeStatusRpc,
   WsGraphInstallRuntimeRpc,
   WsGraphStatusRpc,

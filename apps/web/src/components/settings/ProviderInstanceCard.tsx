@@ -349,6 +349,13 @@ interface ProviderInstanceCardProps {
   readonly onModelOrderChange: (next: ReadonlyArray<string>) => void;
   readonly onRunUpdate?: (() => void) | undefined;
   readonly isUpdating?: boolean | undefined;
+  /**
+   * Optional managed-binary install affordance. Supplied only for drivers
+   * whose CLI T3 Code can download itself (currently Claude) while the
+   * server reports the binary as missing.
+   */
+  readonly onInstallBinary?: (() => void) | undefined;
+  readonly isInstallingBinary?: boolean | undefined;
 }
 
 /**
@@ -393,6 +400,8 @@ export function ProviderInstanceCard({
   onModelOrderChange,
   onRunUpdate,
   isUpdating = false,
+  onInstallBinary,
+  isInstallingBinary = false,
 }: ProviderInstanceCardProps) {
   const enabled = instance.enabled ?? true;
   // The server-reported status wins when present; otherwise fall back to
@@ -599,6 +608,21 @@ export function ProviderInstanceCard({
     <code className="text-xs text-muted-foreground">{versionLabel}</code>
   ) : null;
 
+  const installBinaryNode = onInstallBinary ? (
+    <div className="mt-1.5">
+      <Button
+        type="button"
+        size="xs"
+        variant="outline"
+        disabled={isInstallingBinary}
+        onClick={onInstallBinary}
+      >
+        {isInstallingBinary ? <LoaderIcon className="animate-spin" /> : <DownloadIcon />}
+        {isInstallingBinary ? "Installing…" : `Download ${displayName} CLI`}
+      </Button>
+    </div>
+  ) : null;
+
   return (
     <div className="rounded-xl transition-colors hover:bg-muted/20">
       <div className="px-3 py-3 sm:px-4">
@@ -705,6 +729,7 @@ export function ProviderInstanceCard({
               {titleTailNode}
             </div>
             {authRowNode}
+            {installBinaryNode}
           </div>
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
             <Button
