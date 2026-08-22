@@ -68,11 +68,13 @@ await waitFor(
   "Start it with `cd apps/web && HOST=127.0.0.1 ../../node_modules/.bin/vp dev` (or set VITE_DEV_SERVER_URL).",
 );
 
-const shimBuild = spawnSync(process.execPath, [path.join(packageDir, "scripts/build-shim.mjs")], {
-  stdio: "inherit",
-});
-if (shimBuild.status !== 0) {
-  process.exit(shimBuild.status ?? 1);
+for (const script of ["scripts/build-shim.mjs", "scripts/build-preview-runtime.mjs"]) {
+  const build = spawnSync(process.execPath, [path.join(packageDir, script)], {
+    stdio: "inherit",
+  });
+  if (build.status !== 0) {
+    process.exit(build.status ?? 1);
+  }
 }
 
 // Build first, run the binary directly (not `cargo run`): cargo does not
@@ -92,6 +94,7 @@ const child = spawn(path.join(srcTauriDir, "target/debug/t3code-desktop-tauri"),
     VITE_DEV_SERVER_URL: devServerUrl,
     T3CODE_TAURI_SERVER_ENTRY: serverEntry,
     T3CODE_TAURI_SHIM_PATH: shimPath,
+    T3CODE_TAURI_PREVIEW_RUNTIME_PATH: path.join(packageDir, "shim/dist/preview-runtime.js"),
   },
 });
 child.on("exit", (code) => process.exit(code ?? 0));

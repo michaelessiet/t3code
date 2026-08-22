@@ -11,9 +11,12 @@
  * through Tauri events.
  *
  * M1 scope: SSH, WSL, server exposure, and updates are inert stubs shaped to
- * keep the web state stores happy; `preview` is deliberately absent so the
- * preview UI hides itself (`previewStateStore` gates on
- * `Boolean(desktopBridge.preview)`).
+ * keep the web state stores happy.
+ *
+ * M2 adds `preview`, backed by src-tauri/src/preview.rs: shell-owned child
+ * webviews (Window::add_child) instead of renderer `<webview>` tags. The
+ * presence of the optional `setTabBounds` method is what switches the web
+ * app's HostedBrowserWebview into bounds-sync mode.
  */
 import type {
   ClientSettings,
@@ -21,12 +24,24 @@ import type {
   DesktopAppBranding,
   DesktopBridge,
   DesktopEnvironmentBootstrap,
+  DesktopPreviewBridge,
+  DesktopPreviewColorScheme,
+  DesktopPreviewPointerEvent,
+  DesktopPreviewRecordingArtifact,
+  DesktopPreviewRecordingFrame,
+  DesktopPreviewScreenshotArtifact,
+  DesktopPreviewTabBounds,
+  DesktopPreviewTabState,
+  DesktopPreviewWebviewConfig,
   DesktopRuntimeArch,
   DesktopServerExposureState,
   DesktopTheme,
   DesktopUpdateState,
   DesktopWslState,
+  EnvironmentId,
   PickFolderOptions,
+  PreviewAutomationSnapshot,
+  PreviewAutomationStatus,
 } from "@t3tools/contracts";
 
 interface TauriSeed {
@@ -208,6 +223,95 @@ function sshUnavailable(): Promise<never> {
   return Promise.reject(new Error("SSH environments are not available in the Tauri shell yet."));
 }
 
+// ---------------------------------------------------------------------------
+// Preview bridge (M2): shell-owned child webviews driven by preview.rs.
+// Presence of `setTabBounds` switches HostedBrowserWebview into bounds-sync
+// mode (no <webview> tag; a placeholder div reports its on-screen rect).
+
+const subscribePreviewState = makeEventFanout<{
+  tabId: string;
+  state: DesktopPreviewTabState;
+}>("t3code://preview-state");
+const subscribePreviewPointer = makeEventFanout<DesktopPreviewPointerEvent>(
+  "t3code://preview-pointer",
+);
+const subscribePreviewFrame =
+  makeEventFanout<DesktopPreviewRecordingFrame>("t3code://preview-frame");
+
+function bytesToBase64(data: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < data.length; index += chunkSize) {
+    binary += String.fromCharCode(...data.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function previewUnsupported(feature: string): Promise<never> {
+  return Promise.reject(new Error(`${feature} is not available in the Tauri shell yet.`));
+}
+
+const preview: DesktopPreviewBridge = {
+  createTab: (tabId) => invoke<void>("preview_create_tab", { tabId }),
+  closeTab: (tabId) => invoke<void>("preview_close_tab", { tabId }),
+  registerWebview: (tabId, webContentsId) =>
+    invoke<void>("preview_register_webview", { tabId, webContentsId }),
+  setTabBounds: (tabId, bounds: DesktopPreviewTabBounds | null) =>
+    invoke<void>("preview_set_tab_bounds", { tabId, bounds }),
+  navigate: (tabId, url) => invoke<void>("preview_navigate", { tabId, url }),
+  goBack: (tabId) => invoke<void>("preview_go_back", { tabId }),
+  goForward: (tabId) => invoke<void>("preview_go_forward", { tabId }),
+  refresh: (tabId) => invoke<void>("preview_refresh", { tabId }),
+  zoomIn: (tabId) => invoke<void>("preview_zoom_in", { tabId }),
+  zoomOut: (tabId) => invoke<void>("preview_zoom_out", { tabId }),
+  resetZoom: (tabId) => invoke<void>("preview_reset_zoom", { tabId }),
+  hardReload: (tabId) => invoke<void>("preview_hard_reload", { tabId }),
+  setColorScheme: (tabId, colorScheme: DesktopPreviewColorScheme) =>
+    invoke<void>("preview_set_color_scheme", { tabId, colorScheme }),
+  openDevTools: (tabId) => invoke<void>("preview_open_devtools", { tabId }),
+  clearCookies: () => invoke<void>("preview_clear_cookies"),
+  clearCache: () => invoke<void>("preview_clear_cache"),
+  getPreviewConfig: (environmentId: EnvironmentId) =>
+    invoke<DesktopPreviewWebviewConfig>("preview_get_config", { environmentId }),
+  setAnnotationTheme: (theme) => invoke<void>("preview_set_annotation_theme", { theme }),
+  // Element picking needs the annotation preload UI — an M3 item. preloadUrl
+  // is null in getPreviewConfig, which disables pick affordances.
+  pickElement: () => previewUnsupported("Element picking"),
+  cancelPickElement: () => Promise.resolve(),
+  captureScreenshot: (tabId) =>
+    invoke<DesktopPreviewScreenshotArtifact>("preview_capture_screenshot", { tabId }),
+  revealArtifact: (path) => invoke<void>("preview_reveal_artifact", { path }),
+  copyArtifactToClipboard: () => previewUnsupported("Copying artifacts to the clipboard"),
+  pictureInPicture: {
+    open: () => previewUnsupported("Picture-in-picture"),
+    close: () => Promise.resolve(),
+  },
+  recording: {
+    startScreencast: (tabId) => invoke<void>("preview_recording_start", { tabId }),
+    stopScreencast: (tabId) => invoke<void>("preview_recording_stop", { tabId }),
+    save: (tabId, mimeType, data) =>
+      invoke<DesktopPreviewRecordingArtifact>("preview_recording_save", {
+        tabId,
+        mimeType,
+        dataBase64: bytesToBase64(data),
+      }),
+    onFrame: (listener) => subscribePreviewFrame(listener),
+  },
+  automation: {
+    status: (tabId) => invoke<PreviewAutomationStatus>("preview_automation_status", { tabId }),
+    snapshot: (tabId) =>
+      invoke<PreviewAutomationSnapshot>("preview_automation_snapshot", { tabId }),
+    click: (tabId, input) => invoke<void>("preview_automation_click", { tabId, input }),
+    type: (tabId, input) => invoke<void>("preview_automation_type", { tabId, input }),
+    press: (tabId, input) => invoke<void>("preview_automation_press", { tabId, input }),
+    scroll: (tabId, input) => invoke<void>("preview_automation_scroll", { tabId, input }),
+    evaluate: (tabId, input) => invoke<unknown>("preview_automation_evaluate", { tabId, input }),
+    waitFor: (tabId, input) => invoke<void>("preview_automation_wait_for", { tabId, input }),
+  },
+  onStateChange: (listener) => subscribePreviewState(({ tabId, state }) => listener(tabId, state)),
+  onPointerEvent: (listener) => subscribePreviewPointer(listener),
+};
+
 const bridge: DesktopBridge = {
   getAppBranding: () => seed.branding,
   getLocalEnvironmentBootstraps: () => snapshot.bootstraps,
@@ -258,6 +362,8 @@ const bridge: DesktopBridge = {
   onMenuAction: (listener) => subscribeMenuAction(listener),
   getWindowFullscreenState: () => snapshot.fullscreen,
   onWindowFullscreenStateChange: (listener) => subscribeFullscreenChanged(listener),
+
+  preview,
 
   getUpdateState: () => Promise.resolve(makeUpdateState()),
   setUpdateChannel: () => Promise.resolve(makeUpdateState()),

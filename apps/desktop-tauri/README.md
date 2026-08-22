@@ -27,11 +27,36 @@ capabilities on WKWebView.
   events arrive as Tauri events. The local bearer-token exchange
   (`/oauth/token`) happens in the shim itself — the backend serves
   `access-control-allow-origin: *`.
-- **Deliberately absent in M1**: `preview` (the preview UI self-hides),
-  Clerk cloud auth (run the web dev server without `VITE_CLERK_PUBLISHABLE_KEY`),
-  updater / SSH / WSL / server exposure (inert typed stubs), safeStorage
-  encryption for the connection catalog (plaintext file — M3), Electron's
-  traffic-light inset (default position for now).
+- **Preview subsystem (M2)**: `src-tauri/src/preview.rs` implements
+  `DesktopPreviewBridge` with native child webviews (`Window::add_child`,
+  tauri `unstable` feature) instead of renderer `<webview>` tags. The
+  renderer's `HostedBrowserWebview` detects the optional
+  `setTabBounds` bridge method and switches into **bounds-sync mode**: a
+  placeholder div reports its on-screen rect and the shell positions the
+  child webview over it (page zoom reproduces the panel's downscale).
+  WKWebView has no CDP, so the Electron main-process automation is
+  reproduced with the WS5 probe's patterns: an injected runtime
+  (Playwright's InjectedScript — identical extraction to
+  `PlaywrightInjectedRuntime.ts` — plus `shim/preview-runtime.src.js`,
+  built by `scripts/build-preview-runtime.mjs`), eval-with-results over the
+  `t3preview://` custom protocol, `takeSnapshotWithConfiguration:` capture
+  via objc2, and NSAppearance for `prefers-color-scheme` emulation.
+  Verified headlessly with `T3CODE_TAURI_PREVIEW_SELFTEST=1`
+  (`src-tauri/src/selftest.rs`).
+- **Known M2 gaps**: element picker + annotation UI (pick affordances are
+  disabled via `preloadUrl: null`), picture-in-picture,
+  copy-artifact-to-clipboard, `LoadFailed` nav status (WKWebView load
+  failures surface as a stuck Loading state), network capture is fetch/XHR
+  only (no CDP Network domain), `automation.evaluate` cannot report syntax
+  errors (fire-and-forget eval times out instead), strict-CSP guest pages
+  may block the runtime's `fetch` posts, and native child webviews always
+  render **above** the app UI — dialogs/menus that overlap the preview
+  panel are occluded until the preview hides.
+- **Deliberately absent in M1**: Clerk cloud auth (run the web dev server
+  without `VITE_CLERK_PUBLISHABLE_KEY`), updater / SSH / WSL / server
+  exposure (inert typed stubs), safeStorage encryption for the connection
+  catalog (plaintext file — M3), Electron's traffic-light inset (default
+  position for now).
 
 ## Running (dev, macOS)
 
@@ -60,16 +85,16 @@ Useful overrides: `T3CODE_PORT` (fixed backend port), `T3CODE_TAURI_NODE`
 
 ## Milestones
 
-- **M1 (this)** — walking skeleton: threads/chat/terminal/dialogs/context
+- **M1 (done)** — walking skeleton: threads/chat/terminal/dialogs/context
   menus work end-to-end; custom-protocol UI serving.
-- **M2 — preview subsystem**: Rust child-webview manager (`Window::add_child`,
-  `unstable` feature) implementing `DesktopPreviewBridge` with the probe's
-  patterns (injected runtime, custom-protocol IPC, `takeSnapshotWithConfiguration`
-  capture). Needs a small additive `apps/web` host component that syncs bounds
-  instead of rendering `<webview>` tags.
+- **M2 (this)** — preview subsystem: Rust child-webview manager implementing
+  `DesktopPreviewBridge`; first additive `apps/web` change
+  (bounds-sync mode in `HostedBrowserWebview` + a no-`<webview>` fallback in
+  `PreviewAutomationHosts`).
 - **M3 — auth + parity**: Clerk via the web provider under Tauri (additive
   `main.tsx` runtime detection), keychain-backed secrets, updater
-  (tauri-plugin-updater), recording/PiP, traffic-light inset.
+  (tauri-plugin-updater), element picker/annotations, PiP, traffic-light
+  inset.
 - **M4 — packaging + platforms**: Tauri bundler with a Node sidecar (or
   WS2-style download-on-first-run runtime) + server dist + pruned
   node_modules resources; Windows (WebView2 has real CDP) and Linux; WSL.

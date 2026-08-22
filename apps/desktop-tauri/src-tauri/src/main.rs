@@ -11,7 +11,9 @@
 mod backend;
 mod bridge;
 mod menu;
+mod preview;
 mod protocol;
+mod selftest;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,8 +66,32 @@ unsafe extern "C" fn on_terminate_signal(_signal: i32) {
     libc::_exit(0);
 }
 
+fn read_preview_config() -> preview::PreviewConfig {
+    let runtime_path = env_var("T3CODE_TAURI_PREVIEW_RUNTIME_PATH")
+        .map(PathBuf::from)
+        .expect("T3CODE_TAURI_PREVIEW_RUNTIME_PATH must point at the built preview runtime");
+    let runtime_source = std::fs::read_to_string(&runtime_path).unwrap_or_else(|error| {
+        panic!(
+            "failed to read preview runtime at {}: {error}",
+            runtime_path.display()
+        )
+    });
+    let t3_home = env_var("T3CODE_TAURI_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("/"))
+                .join(".t3-tauri")
+        });
+    preview::PreviewConfig {
+        runtime_source,
+        artifacts_dir: t3_home.join("preview-artifacts"),
+    }
+}
+
 fn main() {
     let config = read_backend_config();
+    preview::init(read_preview_config());
 
     #[cfg(unix)]
     unsafe {
@@ -79,6 +105,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .register_asynchronous_uri_scheme_protocol(protocol::SCHEME, protocol::handler)
+        .register_uri_scheme_protocol(preview::IPC_SCHEME, preview::ipc_handler)
         .invoke_handler(tauri::generate_handler![
             bridge::pick_folder,
             bridge::confirm_dialog,
@@ -90,6 +117,37 @@ fn main() {
             bridge::set_connection_catalog,
             bridge::clear_connection_catalog,
             bridge::show_context_menu,
+            preview::preview_create_tab,
+            preview::preview_close_tab,
+            preview::preview_register_webview,
+            preview::preview_set_tab_bounds,
+            preview::preview_navigate,
+            preview::preview_go_back,
+            preview::preview_go_forward,
+            preview::preview_refresh,
+            preview::preview_hard_reload,
+            preview::preview_zoom_in,
+            preview::preview_zoom_out,
+            preview::preview_reset_zoom,
+            preview::preview_set_color_scheme,
+            preview::preview_open_devtools,
+            preview::preview_clear_cookies,
+            preview::preview_clear_cache,
+            preview::preview_get_config,
+            preview::preview_set_annotation_theme,
+            preview::preview_capture_screenshot,
+            preview::preview_reveal_artifact,
+            preview::preview_recording_start,
+            preview::preview_recording_stop,
+            preview::preview_recording_save,
+            preview::preview_automation_status,
+            preview::preview_automation_snapshot,
+            preview::preview_automation_click,
+            preview::preview_automation_type,
+            preview::preview_automation_press,
+            preview::preview_automation_scroll,
+            preview::preview_automation_evaluate,
+            preview::preview_automation_wait_for,
         ])
         .on_menu_event(|app, event| menu::handle_event(app, event))
         .on_window_event(|window, event| {
@@ -104,6 +162,7 @@ fn main() {
             menu::install(app.handle())?;
             let handle = app.handle().clone();
             std::thread::spawn(move || backend::run(handle, config));
+            selftest::maybe_run(app.handle());
             Ok(())
         })
         .build(tauri::generate_context!())

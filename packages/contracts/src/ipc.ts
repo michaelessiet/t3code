@@ -1055,10 +1055,33 @@ export interface DesktopBridge {
   preview?: DesktopPreviewBridge;
 }
 
+/**
+ * On-screen placement of a shell-hosted preview webview, in CSS pixels
+ * relative to the main window's content area. `scale` is the panel's
+ * downscale factor (the shell reproduces it via page zoom, mirroring the
+ * CSS `transform: scale(...)` applied to the Electron `<webview>` tag).
+ */
+export interface DesktopPreviewTabBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  scale: number;
+  visible: boolean;
+}
+
 export interface DesktopPreviewBridge {
   createTab: (tabId: string) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;
   registerWebview: (tabId: string, webContentsId: number) => Promise<void>;
+  /**
+   * Shell-hosted webview placement. Present iff the shell owns the preview
+   * webviews natively (the Tauri desktop shell) instead of the renderer
+   * mounting an Electron `<webview>` tag; its presence switches
+   * HostedBrowserWebview into bounds-sync mode. `null` clears the placement
+   * when the host unmounts. Absent on the Electron desktop build.
+   */
+  setTabBounds?: (tabId: string, bounds: DesktopPreviewTabBounds | null) => Promise<void>;
   navigate: (tabId: string, url: string) => Promise<void>;
   goBack: (tabId: string) => Promise<void>;
   goForward: (tabId: string) => Promise<void>;

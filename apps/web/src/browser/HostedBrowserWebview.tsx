@@ -37,6 +37,15 @@ declare global {
   }
 }
 
+/**
+ * Bounds-sync mode: when the desktop shell owns the preview webviews natively
+ * (the Tauri shell — signalled by `previewBridge.setTabBounds` being present)
+ * there is no `<webview>` tag to mount. A placeholder div takes its place and
+ * this component reports the div's on-screen rect so the shell can position
+ * its child webview over it. Constant for an app session.
+ */
+const boundsSyncMode = Boolean(previewBridge?.setTabBounds);
+
 export function HostedBrowserWebview(props: {
   readonly threadRef: ScopedThreadRef;
   readonly tabId: string;
@@ -92,6 +101,9 @@ export function HostedBrowserWebview(props: {
   useEffect(() => {
     const webview = webviewRef.current;
     const bridge = previewBridge;
+    // Bounds-sync shells own their webviews natively; there is no guest
+    // WebContents to register.
+    if (boundsSyncMode) return;
     if (!webview || !config || !bridge) return;
     let disposed = false;
     let recoveryTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -223,10 +235,69 @@ export function HostedBrowserWebview(props: {
     });
   }, [layout, tabId]);
 
+  // Bounds-sync mode: report the placeholder's on-screen rect (clipped to the
+  // wrapper, which the native child webview cannot be) to the shell.
+  const lastSentBoundsRef = useRef("");
+  const reportBounds = useCallback(() => {
+    const bridge = previewBridge;
+    if (!boundsSyncMode || !bridge?.setTabBounds) return;
+    const element = webviewRef.current;
+    const wrapper = wrapperRef.current;
+    if (!element || !wrapper) return;
+    const rect = element.getBoundingClientRect();
+    const clip = wrapper.getBoundingClientRect();
+    const left = Math.max(rect.left, clip.left);
+    const top = Math.max(rect.top, clip.top);
+    const width = Math.max(0, Math.min(rect.right, clip.right) - left);
+    const height = Math.max(0, Math.min(rect.bottom, clip.bottom) - top);
+    const bounds = {
+      x: left,
+      y: top,
+      width,
+      height,
+      scale: layout.viewportScale,
+      visible: active && width > 0 && height > 0,
+    };
+    const serialized = JSON.stringify(bounds);
+    if (serialized === lastSentBoundsRef.current) return;
+    lastSentBoundsRef.current = serialized;
+    void bridge.setTabBounds(tabId, bounds).catch(() => {
+      lastSentBoundsRef.current = "";
+    });
+  }, [active, layout.viewportScale, tabId]);
+
   useEffect(() => {
-    const frameId = window.requestAnimationFrame(syncContentPresentation);
+    const frameId = window.requestAnimationFrame(() => {
+      syncContentPresentation();
+      reportBounds();
+    });
     return () => window.cancelAnimationFrame(frameId);
-  }, [syncContentPresentation]);
+  }, [reportBounds, syncContentPresentation]);
+
+  // Bounds-sync mode: drive the initial navigation (the Electron path gets it
+  // from the `<webview src>` attribute) and clear the placement on unmount.
+  useEffect(() => {
+    const bridge = previewBridge;
+    if (!boundsSyncMode || !bridge?.setTabBounds) return;
+    const setTabBounds = bridge.setTabBounds.bind(bridge);
+    const lease = tabLeaseRef.current;
+    void (async () => {
+      try {
+        await lease?.ready;
+        // Only navigate tabs the shell has never loaded; on remounts (layout
+        // changes, tab switches) the shell already has the page.
+        const status = await bridge.automation.status(tabId);
+        const url = latestUrlRef.current;
+        if (!status.url && url) await bridge.navigate(tabId, url);
+      } catch {
+        // The tab may have been closed mid-flight; state events will recover.
+      }
+    })();
+    return () => {
+      lastSentBoundsRef.current = "";
+      void setTabBounds(tabId, null).catch(() => undefined);
+    };
+  }, [tabId]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;
@@ -248,7 +319,10 @@ export function HostedBrowserWebview(props: {
       ref={wrapperRef}
       className="fixed overflow-hidden bg-muted/35"
       style={{ ...wrapperStyle, overscrollBehavior: "contain" }}
-      onScroll={syncContentPresentation}
+      onScroll={() => {
+        syncContentPresentation();
+        reportBounds();
+      }}
       data-preview-viewport={tabId}
     >
       <div className="relative" style={{ width: layout.canvasWidth, height: layout.canvasHeight }}>
@@ -261,44 +335,52 @@ export function HostedBrowserWebview(props: {
             onChange={commitViewportChange}
           />
         ) : null}
-        <webview
-          key={webviewGeneration}
-          ref={setWebviewRef}
-          src={webviewGeneration === 0 ? initialSrc : recoverySrc}
-          partition={config.partition}
-          webpreferences={config.webPreferences}
-          {...(config.preloadUrl ? { preload: config.preloadUrl } : {})}
-          data-preview-tab={tabId}
-          data-preview-viewport-mode={effectiveViewport._tag}
-          data-preview-viewport-key={browserViewportSettingKey(effectiveViewport)}
-          data-preview-css-width={
-            fittedSourceViewport
+        {(() => {
+          const sharedProps = {
+            "data-preview-tab": tabId,
+            "data-preview-viewport-mode": effectiveViewport._tag,
+            "data-preview-viewport-key": browserViewportSettingKey(effectiveViewport),
+            "data-preview-css-width": fittedSourceViewport
               ? fittedSourceViewport.width
               : effectiveViewport._tag === "fill"
                 ? Math.max(1, Math.round(layout.viewportWidth / normalizedZoomFactor))
-                : effectiveViewport.width
-          }
-          data-preview-css-height={
-            fittedSourceViewport
+                : effectiveViewport.width,
+            "data-preview-css-height": fittedSourceViewport
               ? fittedSourceViewport.height
               : effectiveViewport._tag === "fill"
                 ? Math.max(1, Math.round(layout.viewportHeight / normalizedZoomFactor))
-                : effectiveViewport.height
-          }
-          aria-hidden={active ? undefined : true}
-          className={cn(
-            "absolute flex overflow-hidden bg-background",
-            active && !layout.fillsPanel && "ring-1 ring-border/70 shadow-sm",
-          )}
-          style={{
-            left: layout.viewportX,
-            top: layout.viewportY,
-            width: layout.viewportWidth / layout.viewportScale,
-            height: layout.viewportHeight / layout.viewportScale,
-            transform: layout.viewportScale < 1 ? `scale(${layout.viewportScale})` : undefined,
-            transformOrigin: "top left",
-          }}
-        />
+                : effectiveViewport.height,
+            "aria-hidden": active ? undefined : true,
+            className: cn(
+              "absolute flex overflow-hidden bg-background",
+              active && !layout.fillsPanel && "ring-1 ring-border/70 shadow-sm",
+            ),
+            style: {
+              left: layout.viewportX,
+              top: layout.viewportY,
+              width: layout.viewportWidth / layout.viewportScale,
+              height: layout.viewportHeight / layout.viewportScale,
+              transform: layout.viewportScale < 1 ? `scale(${layout.viewportScale})` : undefined,
+              transformOrigin: "top left" as const,
+            },
+          };
+          // Bounds-sync shells render the guest natively above this window;
+          // the div only stakes out the on-screen rect (and paints the
+          // background while the native view attaches).
+          return boundsSyncMode ? (
+            <div ref={setWebviewRef} {...sharedProps} />
+          ) : (
+            <webview
+              key={webviewGeneration}
+              ref={setWebviewRef}
+              src={webviewGeneration === 0 ? initialSrc : recoverySrc}
+              partition={config.partition}
+              webpreferences={config.webPreferences}
+              {...(config.preloadUrl ? { preload: config.preloadUrl } : {})}
+              {...sharedProps}
+            />
+          );
+        })()}
         {active && effectiveViewport._tag !== "fill" && !fittedSourceViewport ? (
           <>
             <BrowserViewportResizeHandles
