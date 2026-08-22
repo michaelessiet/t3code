@@ -36,22 +36,27 @@ capabilities on WKWebView.
 ## Running (dev, macOS)
 
 ```sh
-# 1. Server bundle (rebuild after server changes):
-pnpm --filter @t3tools/server build   # or the repo's build:bundle flow
+# One-time / after server changes — build the server bundle:
+pnpm build:bundle
 
-# 2. Web dev server, IPv4-bound with a pinned HMR host, no Clerk env.
-#    (Not `pnpm dev:web`: scripts/dev-runner.ts deletes HOST for non-desktop
-#    modes, and HOST=localhost binds IPv6-only while the proxy dials IPv4.)
-cd apps/web && HOST=127.0.0.1 ../../node_modules/.bin/vp dev   # http://127.0.0.1:5733
-
-# 3. The Tauri shell:
-cd apps/desktop-tauri && pnpm dev
+# Everything else, from the repo root (mirrors pnpm dev:desktop):
+pnpm dev:desktop-tauri
 ```
 
-`pnpm dev` builds the shim, checks the prerequisites, and runs `cargo run`
-with `VITE_DEV_SERVER_URL`, `T3CODE_TAURI_SERVER_ENTRY`, and
-`T3CODE_TAURI_SHIM_PATH` set. Useful overrides: `T3CODE_PORT` (fixed backend
-port), `T3CODE_TAURI_NODE` (node binary), `T3CODE_TAURI_HOME` (state dir).
+`dev:desktop-tauri` is a dev-runner mode (`scripts/dev-runner.ts`) that
+starts the web dev server and this package's `dev` script in parallel with
+pinned HOST/ports. The package script builds the shim, waits for the
+prerequisites, and runs the shell with `VITE_DEV_SERVER_URL`,
+`T3CODE_TAURI_SERVER_ENTRY`, and `T3CODE_TAURI_SHIM_PATH` set.
+
+To run the pieces separately: start the web dev server with
+`cd apps/web && HOST=127.0.0.1 ../../node_modules/.bin/vp dev` (not
+`pnpm dev:web` — the dev runner deletes HOST for non-desktop modes, and
+`HOST=localhost` binds IPv6-only while the proxy dials IPv4), then
+`cd apps/desktop-tauri && pnpm dev`.
+
+Useful overrides: `T3CODE_PORT` (fixed backend port), `T3CODE_TAURI_NODE`
+(node binary), `T3CODE_TAURI_HOME` (state dir).
 
 ## Milestones
 

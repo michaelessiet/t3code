@@ -83,7 +83,13 @@ const MODE_ARGS = {
   "dev:server": ["run", "--filter=t3", "dev"],
   "dev:web": ["run", "--filter=@t3tools/web", "dev"],
   "dev:desktop": ["run", "--filter=@t3tools/desktop", "--filter=@t3tools/web", "dev"],
+  "dev:desktop-tauri": ["run", "--filter=@t3tools/desktop-tauri", "--filter=@t3tools/web", "dev"],
 } as const satisfies Record<string, ReadonlyArray<string>>;
+
+/** Modes whose renderer is a desktop shell pinned to loopback (not a browser). */
+function isDesktopDevMode(mode: DevMode): boolean {
+  return mode === "dev:desktop" || mode === "dev:desktop-tauri";
+}
 
 type DevMode = keyof typeof MODE_ARGS;
 /**
@@ -151,7 +157,7 @@ export class DevRunnerProcessError extends Schema.TaggedErrorClass<DevRunnerProc
   "DevRunnerProcessError",
   {
     operation: Schema.Literals(["spawn", "wait-for-exit"]),
-    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop"]),
+    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop", "dev:desktop-tauri"]),
     executable: Schema.Literal("vp"),
     argumentCount: Schema.Number,
     shell: Schema.Boolean,
@@ -166,7 +172,7 @@ export class DevRunnerProcessError extends Schema.TaggedErrorClass<DevRunnerProc
 export class DevRunnerProcessExitError extends Schema.TaggedErrorClass<DevRunnerProcessExitError>()(
   "DevRunnerProcessExitError",
   {
-    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop"]),
+    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop", "dev:desktop-tauri"]),
     executable: Schema.Literal("vp"),
     argumentCount: Schema.Number,
     shell: Schema.Boolean,
@@ -324,7 +330,7 @@ export function createDevRunnerEnv({
     // by the caller; an unset t3Home here genuinely means "use the default".
     const configuredBaseDir = t3Home?.trim() || undefined;
     const resolvedBaseDir = yield* resolveBaseDir(configuredBaseDir);
-    const isDesktopMode = mode === "dev:desktop";
+    const isDesktopMode = isDesktopDevMode(mode);
 
     const output: NodeJS.ProcessEnv = {
       ...baseEnv,
@@ -712,7 +718,7 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
     if (input.share) {
       if (input.mode === "dev:server") {
         yield* Effect.logInfo("[dev-runner] --share has no effect for dev:server (no web server).");
-      } else if (input.mode === "dev:desktop") {
+      } else if (isDesktopDevMode(input.mode)) {
         // Desktop is not single-origin: the renderer gets VITE_HTTP_URL and
         // VITE_WS_URL baked to loopback, so a tailnet visitor would load the UI
         // and then watch it dial its own 127.0.0.1 for the backend. Worse,
@@ -720,7 +726,7 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
         // Electron itself loads the renderer from. Refuse rather than hand out
         // a URL that is broken in a way the user cannot see.
         yield* Effect.logWarning(
-          "[dev-runner] --share is not supported for dev:desktop (the renderer is pinned to loopback). Use `dev`, which runs the whole browser stack.",
+          `[dev-runner] --share is not supported for ${input.mode} (the renderer is pinned to loopback). Use \`dev\`, which runs the whole browser stack.`,
         );
       } else {
         // acquireRelease, not share-then-addFinalizer: the mapping outlives this
