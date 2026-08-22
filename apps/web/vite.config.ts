@@ -225,6 +225,19 @@ export default defineConfig(() => {
       outDir: "dist",
       emptyOutDir: true,
       sourcemap: buildSourcemap,
+      rollupOptions: {
+        output: {
+          // Carve the always-loaded framework mass out of the entry chunk so
+          // app-code changes don't invalidate the browser cache for it. Kept
+          // deliberately minimal: lazy routes/panels already split themselves.
+          advancedChunks: {
+            groups: [
+              { name: "react-vendor", test: /node_modules[\\/](?:react|react-dom|scheduler)[\\/]/ },
+              { name: "effect-vendor", test: /node_modules[\\/](?:effect|@effect)[\\/]/ },
+            ],
+          },
+        },
+      },
     },
     test: {
       projects: [defineProject(unitTestProject)],

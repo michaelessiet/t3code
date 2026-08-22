@@ -1,8 +1,5 @@
-import React from "react";
+import React, { type ReactNode } from "react";
 import ReactDOM from "react-dom/client";
-import { ClerkProvider } from "@clerk/react";
-import { passkeys } from "@clerk/electron/passkeys";
-import { ClerkProvider as ElectronClerkProvider } from "@clerk/electron/react";
 import { createHashHistory, createBrowserHistory } from "@tanstack/react-router";
 
 import "@fontsource-variable/dm-sans/index.css";
@@ -33,22 +30,48 @@ if (isElectron) {
 
 const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;
 
-const app = <AppRoot router={router} />;
+type AuthProviderComponent = (props: { children: ReactNode }) => ReactNode;
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    {clerkPublishableKey && hasCloudPublicConfig() ? (
-      isElectron ? (
-        <ElectronClerkProvider publishableKey={clerkPublishableKey} passkeys={passkeys}>
+// Only one Clerk provider variant ever runs, so import it dynamically: this
+// keeps @clerk/clerk-js (pulled by the Electron provider) and the unused
+// variant out of the entry chunk on both runtimes.
+async function resolveAuthProvider(publishableKey: string): Promise<AuthProviderComponent> {
+  if (isElectron) {
+    const [{ ClerkProvider: ElectronClerkProvider }, { passkeys }] = await Promise.all([
+      import("@clerk/electron/react"),
+      import("@clerk/electron/passkeys"),
+    ]);
+    return ({ children }) => (
+      <ElectronClerkProvider publishableKey={publishableKey} passkeys={passkeys}>
+        {children}
+      </ElectronClerkProvider>
+    );
+  }
+  const { ClerkProvider } = await import("@clerk/react");
+  return ({ children }) => (
+    <ClerkProvider publishableKey={publishableKey}>{children}</ClerkProvider>
+  );
+}
+
+async function renderApp(): Promise<void> {
+  const app = <AppRoot router={router} />;
+  const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
+  const AuthProvider =
+    clerkPublishableKey && hasCloudPublicConfig()
+      ? await resolveAuthProvider(clerkPublishableKey)
+      : null;
+
+  root.render(
+    <React.StrictMode>
+      {AuthProvider ? (
+        <AuthProvider>
           <ManagedRelayAuthProvider>{app}</ManagedRelayAuthProvider>
-        </ElectronClerkProvider>
+        </AuthProvider>
       ) : (
-        <ClerkProvider publishableKey={clerkPublishableKey}>
-          <ManagedRelayAuthProvider>{app}</ManagedRelayAuthProvider>
-        </ClerkProvider>
-      )
-    ) : (
-      app
-    )}
-  </React.StrictMode>,
-);
+        app
+      )}
+    </React.StrictMode>,
+  );
+}
+
+void renderApp();
