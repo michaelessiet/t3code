@@ -45,6 +45,7 @@ import * as DesktopEnvironment from "./app/DesktopEnvironment.ts";
 import * as DesktopLifecycle from "./app/DesktopLifecycle.ts";
 import * as DesktopShutdown from "./app/DesktopShutdown.ts";
 import * as DesktopObservability from "./app/DesktopObservability.ts";
+import * as DesktopProcessMetrics from "./app/DesktopProcessMetrics.ts";
 import * as DesktopServerExposure from "./backend/DesktopServerExposure.ts";
 import * as DesktopClientSettings from "./settings/DesktopClientSettings.ts";
 import * as DesktopSavedEnvironments from "./settings/DesktopSavedEnvironments.ts";
@@ -180,6 +181,7 @@ const desktopApplicationLayer = Layer.mergeAll(
   DesktopLifecycle.layer,
   DesktopApplicationMenu.layer,
   DesktopShellEnvironment.layer,
+  DesktopProcessMetrics.layer(() => Electron.app.getAppMetrics()),
   desktopSshLayer,
 ).pipe(
   Layer.provideMerge(DesktopUpdates.layer),
