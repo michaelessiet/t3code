@@ -1,6 +1,10 @@
 // Dev runner for the Tauri shell. Prerequisites (started separately):
-//   1. The web dev server:    HOST=localhost pnpm dev:web   (default port 5733)
-//   2. A built server bundle: apps/server/dist/bin.mjs      (pnpm build:bundle)
+//   1. The web dev server, bound to IPv4 with a pinned HMR host:
+//        cd apps/web && HOST=127.0.0.1 ../../node_modules/.bin/vp dev
+//      (`pnpm dev:web` won't work — scripts/dev-runner.ts deletes HOST for
+//      non-desktop modes, and HOST=localhost binds IPv6-only on macOS while
+//      the Rust proxy dials 127.0.0.1.)
+//   2. A built server bundle: apps/server/dist/bin.mjs (pnpm build:bundle)
 //
 // This script builds the shim, verifies the prerequisites, and launches
 // `cargo run` with the environment the Rust shell expects.
@@ -12,7 +16,7 @@ import path from "node:path";
 const packageDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const repoRoot = path.resolve(packageDir, "../..");
 
-const devServerUrl = process.env.VITE_DEV_SERVER_URL ?? "http://localhost:5733";
+const devServerUrl = process.env.VITE_DEV_SERVER_URL ?? "http://127.0.0.1:5733";
 const serverEntry =
   process.env.T3CODE_TAURI_SERVER_ENTRY ?? path.join(repoRoot, "apps/server/dist/bin.mjs");
 const shimPath = path.join(packageDir, "shim/dist/shim.js");
@@ -28,7 +32,7 @@ const devServerReachable = await fetch(devServerUrl, { method: "HEAD" }).then(
 );
 if (!devServerReachable) {
   console.error(
-    `Web dev server is not reachable at ${devServerUrl} — start it with \`HOST=localhost pnpm dev:web\` (or set VITE_DEV_SERVER_URL).`,
+    `Web dev server is not reachable at ${devServerUrl} — start it with \`cd apps/web && HOST=127.0.0.1 ../../node_modules/.bin/vp dev\` (or set VITE_DEV_SERVER_URL).`,
   );
   process.exit(1);
 }

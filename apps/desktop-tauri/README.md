@@ -39,8 +39,10 @@ capabilities on WKWebView.
 # 1. Server bundle (rebuild after server changes):
 pnpm --filter @t3tools/server build   # or the repo's build:bundle flow
 
-# 2. Web dev server with a pinned HMR host, no Clerk env:
-HOST=localhost pnpm dev:web           # serves http://localhost:5733
+# 2. Web dev server, IPv4-bound with a pinned HMR host, no Clerk env.
+#    (Not `pnpm dev:web`: scripts/dev-runner.ts deletes HOST for non-desktop
+#    modes, and HOST=localhost binds IPv6-only while the proxy dials IPv4.)
+cd apps/web && HOST=127.0.0.1 ../../node_modules/.bin/vp dev   # http://127.0.0.1:5733
 
 # 3. The Tauri shell:
 cd apps/desktop-tauri && pnpm dev
