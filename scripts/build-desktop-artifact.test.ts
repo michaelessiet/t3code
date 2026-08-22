@@ -43,6 +43,7 @@ import {
   resolvePackageManagerUserAgent,
   stageLinuxIconSize,
   STAGE_INSTALL_ARGS,
+  stripStagedSourcemaps,
 } from "./build-desktop-artifact.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -605,6 +606,101 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
       yield* fs.makeDirectory(path.dirname(nestedLib), { recursive: true });
       yield* fs.writeFileString(nestedLib, "declare interface Object {}");
+      yield* Effect.promise(() => hooks.afterPack(context));
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("stripStagedSourcemaps removes only sourcemap files", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const distDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-strip-maps-" });
+      const assetsDir = path.join(distDir, "client", "assets");
+      yield* fs.makeDirectory(assetsDir, { recursive: true });
+      yield* fs.writeFileString(path.join(distDir, "bin.mjs"), "export {};");
+      yield* fs.writeFileString(path.join(distDir, "bin.mjs.map"), "{}");
+      yield* fs.writeFileString(path.join(assetsDir, "index.js"), "0;");
+      yield* fs.writeFileString(path.join(assetsDir, "index.js.map"), "{}");
+      yield* fs.writeFileString(path.join(assetsDir, "index.css.map"), "{}");
+      // Files that merely end in .map without a sourcemap extension must survive.
+      yield* fs.writeFileString(path.join(assetsDir, "regions.map"), "data");
+
+      yield* stripStagedSourcemaps(distDir, "test-dist");
+
+      assert.isTrue(yield* fs.exists(path.join(distDir, "bin.mjs")));
+      assert.isTrue(yield* fs.exists(path.join(assetsDir, "index.js")));
+      assert.isTrue(yield* fs.exists(path.join(assetsDir, "regions.map")));
+      assert.isFalse(yield* fs.exists(path.join(distDir, "bin.mjs.map")));
+      assert.isFalse(yield* fs.exists(path.join(assetsDir, "index.js.map")));
+      assert.isFalse(yield* fs.exists(path.join(assetsDir, "index.css.map")));
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("afterPack rejects shipped sourcemaps", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const hooksDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-builder-hooks-" });
+      const hooksPath = path.join(hooksDir, BUILDER_HOOKS_FILENAME);
+      yield* fs.writeFileString(hooksPath, BUILDER_HOOKS_SOURCE);
+      const hooks = NodeModule.createRequire(import.meta.url)(hooksPath) as {
+        afterPack: (context: unknown) => Promise<void>;
+      };
+
+      const appOutDir = path.join(hooksDir, "out");
+      const unpackedDir = path.join(appOutDir, "resources", "app.asar.unpacked");
+      const context = { electronPlatformName: "linux", appOutDir };
+
+      // Satisfy the TypeScript standard-library probes first.
+      for (const libSegments of [
+        ["node_modules", "typescript", "lib", "lib.es5.d.ts"],
+        [
+          "node_modules",
+          "@vtsls",
+          "language-service",
+          "node_modules",
+          "typescript",
+          "lib",
+          "lib.es5.d.ts",
+        ],
+      ]) {
+        const libPath = path.join(unpackedDir, ...libSegments);
+        yield* fs.makeDirectory(path.dirname(libPath), { recursive: true });
+        yield* fs.writeFileString(libPath, "declare interface Object {}");
+      }
+      yield* Effect.promise(() => hooks.afterPack(context));
+
+      const serverDistMap = path.join(unpackedDir, "apps", "server", "dist", "bin.mjs.map");
+      yield* fs.makeDirectory(path.dirname(serverDistMap), { recursive: true });
+      yield* fs.writeFileString(serverDistMap, "{}");
+      const serverDistFailure = yield* Effect.promise(() =>
+        hooks.afterPack(context).then(
+          () => "resolved",
+          (error: unknown) => String(error),
+        ),
+      );
+      assert.include(serverDistFailure, "Sourcemap shipped");
+      assert.include(serverDistFailure, "bin.mjs.map");
+      yield* fs.remove(serverDistMap);
+
+      const nodeModulesMap = path.join(
+        unpackedDir,
+        "node_modules",
+        "effect",
+        "dist",
+        "index.js.map",
+      );
+      yield* fs.makeDirectory(path.dirname(nodeModulesMap), { recursive: true });
+      yield* fs.writeFileString(nodeModulesMap, "{}");
+      const nodeModulesFailure = yield* Effect.promise(() =>
+        hooks.afterPack(context).then(
+          () => "resolved",
+          (error: unknown) => String(error),
+        ),
+      );
+      assert.include(nodeModulesFailure, "Sourcemap shipped");
+      yield* fs.remove(nodeModulesMap);
+
       yield* Effect.promise(() => hooks.afterPack(context));
     }).pipe(Effect.scoped),
   );
