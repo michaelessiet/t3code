@@ -1,0 +1,23 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "types": [],
+    "lib": ["ESNext", "DOM"],
+    "plugins": [
+      {
+        "name": "@effect/language-service",
+        // The shim is plain browser code (like apps/web): the Effect-first
+        // global bans don't apply. Deep-merged with tsconfig.base.json.
+        "diagnosticSeverity": {
+          "globalDate": "off",
+          "globalConsole": "off",
+          "globalRandom": "off",
+          "globalTimers": "off",
+          "globalFetch": "off"
+        }
+      }
+    ]
+  },
+  "include": ["shim/src"]
+}

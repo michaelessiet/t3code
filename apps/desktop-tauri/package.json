@@ -1,0 +1,17 @@
+{
+  "name": "@t3tools/desktop-tauri",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:shim": "node scripts/build-shim.mjs",
+    "typecheck": "tsgo --noEmit",
+    "dev": "node scripts/dev.mjs"
+  },
+  "dependencies": {
+    "@t3tools/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:"
+  }
+}
