@@ -18,7 +18,11 @@ import {
   BuildCommandFailedError,
   ClaudeSdkPlatformPackagesNotFoundError,
   isClaudeSdkPlatformPackagePath,
+  isClerkJsPrunableDistChunkPath,
+  isPlaywrightCorePackageDirPath,
   pruneClaudeSdkPlatformPackages,
+  pruneStagedNodeModules,
+  StagedNodeModulesPruneTargetNotFoundError,
   createStageWorkspaceConfig,
   createStagePatchedDependencies,
   createBuildConfig,
@@ -568,9 +572,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  // Satisfies the afterPack probe for the SDK metadata the managed Claude Code
-  // installer reads at runtime.
-  const stageClaudeSdkRuntimeFixtures = Effect.fn("stageClaudeSdkRuntimeFixtures")(function* (
+  // Satisfies the afterPack existence probes: the SDK metadata the managed
+  // Claude Code installer reads at runtime, plus the vendor files the staged
+  // node_modules prune must keep (clerk.browser.js, playwright coreBundle.js).
+  const stageAfterPackRuntimeFixtures = Effect.fn("stageAfterPackRuntimeFixtures")(function* (
     unpackedDir: string,
   ) {
     const fs = yield* FileSystem.FileSystem;
@@ -579,6 +584,13 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     yield* fs.makeDirectory(sdkDir, { recursive: true });
     yield* fs.writeFileString(path.join(sdkDir, "sdk.mjs"), "export {};");
     yield* fs.writeFileString(path.join(sdkDir, "manifest.json"), "{}");
+    const clerkDistDir = path.join(unpackedDir, "node_modules", "@clerk", "clerk-js", "dist");
+    yield* fs.makeDirectory(clerkDistDir, { recursive: true });
+    yield* fs.writeFileString(path.join(clerkDistDir, "clerk.browser.js"), "0;");
+    const playwrightDir = path.join(unpackedDir, "node_modules", "playwright-core");
+    yield* fs.makeDirectory(path.join(playwrightDir, "lib"), { recursive: true });
+    yield* fs.writeFileString(path.join(playwrightDir, "package.json"), "{}");
+    yield* fs.writeFileString(path.join(playwrightDir, "lib", "coreBundle.js"), "0;");
   });
 
   it.effect("afterPack asserts both packaged TypeScript standard-library copies", () =>
@@ -622,7 +634,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
       yield* fs.makeDirectory(path.dirname(nestedLib), { recursive: true });
       yield* fs.writeFileString(nestedLib, "declare interface Object {}");
-      yield* stageClaudeSdkRuntimeFixtures(path.join(appOutDir, "resources", "app.asar.unpacked"));
+      yield* stageAfterPackRuntimeFixtures(path.join(appOutDir, "resources", "app.asar.unpacked"));
       yield* Effect.promise(() => hooks.afterPack(context));
     }).pipe(Effect.scoped),
   );
@@ -685,7 +697,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         yield* fs.makeDirectory(path.dirname(libPath), { recursive: true });
         yield* fs.writeFileString(libPath, "declare interface Object {}");
       }
-      yield* stageClaudeSdkRuntimeFixtures(unpackedDir);
+      yield* stageAfterPackRuntimeFixtures(unpackedDir);
       yield* Effect.promise(() => hooks.afterPack(context));
 
       const serverDistMap = path.join(unpackedDir, "apps", "server", "dist", "bin.mjs.map");
@@ -829,7 +841,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       );
       assert.include(missingMetadata, "Claude Agent SDK runtime file missing");
 
-      yield* stageClaudeSdkRuntimeFixtures(unpackedDir);
+      yield* stageAfterPackRuntimeFixtures(unpackedDir);
       yield* Effect.promise(() => hooks.afterPack(context));
 
       const platformPackageFile = path.join(
@@ -851,6 +863,203 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       yield* fs.remove(path.dirname(platformPackageFile), { recursive: true });
 
       yield* Effect.promise(() => hooks.afterPack(context));
+    }).pipe(Effect.scoped),
+  );
+
+  it("matches prunable clerk-js variant chunks and playwright-core package dirs", () => {
+    assert.isTrue(isClerkJsPrunableDistChunkPath("@clerk/clerk-js/dist/clerk.legacy.browser.js"));
+    assert.isTrue(
+      isClerkJsPrunableDistChunkPath(
+        ".pnpm/@clerk+clerk-js@6.25.7_abc/node_modules/@clerk/clerk-js/dist/121_clerk.native_9ac4c7_6.25.7.js",
+      ),
+    );
+    assert.isTrue(
+      isClerkJsPrunableDistChunkPath(
+        "@clerk/clerk-js/dist/vendors_clerk.legacy.browser_dda423_6.25.7.js",
+      ),
+    );
+    // The modern browser bundles and module entries must never match.
+    assert.isFalse(isClerkJsPrunableDistChunkPath("@clerk/clerk-js/dist/clerk.browser.js"));
+    assert.isFalse(isClerkJsPrunableDistChunkPath("@clerk/clerk-js/dist/clerk.mjs"));
+    assert.isFalse(isClerkJsPrunableDistChunkPath("@clerk/clerk-js/dist/clerk.no-rhc.js"));
+    // Same-named files outside clerk-js's dist must never match.
+    assert.isFalse(isClerkJsPrunableDistChunkPath("other-package/dist/clerk.native.js"));
+
+    assert.isTrue(isPlaywrightCorePackageDirPath("playwright-core"));
+    assert.isTrue(
+      isPlaywrightCorePackageDirPath(".pnpm/playwright-core@1.60.0/node_modules/playwright-core"),
+    );
+    assert.isFalse(isPlaywrightCorePackageDirPath(".pnpm/playwright-core@1.60.0"));
+    assert.isFalse(isPlaywrightCorePackageDirPath("playwright-core/lib"));
+    assert.isFalse(isPlaywrightCorePackageDirPath("@scope/playwright-core-helpers"));
+  });
+
+  it.effect("pruneStagedNodeModules trims clerk-js variants and playwright-core", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const stageAppDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vendor-prune-" });
+      const nodeModulesDir = path.join(stageAppDir, "node_modules");
+
+      // clerk-js lives at its physical pnpm-store path; the browser variant
+      // and module entries must survive while legacy/native variants go.
+      const clerkDistDir = path.join(
+        nodeModulesDir,
+        ".pnpm",
+        "@clerk+clerk-js@6.25.7_abc",
+        "node_modules",
+        "@clerk",
+        "clerk-js",
+        "dist",
+      );
+      yield* fs.makeDirectory(clerkDistDir, { recursive: true });
+      for (const file of [
+        "clerk.browser.js",
+        "clerk.mjs",
+        "clerk.legacy.browser.js",
+        "clerk.native.js",
+        "121_clerk.native_9ac4c7_6.25.7.js",
+        "vendors_clerk.legacy.browser_dda423_6.25.7.js",
+      ]) {
+        yield* fs.writeFileString(path.join(clerkDistDir, file), "0;");
+      }
+
+      // playwright-core: physical pnpm-store dir plus the top-level scope
+      // symlink, which must dedupe to a single trim of the same package.
+      const playwrightDir = path.join(
+        nodeModulesDir,
+        ".pnpm",
+        "playwright-core@1.60.0",
+        "node_modules",
+        "playwright-core",
+      );
+      yield* fs.makeDirectory(path.join(playwrightDir, "lib", "server"), { recursive: true });
+      yield* fs.makeDirectory(path.join(playwrightDir, "types"), { recursive: true });
+      yield* fs.writeFileString(path.join(playwrightDir, "package.json"), "{}");
+      yield* fs.writeFileString(path.join(playwrightDir, "index.js"), "0;");
+      yield* fs.writeFileString(path.join(playwrightDir, "cli.js"), "0;");
+      yield* fs.writeFileString(path.join(playwrightDir, "lib", "coreBundle.js"), "0;");
+      yield* fs.writeFileString(path.join(playwrightDir, "lib", "utilsBundle.js"), "0;");
+      yield* fs.writeFileString(path.join(playwrightDir, "lib", "server", "index.js"), "0;");
+      yield* fs.writeFileString(path.join(playwrightDir, "types", "types.d.ts"), "");
+      yield* fs.symlink(playwrightDir, path.join(nodeModulesDir, "playwright-core"));
+
+      yield* pruneStagedNodeModules(stageAppDir);
+
+      assert.isTrue(yield* fs.exists(path.join(clerkDistDir, "clerk.browser.js")));
+      assert.isTrue(yield* fs.exists(path.join(clerkDistDir, "clerk.mjs")));
+      assert.isFalse(yield* fs.exists(path.join(clerkDistDir, "clerk.legacy.browser.js")));
+      assert.isFalse(yield* fs.exists(path.join(clerkDistDir, "clerk.native.js")));
+      assert.isFalse(
+        yield* fs.exists(path.join(clerkDistDir, "121_clerk.native_9ac4c7_6.25.7.js")),
+      );
+      assert.isFalse(
+        yield* fs.exists(path.join(clerkDistDir, "vendors_clerk.legacy.browser_dda423_6.25.7.js")),
+      );
+
+      assert.isTrue(yield* fs.exists(path.join(playwrightDir, "package.json")));
+      assert.isTrue(yield* fs.exists(path.join(playwrightDir, "lib", "coreBundle.js")));
+      assert.isFalse(yield* fs.exists(path.join(playwrightDir, "index.js")));
+      assert.isFalse(yield* fs.exists(path.join(playwrightDir, "cli.js")));
+      assert.isFalse(yield* fs.exists(path.join(playwrightDir, "types")));
+      assert.isFalse(yield* fs.exists(path.join(playwrightDir, "lib", "utilsBundle.js")));
+      assert.isFalse(yield* fs.exists(path.join(playwrightDir, "lib", "server")));
+      // The scope symlink still resolves to the trimmed package.
+      assert.isTrue(
+        yield* fs.exists(path.join(nodeModulesDir, "playwright-core", "lib", "coreBundle.js")),
+      );
+
+      // An empty tree means the dependency layout changed; the build must fail
+      // rather than silently skip the prune.
+      const emptyStageDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-vendor-prune-empty-" });
+      yield* fs.makeDirectory(path.join(emptyStageDir, "node_modules"), { recursive: true });
+      const failure = yield* pruneStagedNodeModules(emptyStageDir).pipe(Effect.flip);
+      assert.instanceOf(failure, StagedNodeModulesPruneTargetNotFoundError);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("afterPack rejects pruned vendor files and requires the kept bundles", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const hooksDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-builder-hooks-" });
+      const hooksPath = path.join(hooksDir, BUILDER_HOOKS_FILENAME);
+      yield* fs.writeFileString(hooksPath, BUILDER_HOOKS_SOURCE);
+      const hooks = NodeModule.createRequire(import.meta.url)(hooksPath) as {
+        afterPack: (context: unknown) => Promise<void>;
+      };
+
+      const appOutDir = path.join(hooksDir, "out");
+      const unpackedDir = path.join(appOutDir, "resources", "app.asar.unpacked");
+      const context = { electronPlatformName: "linux", appOutDir };
+      const runAfterPack = () =>
+        Effect.promise(() =>
+          hooks.afterPack(context).then(
+            () => "resolved",
+            (error: unknown) => String(error),
+          ),
+        );
+
+      for (const libSegments of [
+        ["node_modules", "typescript", "lib", "lib.es5.d.ts"],
+        [
+          "node_modules",
+          "@vtsls",
+          "language-service",
+          "node_modules",
+          "typescript",
+          "lib",
+          "lib.es5.d.ts",
+        ],
+      ]) {
+        const libPath = path.join(unpackedDir, ...libSegments);
+        yield* fs.makeDirectory(path.dirname(libPath), { recursive: true });
+        yield* fs.writeFileString(libPath, "declare interface Object {}");
+      }
+      yield* stageAfterPackRuntimeFixtures(unpackedDir);
+      assert.equal(yield* runAfterPack(), "resolved");
+
+      const legacyChunk = path.join(
+        unpackedDir,
+        "node_modules",
+        "@clerk",
+        "clerk-js",
+        "dist",
+        "clerk.legacy.browser.js",
+      );
+      yield* fs.writeFileString(legacyChunk, "0;");
+      assert.include(yield* runAfterPack(), "Pruned vendor file shipped");
+      yield* fs.remove(legacyChunk);
+
+      const playwrightExtra = path.join(unpackedDir, "node_modules", "playwright-core", "index.js");
+      yield* fs.writeFileString(playwrightExtra, "0;");
+      assert.include(yield* runAfterPack(), "Pruned vendor file shipped");
+      yield* fs.remove(playwrightExtra);
+
+      const clerkBrowserBundle = path.join(
+        unpackedDir,
+        "node_modules",
+        "@clerk",
+        "clerk-js",
+        "dist",
+        "clerk.browser.js",
+      );
+      yield* fs.remove(clerkBrowserBundle);
+      assert.include(yield* runAfterPack(), "clerk.browser.js missing");
+      yield* fs.writeFileString(clerkBrowserBundle, "0;");
+
+      const coreBundle = path.join(
+        unpackedDir,
+        "node_modules",
+        "playwright-core",
+        "lib",
+        "coreBundle.js",
+      );
+      yield* fs.remove(coreBundle);
+      assert.include(yield* runAfterPack(), "coreBundle.js missing");
+      yield* fs.writeFileString(coreBundle, "0;");
+
+      assert.equal(yield* runAfterPack(), "resolved");
     }).pipe(Effect.scoped),
   );
 
