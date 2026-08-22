@@ -2276,7 +2276,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           assert.strictEqual(status.auth.status, "unknown");
           assert.strictEqual(
             status.message,
-            "Claude Agent CLI (`claude`) is not installed or not on PATH.",
+            "Claude Code is not installed. Download it from the Claude provider settings or install it from https://claude.com/claude-code.",
           );
         }).pipe(Effect.provide(failingSpawnerLayer("spawn claude ENOENT"))),
       );

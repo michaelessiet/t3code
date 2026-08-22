@@ -16,6 +16,7 @@ import {
   GitCommandError,
   KeybindingRule,
   MessageId,
+  DEFAULT_CLAUDE_BINARY_PATH,
   ExternalLauncherCommandNotFoundError,
   type OrchestrationThreadShell,
   TerminalNotRunningError,
@@ -124,6 +125,7 @@ import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as CloudManagedEndpointRuntime from "./cloud/ManagedEndpointRuntime.ts";
 import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
+import * as ClaudeManagedBinary from "./provider/Drivers/ClaudeManagedBinary.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
@@ -368,6 +370,7 @@ const buildAppUnderTest = (options?: {
       CloudManagedEndpointRuntime.CloudManagedEndpointRuntime["Service"]
     >;
     relayClient?: Partial<RelayClient.RelayClient["Service"]>;
+    claudeManagedBinary?: Partial<ClaudeManagedBinary.ClaudeManagedBinary["Service"]>;
     processRunner?: Partial<ProcessRunner.ProcessRunner["Service"]>;
     cloudCliTokenManager?: Partial<CloudCliTokenManager.CloudCliTokenManager["Service"]>;
   };
@@ -865,6 +868,29 @@ const buildAppUnderTest = (options?: {
             install: Effect.die("unused relay-client install"),
             installWithProgress: () => Effect.die("unused relay-client install"),
             ...options?.layers?.relayClient,
+          }),
+        ),
+      ),
+      Layer.provide(
+        Layer.succeed(
+          ClaudeManagedBinary.ClaudeManagedBinary,
+          ClaudeManagedBinary.ClaudeManagedBinary.of({
+            // Mirror the real precedence for explicit paths so tests that
+            // point binaryPath at a fake executable keep spawning it.
+            status: (binaryPath) =>
+              Effect.succeed(
+                binaryPath !== DEFAULT_CLAUDE_BINARY_PATH
+                  ? {
+                      status: "available",
+                      executablePath: binaryPath,
+                      source: "explicit",
+                      version: "0.0.0-test",
+                    }
+                  : { status: "missing", version: "0.0.0-test", binarySizeBytes: 0 },
+              ),
+            install: Effect.die("unused claude binary install"),
+            installWithProgress: () => Effect.die("unused claude binary install"),
+            ...options?.layers?.claudeManagedBinary,
           }),
         ),
       ),

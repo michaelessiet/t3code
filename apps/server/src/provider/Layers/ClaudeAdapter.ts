@@ -63,6 +63,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -81,6 +82,7 @@ import * as GraphAvailability from "../../graph/GraphAvailability.ts";
 import { knowledgeGraphNote } from "../KnowledgeGraphInstructions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
+import { claudeBinaryStatusOption } from "../Drivers/ClaudeManagedBinary.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import {
   getClaudeModelCapabilities,
@@ -1441,10 +1443,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   };
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, options?.environment).pipe(
     Effect.provideService(Path.Path, path),
-  );
-  const claudeSdkExecutablePath = yield* resolveClaudeSdkExecutablePath(
-    claudeSettings.binaryPath,
-    claudeEnvironment,
   );
   const nativeEventLogger =
     options?.nativeEventLogger ??
@@ -3582,7 +3580,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const canUseTool: CanUseTool = (toolName, toolInput, callbackOptions) =>
         runPromise(canUseToolEffect(toolName, toolInput, callbackOptions));
 
-      const claudeBinaryPath = claudeSdkExecutablePath;
+      // Resolved per session start (not at adapter creation) so a managed
+      // binary installed mid-session is picked up without recreating the
+      // provider instance.
+      const claudeBinaryStatus = Option.getOrNull(
+        yield* claudeBinaryStatusOption(claudeSettings.binaryPath, claudeEnvironment),
+      );
+      if (claudeBinaryStatus && claudeBinaryStatus.status !== "available") {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "session/start",
+          detail:
+            "Claude Code is not installed. Download it from the Claude provider settings, " +
+            "install it from https://claude.com/claude-code, or set an explicit binary path.",
+        });
+      }
+      const claudeBinaryPath = claudeBinaryStatus
+        ? claudeBinaryStatus.executablePath
+        : yield* resolveClaudeSdkExecutablePath(claudeSettings.binaryPath, claudeEnvironment);
       const extraArgs = parseCliArgs(claudeSettings.launchArgs).flags;
       const modelSelection =
         input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;

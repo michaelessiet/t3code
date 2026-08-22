@@ -18,6 +18,7 @@ import * as Duration from "effect/Duration";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/unstable/http";
@@ -54,6 +55,7 @@ import {
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
 import { makeClaudeCapabilitiesCacheKey, makeClaudeContinuationGroupKey } from "./ClaudeHome.ts";
+import { claudeBinaryStatusOption } from "./ClaudeManagedBinary.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
@@ -130,8 +132,18 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         instanceId,
       });
       const effectiveConfig = { ...config, enabled } satisfies ClaudeSettings;
+      // Resolve maintenance against the executable that will actually spawn.
+      // A managed download lives under baseDir/tools/claude and matches no
+      // npm/homebrew/native install heuristic, so it resolves to manual-only —
+      // the managed copy is version-pinned and must not offer `claude update`.
+      const claudeBinaryStatus = Option.getOrNull(
+        yield* claudeBinaryStatusOption(effectiveConfig.binaryPath, processEnv),
+      );
       const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-        binaryPath: effectiveConfig.binaryPath,
+        binaryPath:
+          claudeBinaryStatus?.status === "available"
+            ? claudeBinaryStatus.executablePath
+            : effectiveConfig.binaryPath,
         env: processEnv,
       });
       const continuationGroupKey = yield* makeClaudeContinuationGroupKey(effectiveConfig);

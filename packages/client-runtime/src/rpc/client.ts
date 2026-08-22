@@ -56,6 +56,7 @@ export type EnvironmentSubscriptionRpcTag =
   | typeof WS_METHODS.terminalAttach;
 
 export type EnvironmentStreamCommandRpcTag =
+  | typeof WS_METHODS.claudeInstallBinary
   | typeof WS_METHODS.cloudInstallRelayClient
   | typeof WS_METHODS.graphInstallRuntime
   | typeof WS_METHODS.gitRunStackedAction;

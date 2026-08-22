@@ -160,6 +160,14 @@ export const DEFAULT_CLIENT_SETTINGS: ClientSettings = Schema.decodeSync(ClientS
 export const ThreadEnvMode = Schema.Literals(["local", "worktree"]);
 export type ThreadEnvMode = typeof ThreadEnvMode.Type;
 
+/**
+ * Default Claude binary setting. Decoding maps unset/empty to this literal, so
+ * an untouched setting is indistinguishable from a user typing "claude" — both
+ * mean "no explicit path: resolve via managed download / PATH lookup". Any
+ * other value is treated as an explicit executable path.
+ */
+export const DEFAULT_CLAUDE_BINARY_PATH = "claude";
+
 const makeBinaryPathSetting = (fallback: string) =>
   TrimmedString.pipe(
     Schema.decodeTo(
@@ -273,7 +281,7 @@ export const ClaudeSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed(true)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
-    binaryPath: makeBinaryPathSetting("claude").pipe(
+    binaryPath: makeBinaryPathSetting(DEFAULT_CLAUDE_BINARY_PATH).pipe(
       Schema.annotateKey({
         title: "Binary path",
         description: "Path to the Claude binary used by this instance.",

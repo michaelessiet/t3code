@@ -599,7 +599,9 @@ export const BUILDER_HOOKS_FILENAME = "electron-builder-hooks.cjs";
  * signing), so the stripping can never silently regress again. It also
  * asserts the inverse for sourcemaps: staging strips every *.map (they have
  * no runtime consumers and cost ~75MB installed), and afterPack fails the
- * build if any ships in app.asar.unpacked again.
+ * build if any ships in app.asar.unpacked again. The same guard covers the
+ * Claude Agent SDK platform binary packages (~300MB, pruned at staging) and
+ * the SDK metadata files the managed installer needs at runtime.
  */
 export const BUILDER_HOOKS_SOURCE = String.raw`"use strict";
 const fs = require("fs");
@@ -625,6 +627,24 @@ function findShippedSourcemap(rootDir) {
     const entryPath = String(entry);
     if (SOURCEMAP_FILE_EXTENSIONS.some((extension) => entryPath.endsWith(extension))) {
       return path.join(rootDir, entryPath);
+    }
+  }
+  return null;
+}
+
+function findShippedClaudeSdkPlatformPackage(nodeModulesDir) {
+  if (!fs.existsSync(nodeModulesDir)) {
+    return null;
+  }
+  for (const entry of fs.readdirSync(nodeModulesDir, { recursive: true })) {
+    const segments = String(entry).split(path.sep).join("/").split("/");
+    const basename = segments[segments.length - 1];
+    const parent = segments[segments.length - 2];
+    if (
+      (parent === "@anthropic-ai" && basename.startsWith("claude-agent-sdk-")) ||
+      (parent === ".pnpm" && basename.startsWith("@anthropic-ai+claude-agent-sdk-"))
+    ) {
+      return path.join(nodeModulesDir, String(entry));
     }
   }
   return null;
@@ -682,6 +702,33 @@ exports.afterPack = async (context) => {
           shippedSourcemap +
           "). Desktop staging strips *.map files (~75MB installed with no runtime " +
           "consumers); a build-pipeline change reintroduced them.",
+      );
+    }
+  }
+  const unpackedNodeModules = path.join(unpackedDir, "node_modules");
+  const shippedClaudePlatformPackage = findShippedClaudeSdkPlatformPackage(unpackedNodeModules);
+  if (shippedClaudePlatformPackage) {
+    throw new Error(
+      "Claude Agent SDK platform binary package shipped in packaged app (" +
+        shippedClaudePlatformPackage +
+        "). Desktop staging prunes these (~300MB, unreachable at runtime because " +
+        "pathToClaudeCodeExecutable is always set); the server downloads the pinned " +
+        "build on first use instead.",
+    );
+  }
+  // The managed installer reads the pinned CLI version and per-platform
+  // checksums from the SDK package at runtime — those files must ship.
+  const claudeSdkRuntimeProbes = [
+    path.join(unpackedNodeModules, "@anthropic-ai", "claude-agent-sdk", "sdk.mjs"),
+    path.join(unpackedNodeModules, "@anthropic-ai", "claude-agent-sdk", "manifest.json"),
+  ];
+  for (const probe of claudeSdkRuntimeProbes) {
+    if (!fs.existsSync(probe)) {
+      throw new Error(
+        "Claude Agent SDK runtime file missing from packaged app (" +
+          probe +
+          "). The managed Claude Code installer needs the SDK's package metadata " +
+          "to pick and verify the binary it downloads.",
       );
     }
   }
@@ -1002,6 +1049,69 @@ export const stripStagedSourcemaps = Effect.fn("stripStagedSourcemaps")(function
     `[desktop-artifact] Stripped ${removedCount} sourcemaps (${(removedBytes / (1024 * 1024)).toFixed(1)} MB) from ${label}.`,
   );
 });
+
+/**
+ * True for a directory entry that is a Claude Agent SDK per-platform binary
+ * package: either a scope entry (`@anthropic-ai/claude-agent-sdk-<platform>`,
+ * symlink or real directory) or a pnpm virtual-store payload directory
+ * (`.pnpm/@anthropic-ai+claude-agent-sdk-<platform>@<version>`).
+ */
+export const isClaudeSdkPlatformPackagePath = (entry: string): boolean => {
+  const segments = entry.replaceAll("\\", "/").split("/");
+  const basename = segments.at(-1) ?? "";
+  const parent = segments.at(-2) ?? "";
+  return (
+    (parent === "@anthropic-ai" && basename.startsWith("claude-agent-sdk-")) ||
+    (parent === ".pnpm" && basename.startsWith("@anthropic-ai+claude-agent-sdk-"))
+  );
+};
+
+export class ClaudeSdkPlatformPackagesNotFoundError extends Schema.TaggedErrorClass<ClaudeSdkPlatformPackagesNotFoundError>()(
+  "ClaudeSdkPlatformPackagesNotFoundError",
+  {
+    nodeModulesDir: Schema.String,
+  },
+) {
+  override get message(): string {
+    return (
+      `Expected at least one @anthropic-ai/claude-agent-sdk platform package under ${this.nodeModulesDir}. ` +
+      "The SDK's package layout may have changed, which would silently reintroduce the ~300MB bundled Claude binary."
+    );
+  }
+}
+
+// The Claude Agent SDK's optionalDependencies pull a ~300MB per-platform CLI
+// binary package that is unreachable at runtime: T3 always passes
+// pathToClaudeCodeExecutable to the SDK, and the SDK's bundled-binary fallback
+// only fires when that option is undefined. The server downloads the pinned
+// build on first use instead (ClaudeManagedBinary), so drop every platform
+// package from the staged tree; afterPack asserts they stay gone.
+export const pruneClaudeSdkPlatformPackages = Effect.fn("pruneClaudeSdkPlatformPackages")(
+  function* (stageAppDir: string) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const nodeModulesDir = path.join(stageAppDir, "node_modules");
+    const entries = yield* fs.readDirectory(nodeModulesDir, { recursive: true });
+    const matches = entries.filter(isClaudeSdkPlatformPackagePath);
+    // A payload dir contains its own nested scope entry — remove top-most only.
+    const normalized = matches.map((entry) => entry.replaceAll("\\", "/"));
+    const topMost = matches.filter(
+      (entry, index) =>
+        !normalized.some(
+          (other, otherIndex) => otherIndex !== index && normalized[index]!.startsWith(`${other}/`),
+        ),
+    );
+    if (topMost.length === 0) {
+      return yield* new ClaudeSdkPlatformPackagesNotFoundError({ nodeModulesDir });
+    }
+    for (const entry of topMost) {
+      yield* fs.remove(path.join(nodeModulesDir, entry), { recursive: true, force: true });
+    }
+    yield* Effect.log(
+      `[desktop-artifact] Pruned ${topMost.length} Claude Agent SDK platform package entries from node_modules.`,
+    );
+  },
+);
 
 // pnpm nests the architecture package under @clerk/electron-passkeys, while electron-builder only
 // retains collected top-level dependencies. The SDK loader checks beside index.js first, so stage
@@ -1977,6 +2087,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     { label: "vp install --prod", verbose: options.verbose },
   );
   yield* stripStagedSourcemaps(path.join(stageAppDir, "node_modules"), "node_modules");
+  yield* pruneClaudeSdkPlatformPackages(stageAppDir);
   yield* stageClerkPasskeyNativeBinaries(stageAppDir, options.platform, options.arch);
 
   // WSL is Windows-only, so only the Windows artifact carries the Linux backend

@@ -107,6 +107,7 @@ import {
 import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
 import * as NetService from "@t3tools/shared/Net";
 import * as RelayClient from "@t3tools/shared/relayClient";
+import { layerClaudeManagedBinary } from "./provider/Drivers/ClaudeManagedBinary.ts";
 import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
 
 // Effect's default preemptive shutdown waits 20s before finalizing request scopes.
@@ -131,6 +132,13 @@ const RelayClientLive = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
     return RelayClient.layerCloudflared({ baseDir: config.baseDir });
+  }),
+);
+
+const ClaudeManagedBinaryLive = Layer.unwrap(
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    return layerClaudeManagedBinary({ baseDir: config.baseDir });
   }),
 );
 
@@ -403,6 +411,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
         Layer.provide(ExternalLauncher.layer),
       ),
       CloudManagedEndpointRuntimeLive,
+      ClaudeManagedBinaryLive,
     ),
   ),
 );

@@ -39,7 +39,7 @@ import {
   spawnAndCollect,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
-import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
+import { resolveEffectiveClaudeExecutablePath } from "../Drivers/ClaudeManagedBinary.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
 
@@ -711,7 +711,7 @@ const probeClaudeCapabilities = (
   const abort = new AbortController();
   return Effect.gen(function* () {
     const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, environment);
-    const executablePath = yield* resolveClaudeSdkExecutablePath(
+    const executablePath = yield* resolveEffectiveClaudeExecutablePath(
       claudeSettings.binaryPath,
       claudeEnvironment,
     );
@@ -768,7 +768,11 @@ const runClaudeCommand = Effect.fn("runClaudeCommand")(function* (
   environment?: NodeJS.ProcessEnv,
 ) {
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, environment);
-  const spawnCommand = yield* resolveSpawnCommand(claudeSettings.binaryPath, args, {
+  const executablePath = yield* resolveEffectiveClaudeExecutablePath(
+    claudeSettings.binaryPath,
+    claudeEnvironment,
+  );
+  const spawnCommand = yield* resolveSpawnCommand(executablePath, args, {
     env: claudeEnvironment,
   });
   const command = ChildProcess.make(spawnCommand.command, spawnCommand.args, {
@@ -836,7 +840,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         status: "error",
         auth: { status: "unknown" },
         message: isCommandMissingCause(error)
-          ? "Claude Agent CLI (`claude`) is not installed or not on PATH."
+          ? "Claude Code is not installed. Download it from the Claude provider settings or install it from https://claude.com/claude-code."
           : "Failed to execute Claude Agent CLI health check.",
       },
     });
