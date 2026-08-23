@@ -549,6 +549,7 @@ const buildAppUnderTest = (options?: {
       WorkspaceContentSearch.layer.pipe(Layer.provide(WorkspacePaths.layer)),
       LspManager.layer.pipe(
         Layer.provide(WorkspacePaths.layer),
+        Layer.provide(WorkspaceWatcher.layer.pipe(Layer.provide(WorkspacePaths.layer))),
         Layer.provide(serverSettingsLayer),
       ),
       ProjectFaviconResolver.layer.pipe(

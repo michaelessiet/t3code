@@ -13,9 +13,21 @@ import * as LspManager from "./LspManager.ts";
 import { languageBindingForPath } from "./LanguageServers.ts";
 import { layerTest as serverSettingsLayerTest } from "../serverSettings.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import { WorkspaceWatcher } from "../workspace/WorkspaceWatcher.ts";
+
+/**
+ * Silent watcher. LspManager subscribes per workspace to forward didSave; these
+ * tests assert nothing about that, and a real watch would attach filesystem
+ * handles to suites that drive time through TestClock.
+ */
+const WorkspaceWatcherTestLayer = Layer.succeed(
+  WorkspaceWatcher,
+  WorkspaceWatcher.of({ subscribe: () => Stream.never }),
+);
 
 const TestLayer = LspManager.layer.pipe(
   Layer.provide(WorkspacePaths.layer),
+  Layer.provide(WorkspaceWatcherTestLayer),
   Layer.provide(serverSettingsLayerTest()),
   Layer.provideMerge(NodeServices.layer),
 );
@@ -161,6 +173,7 @@ it.layer(TestLayer, { excludeTestServices: true })("LspManagerLive", (it) => {
 // so the not_installed path is exercised deterministically on any machine.
 const CustomServerTestLayer = LspManager.layer.pipe(
   Layer.provide(WorkspacePaths.layer),
+  Layer.provide(WorkspaceWatcherTestLayer),
   Layer.provide(
     serverSettingsLayerTest({
       languageServers: [
@@ -241,6 +254,7 @@ setInterval(() => {}, 1000);
 
 const CrashServerTestLayer = LspManager.layer.pipe(
   Layer.provide(WorkspacePaths.layer),
+  Layer.provide(WorkspaceWatcherTestLayer),
   Layer.provide(
     serverSettingsLayerTest({
       languageServers: [
@@ -360,6 +374,124 @@ it.layer(CrashServerTestLayer, { excludeTestServices: true })(
           yield* awaitCrashyState(lspManager, cwd, "failed");
         }).pipe(Effect.provide(TestClock.layer())),
       { timeout: 60_000 },
+    );
+  },
+);
+
+// A server that stays silent until it is told a document was saved, then
+// publishes a marker diagnostic. Observing that diagnostic is what proves the
+// didSave reached the server, since didSave has no response of its own.
+const SAVE_REPORTING_SERVER_SCRIPT = `
+let buffer = Buffer.alloc(0);
+const write = (message) => {
+  const body = JSON.stringify(message);
+  process.stdout.write("Content-Length: " + Buffer.byteLength(body) + "\\r\\n\\r\\n" + body);
+};
+process.stdin.on("data", (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  for (;;) {
+    const separator = buffer.indexOf("\\r\\n\\r\\n");
+    if (separator === -1) return;
+    const length = Number(/Content-Length: (\\d+)/.exec(buffer.slice(0, separator).toString())[1]);
+    if (buffer.length < separator + 4 + length) return;
+    const message = JSON.parse(buffer.slice(separator + 4, separator + 4 + length).toString());
+    buffer = buffer.slice(separator + 4 + length);
+    if (message.method === "initialize") write({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+    else if (message.method === "shutdown") write({ jsonrpc: "2.0", id: message.id, result: null });
+    else if (message.method === "exit") process.exit(0);
+    else if (message.method === "textDocument/didSave") {
+      write({
+        jsonrpc: "2.0",
+        method: "textDocument/publishDiagnostics",
+        params: {
+          uri: message.params.textDocument.uri,
+          diagnostics: [{
+            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+            severity: 1,
+            message: "saved",
+          }],
+        },
+      });
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`.trim();
+
+/**
+ * Watcher that reports the same file changing on a loop. LspManager subscribes
+ * while opening a document, so a stream that fired once could land before the
+ * document was registered; repeating removes that race without a coordination
+ * channel between the test and the manager.
+ */
+const RepeatingWatcherTestLayer = Layer.succeed(
+  WorkspaceWatcher,
+  WorkspaceWatcher.of({
+    subscribe: () =>
+      Stream.forever(
+        Stream.fromEffect(
+          Effect.as(realSleep(25), { _tag: "changes", paths: ["main.saved"] } as const),
+        ),
+      ),
+  }),
+);
+
+const SaveReportingTestLayer = LspManager.layer.pipe(
+  Layer.provide(WorkspacePaths.layer),
+  Layer.provide(RepeatingWatcherTestLayer),
+  Layer.provide(
+    serverSettingsLayerTest({
+      languageServers: [
+        {
+          serverId: "saver",
+          displayName: "save-reporting-language-server",
+          command: process.execPath,
+          args: ["-e", SAVE_REPORTING_SERVER_SCRIPT],
+          extensions: [".saved"],
+          languageId: "saved",
+        },
+      ],
+    }),
+  ),
+  Layer.provideMerge(NodeServices.layer),
+);
+
+it.layer(SaveReportingTestLayer, { excludeTestServices: true })(
+  "LspManagerLive save forwarding",
+  (it) => {
+    it.effect(
+      "forwards didSave for open documents when the workspace changes on disk",
+      () =>
+        Effect.gen(function* () {
+          const lspManager = yield* LspManager.LspManager;
+          const cwd = yield* makeTempDir;
+
+          const diagnosticsFiber = yield* lspManager.subscribeDiagnostics({ cwd }).pipe(
+            Stream.filter((event) => event.relativePath === "main.saved"),
+            Stream.take(1),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+
+          yield* lspManager.didOpen({ cwd, relativePath: "main.saved", contents: "x" });
+
+          const events = yield* Fiber.join(diagnosticsFiber).pipe(Effect.timeout("30 seconds"));
+          expect(events[0]!.diagnostics[0]!.message).toBe("saved");
+        }),
+      { timeout: 60_000 },
+    );
+
+    it.effect("ignores changes to files no server has open", () =>
+      Effect.gen(function* () {
+        const lspManager = yield* LspManager.LspManager;
+        const cwd = yield* makeTempDir;
+
+        // The watcher reports main.saved on a loop, but nothing opened it here,
+        // so no didSave is owed and no diagnostic can arrive.
+        yield* realSleep(200);
+        const status = yield* lspManager.serverStatus({ cwd });
+        expect(status.servers).toHaveLength(0);
+      }),
     );
   },
 );
