@@ -69,6 +69,17 @@ declare global {
   }
 }
 
+// Vibrancy: flag the document pre-paint so the index.css translucency rules
+// apply (the shell window is transparent with a native blur behind it, see
+// backend.rs). index.html also gates on `__TAURI__ in window`, but this
+// script is the authoritative signal for the Vitre shell — init-script
+// ordering relative to Tauri's API injection is not guaranteed.
+if (/Mac/.test(navigator.platform)) {
+  const addVibrancy = () => document.documentElement?.classList.add("vibrancy");
+  addVibrancy();
+  document.addEventListener("DOMContentLoaded", addVibrancy, { once: true });
+}
+
 const seed: TauriSeed = (() => {
   const injected = window.__VITRE_SEED__;
   if (!injected) {

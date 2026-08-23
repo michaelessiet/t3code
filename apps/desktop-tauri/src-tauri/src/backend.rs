@@ -248,7 +248,20 @@ fn create_main_window(handle: &AppHandle, config: &BackendConfig) {
             .hidden_title(true)
             // Same inset as Electron's trafficLightPosition (DesktopWindow.ts:
             // getWindowTitleBarOptions) so the web titlebar CSS lines up.
-            .traffic_light_position(tauri::LogicalPosition::new(16.0, 18.0));
+            .traffic_light_position(tauri::LogicalPosition::new(16.0, 18.0))
+            // Vibrancy: the window is transparent (macos-private-api makes
+            // the WKWebView background transparent too) and an
+            // NSVisualEffectView blurs the desktop behind it. The web CSS
+            // decides which surfaces let it show through (the `vibrancy`
+            // root class added by the index.html head script); fully opaque
+            // CSS renders identically to a solid window.
+            .transparent(true)
+            .effects(tauri::utils::config::WindowEffectsConfig {
+                effects: vec![tauri::utils::WindowEffect::UnderWindowBackground],
+                state: Some(tauri::utils::WindowEffectState::FollowsWindowActiveState),
+                radius: None,
+                color: None,
+            });
 
         if let Err(error) = builder.build() {
             eprintln!("[vitre] failed to create main window: {error}");

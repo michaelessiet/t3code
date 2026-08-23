@@ -3,7 +3,7 @@ import { SettingsIcon } from "lucide-react";
 import { memo, useCallback } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 
-import { APP_STAGE_LABEL } from "../../branding";
+import { APP_BASE_NAME, APP_STAGE_LABEL } from "../../branding";
 import { cn } from "../../lib/utils";
 import { primaryServerConfigAtom } from "../../state/server";
 import { resolveSidebarStageBadgeLabel } from "../Sidebar.logic";
@@ -58,15 +58,23 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
       )}
       to="/"
     >
-      <T3Wordmark />
-      <span
-        className={cn(
-          "truncate text-sm font-medium tracking-tight",
-          onBackdrop ? "text-white/70" : "text-muted-foreground",
-        )}
-      >
-        Code
-      </span>
+      {APP_BASE_NAME === "T3 Code" ? (
+        <>
+          <T3Wordmark />
+          <span
+            className={cn(
+              "truncate text-sm font-medium tracking-tight",
+              onBackdrop ? "text-white/70" : "text-muted-foreground",
+            )}
+          >
+            Code
+          </span>
+        </>
+      ) : (
+        // Shell-injected branding (e.g. Vitre): the T3 wordmark does not
+        // apply; render the injected base name instead.
+        <span className="truncate text-sm font-semibold tracking-tight">{APP_BASE_NAME}</span>
+      )}
     </Link>
   );
 }

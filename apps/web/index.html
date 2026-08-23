@@ -26,7 +26,13 @@
           const isDark = theme === "dark" || (theme === "system" && prefersDark);
           document.documentElement.classList.toggle("dark", isDark);
           const chromeColor = isDark ? DARK_BACKGROUND : LIGHT_BACKGROUND;
-          document.documentElement.style.backgroundColor = chromeColor;
+          // Vibrancy (Vitre): the Tauri shell on macOS makes the window
+          // transparent with a native blur behind it; the chrome must not
+          // paint an opaque background or the effect is invisible. __TAURI__
+          // is injected before this script runs (withGlobalTauri).
+          const vibrancy = "__TAURI__" in window && /Mac/.test(navigator.platform);
+          document.documentElement.classList.toggle("vibrancy", vibrancy);
+          document.documentElement.style.backgroundColor = vibrancy ? "transparent" : chromeColor;
           themeColorMeta?.setAttribute("content", chromeColor);
         } catch {
           document.documentElement.classList.add("dark");
@@ -60,6 +66,10 @@
       html.dark body {
         background: #161616;
         color: #f5f5f5;
+      }
+
+      html.vibrancy body {
+        background: transparent;
       }
 
       #boot-shell {

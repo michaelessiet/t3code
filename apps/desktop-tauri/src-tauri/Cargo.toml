@@ -10,7 +10,15 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # `unstable` enables multiwebview (Window::add_child) for the preview
 # subsystem's child webviews — the same shape the WS5 probe validated.
-tauri = { version = "2", features = ["devtools", "unstable", "webview-data-url"] }
+tauri = { version = "2", features = [
+  "devtools",
+  "unstable",
+  "webview-data-url",
+  # Transparent window background for the vibrancy UI (gated on macOS behind
+  # the private WKWebView `_setDrawsBackground:`; see app.macOSPrivateApi in
+  # tauri.conf.json).
+  "macos-private-api",
+] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }

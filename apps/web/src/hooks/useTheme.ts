@@ -161,6 +161,14 @@ function resolveBrowserChromeSurface(): HTMLElement {
 
 export function syncBrowserChromeTheme() {
   if (typeof document === "undefined" || typeof getComputedStyle === "undefined") return;
+  if (document.documentElement.classList.contains("vibrancy")) {
+    // Vibrancy (Vitre/Tauri): the native window blur must show through the
+    // chrome; an opaque inline background on html/body would sit under the
+    // translucent surfaces and defeat it.
+    document.documentElement.style.backgroundColor = "transparent";
+    document.body.style.backgroundColor = "transparent";
+    return;
+  }
   const surfaceColor = normalizeThemeColor(
     getComputedStyle(resolveBrowserChromeSurface()).backgroundColor,
   );

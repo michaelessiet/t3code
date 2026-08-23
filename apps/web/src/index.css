@@ -837,6 +837,10 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   color-scheme: light;
   --radius: 0.625rem;
   --background: var(--color-zinc-25);
+  /* Opaque twins of --background/--sidebar: the vibrancy pass (below) makes
+     the live vars translucent and content surfaces re-solidify from these. */
+  --surface-solid: var(--color-zinc-25);
+  --sidebar-solid: var(--color-zinc-50);
   --app-chrome-background: var(--background);
   --surface-raised: color-mix(in srgb, var(--card) 20%, transparent);
   --foreground: var(--color-zinc-800);
@@ -880,12 +884,16 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     /* Keep the workspace in the same neutral-black family as sidebar v2.
        Surfaces lift from this base instead of starting from a milky gray. */
     --background: var(--color-neutral-950);
+    /* Derive card/popover from the solid twin, not --background, so they stay
+       opaque when the vibrancy pass makes --background translucent. */
+    --surface-solid: var(--color-neutral-950);
+    --sidebar-solid: var(--card);
     --app-chrome-background: var(--background);
     --surface-raised: var(--secondary);
     --foreground: var(--color-neutral-100);
-    --card: color-mix(in srgb, var(--background) 97%, var(--color-white));
+    --card: color-mix(in srgb, var(--surface-solid) 97%, var(--color-white));
     --card-foreground: var(--color-neutral-100);
-    --popover: color-mix(in srgb, var(--background) 94%, var(--color-white));
+    --popover: color-mix(in srgb, var(--surface-solid) 94%, var(--color-white));
     --popover-foreground: var(--color-neutral-100);
     --primary: oklch(0.588 0.217 264);
     --primary-foreground: var(--color-white);
@@ -925,6 +933,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 [data-sidebar-version="v1"],
 [data-sidebar-version="v2"] {
   --background: var(--color-zinc-25);
+  --surface-solid: var(--color-zinc-25);
+  --sidebar-solid: var(--color-zinc-50);
   --foreground: var(--color-zinc-800);
   --card: var(--color-white);
   --card-foreground: var(--color-zinc-800);
@@ -949,6 +959,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 .dark [data-sidebar-version="v1"],
 .dark [data-sidebar-version="v2"] {
   --background: #000;
+  --surface-solid: #000;
+  --sidebar-solid: #000;
   --foreground: #f1f3f7;
   --card: #000;
   --card-foreground: var(--foreground);
@@ -970,6 +982,32 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
      global chrome background, or the fade shows a seam (same rule as the
      light palette above). */
   --sidebar-stage-fade: var(--card);
+}
+
+/* Vibrancy (Vitre — the Tauri shell on macOS). The shell window is
+   transparent with a native NSVisualEffectView blur behind it (backend.rs);
+   the `vibrancy` class is applied pre-paint by the index.html head script.
+   Chrome surfaces (sidebar, chat, topbar) go semi-transparent so the blur
+   shows through — reusing --glass-opacity so the appearance slider tunes the
+   strength — while the right panel's content surfaces (code editor, diff,
+   file explorer, search, preview) re-solidify at the panel boundary. The
+   [data-sidebar-version] variants redefine --background/--sidebar on their
+   own subtree, so they need the same treatment locally. */
+html.vibrancy,
+html.vibrancy [data-sidebar-version="v1"],
+html.vibrancy [data-sidebar-version="v2"] {
+  --app-chrome-background: transparent;
+  --background: color-mix(in srgb, var(--surface-solid) var(--glass-opacity), transparent);
+  --sidebar: color-mix(in srgb, var(--sidebar-solid) var(--glass-opacity), transparent);
+}
+
+/* Content surfaces stay opaque: every right-panel surface reads
+   var(--background), so restoring it at the PreviewPanelShell root cascades
+   opacity to the editor/diff/file-tree/search/preview without per-surface
+   edits. */
+html.vibrancy [data-preview-panel-mode] {
+  --background: var(--surface-solid);
+  background-color: var(--surface-solid);
 }
 
 body {
