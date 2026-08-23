@@ -14,12 +14,47 @@ static TARGET: OnceLock<reqwest::Url> = OnceLock::new();
 static CSP: OnceLock<String> = OnceLock::new();
 static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
+/// Mirror of `clerkFrontendApiHostnameFromPublishableKey`
+/// (packages/shared/src/relayAuth.ts): the frontend-API hostname is base64
+/// inside the publishable key, with a trailing `$`. The key reaches this
+/// process through the repo env (dev-runner assigns loadRepoEnv() into the
+/// environment; packaged builds must inject it the same way the web bundle
+/// bakes VITE_CLERK_PUBLISHABLE_KEY).
+fn clerk_frontend_api_hostname() -> Option<String> {
+    use base64::Engine as _;
+
+    let key = std::env::var("VITE_CLERK_PUBLISHABLE_KEY")
+        .or_else(|_| std::env::var("T3CODE_CLERK_PUBLISHABLE_KEY"))
+        .ok()?;
+    let key = key.trim();
+    let encoded = key
+        .strip_prefix("pk_test_")
+        .or_else(|| key.strip_prefix("pk_live_"))?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(encoded))
+        .ok()?;
+    let hostname = String::from_utf8(decoded).ok()?;
+    let hostname = hostname.trim_end_matches('$');
+    if hostname.is_empty() || hostname.contains('/') {
+        return None;
+    }
+    Some(hostname.to_string())
+}
+
 /// Mirror of `makeDesktopContentSecurityPolicy` (ElectronProtocol.ts:67-95),
-/// minus the Clerk origin — cloud auth is not part of milestone 1.
+/// including the Clerk frontend-API origin in script-src when a publishable
+/// key is configured (clerk-js is loaded from that host by the web provider).
 fn make_csp(scheme: &str) -> String {
+    let script_src = match clerk_frontend_api_hostname() {
+        Some(hostname) => format!(
+            "script-src 'self' 'unsafe-inline' https://{hostname} https://challenges.cloudflare.com"
+        ),
+        None => "script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com".to_string(),
+    };
     [
         "default-src 'self'".to_string(),
-        "script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com".to_string(),
+        script_src,
         // The renderer connects directly to local backends and user-configured
         // environments whose origins aren't known here; restrict by scheme.
         "connect-src 'self' http: https: ws: wss:".to_string(),

@@ -113,11 +113,160 @@ pub fn set_client_settings(app: AppHandle, settings: serde_json::Value) -> Resul
     std::fs::write(path, settings.to_string()).map_err(|error| error.to_string())
 }
 
-// Plaintext in M1 — the Electron app encrypts this with safeStorage; a
-// keychain-backed store is a milestone-3 item (see README).
-#[tauri::command]
-pub fn get_connection_catalog(app: AppHandle) -> Result<Option<String>, String> {
-    let path = config_file(&app, "connection-catalog.json")?;
+// --- connection catalog ------------------------------------------------------
+// The catalog holds bearer tokens, DPoP tokens, and SSH connection info
+// (ConnectionCatalogDocument in packages/client-runtime), so it must not sit
+// on disk in plaintext. Mirroring Electron safeStorage's shape: an encryption
+// key lives in the OS keychain and the file holds only ciphertext
+// (`{version, cipher, nonce, ciphertext}`). The M1 plaintext file is migrated
+// on first read. macOS-only for now — other platforms keep the M1 plaintext
+// file until the M4 platform pass (DPAPI / secret-service).
+
+/// Same atomic write discipline as Electron's DesktopConnectionCatalogStore:
+/// write a pid-suffixed temp file, then rename over the real path.
+fn write_atomic(path: &std::path::Path, contents: &str) -> Result<(), String> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".{}.tmp", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, contents).map_err(|error| error.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|error| {
+        let _ = std::fs::remove_file(&tmp);
+        error.to_string()
+    })
+}
+
+#[cfg(target_os = "macos")]
+mod catalog_crypto {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::{Aes256Gcm, Nonce};
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    use rand::RngCore as _;
+
+    const KEYCHAIN_SERVICE: &str = "com.t3code.desktop-tauri";
+    const KEYCHAIN_ACCOUNT: &str = "connection-catalog-key";
+
+    fn keychain_service() -> String {
+        std::env::var("T3CODE_TAURI_KEYCHAIN_SERVICE")
+            .unwrap_or_else(|_| KEYCHAIN_SERVICE.to_string())
+    }
+
+    /// Reads the catalog encryption key from the keychain, generating and
+    /// storing one when `create` is set. `Ok(None)` means "no key and not
+    /// asked to create one"; keychain access failures are errors (the caller
+    /// treats them as "secure storage unavailable" on the write path).
+    fn load_key(create: bool) -> Result<Option<[u8; 32]>, String> {
+        let entry = keyring::Entry::new(&keychain_service(), KEYCHAIN_ACCOUNT)
+            .map_err(|error| error.to_string())?;
+        match entry.get_password() {
+            Ok(encoded) => {
+                let bytes = B64
+                    .decode(encoded.trim())
+                    .map_err(|error| error.to_string())?;
+                let key: [u8; 32] = bytes
+                    .try_into()
+                    .map_err(|_| "keychain catalog key has the wrong length".to_string())?;
+                Ok(Some(key))
+            }
+            Err(keyring::Error::NoEntry) => {
+                if !create {
+                    return Ok(None);
+                }
+                let mut key = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut key);
+                entry
+                    .set_password(&B64.encode(key))
+                    .map_err(|error| error.to_string())?;
+                Ok(Some(key))
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    pub fn encrypt(plaintext: &str) -> Result<serde_json::Value, String> {
+        let key = load_key(true)?.ok_or("keychain catalog key unavailable")?;
+        let cipher = Aes256Gcm::new((&key).into());
+        let mut nonce = [0u8; 12];
+        rand::rngs::OsRng.fill_bytes(&mut nonce);
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce), plaintext.as_bytes())
+            .map_err(|error| error.to_string())?;
+        Ok(serde_json::json!({
+            "version": 1,
+            "cipher": "aes-256-gcm",
+            "nonce": B64.encode(nonce),
+            "ciphertext": B64.encode(ciphertext),
+        }))
+    }
+
+    pub fn decrypt(document: &serde_json::Value) -> Result<String, String> {
+        let field = |name: &str| -> Result<Vec<u8>, String> {
+            let value = document
+                .get(name)
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| format!("catalog document is missing `{name}`"))?;
+            B64.decode(value).map_err(|error| error.to_string())
+        };
+        let nonce = field("nonce")?;
+        let ciphertext = field("ciphertext")?;
+        let key = load_key(false)?
+            .ok_or("the catalog is encrypted but its keychain key is missing")?;
+        let cipher = Aes256Gcm::new((&key).into());
+        let plaintext = cipher
+            .decrypt(Nonce::from_slice(&nonce), ciphertext.as_slice())
+            .map_err(|_| "failed to decrypt the connection catalog".to_string())?;
+        String::from_utf8(plaintext).map_err(|error| error.to_string())
+    }
+}
+
+/// Keychain-backed encryption is release-default. A dev (debug) binary's
+/// ad-hoc code signature changes on every rebuild, so the keychain would show
+/// a blocking permission prompt for an item the previous build created —
+/// Electron avoids this only because its dev binary is the stable prebuilt
+/// Electron. Dev builds therefore keep the M1 plaintext file unless
+/// T3CODE_TAURI_SECURE_CATALOG=1 opts in (=0 opts a release build out).
+#[cfg(target_os = "macos")]
+fn secure_catalog_enabled() -> bool {
+    match std::env::var("T3CODE_TAURI_SECURE_CATALOG").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => !cfg!(debug_assertions),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn read_catalog(path: PathBuf) -> Result<Option<String>, String> {
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let parsed: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+    if parsed.get("ciphertext").is_some() {
+        // Always decrypt an already-encrypted file, whatever the mode.
+        return catalog_crypto::decrypt(&parsed).map(Some);
+    }
+    if secure_catalog_enabled() {
+        // An M1/dev plaintext catalog: migrate it to the encrypted shape in
+        // place. Best-effort — when the keychain is unavailable the plaintext
+        // stays and migration retries on the next read.
+        match catalog_crypto::encrypt(&raw) {
+            Ok(document) => {
+                let mut contents = document.to_string();
+                contents.push('\n');
+                write_atomic(&path, &contents)?;
+            }
+            Err(error) => {
+                eprintln!("[desktop-tauri] catalog migration deferred: {error}");
+            }
+        }
+    }
+    Ok(Some(raw))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_catalog(path: PathBuf) -> Result<Option<String>, String> {
     match std::fs::read_to_string(path) {
         Ok(raw) => Ok(Some(raw)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -125,15 +274,97 @@ pub fn get_connection_catalog(app: AppHandle) -> Result<Option<String>, String> 
     }
 }
 
-#[tauri::command]
-pub fn set_connection_catalog(app: AppHandle, catalog: String) -> Result<bool, String> {
-    let path = config_file(&app, "connection-catalog.json")?;
-    std::fs::write(path, catalog).map_err(|error| error.to_string())?;
+#[cfg(target_os = "macos")]
+fn write_catalog(path: PathBuf, catalog: String) -> Result<bool, String> {
+    if !secure_catalog_enabled() {
+        write_atomic(&path, &catalog)?;
+        return Ok(true);
+    }
+    match catalog_crypto::encrypt(&catalog) {
+        Ok(document) => {
+            let mut contents = document.to_string();
+            contents.push('\n');
+            write_atomic(&path, &contents)?;
+            Ok(true)
+        }
+        Err(error) => {
+            // `false` is the contract for "secure storage unavailable" — the
+            // web app surfaces it (apps/web/src/connection/storage.ts) instead
+            // of persisting secrets in the clear.
+            eprintln!("[desktop-tauri] connection catalog not saved: {error}");
+            Ok(false)
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn write_catalog(path: PathBuf, catalog: String) -> Result<bool, String> {
+    write_atomic(&path, &catalog)?;
     Ok(true)
 }
 
+#[cfg(all(test, target_os = "macos"))]
+mod catalog_tests {
+    // One #[test] fn: the keychain-service and secure-mode env vars are
+    // process-global, and the sequence (migrate → decrypt → round-trip) is
+    // order-dependent.
+    #[test]
+    fn catalog_migration_and_roundtrip() {
+        let service = format!("com.t3code.desktop-tauri.test-{}", std::process::id());
+        std::env::set_var("T3CODE_TAURI_KEYCHAIN_SERVICE", &service);
+        std::env::set_var("T3CODE_TAURI_SECURE_CATALOG", "1");
+
+        let dir = std::env::temp_dir().join(format!("t3-catalog-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("connection-catalog.json");
+        let plaintext = r#"{"schemaVersion":1,"targets":[],"profiles":[]}"#;
+
+        // An M1 plaintext file is returned verbatim and re-written encrypted.
+        std::fs::write(&path, plaintext).unwrap();
+        let migrated = super::read_catalog(path.clone()).unwrap().unwrap();
+        assert_eq!(migrated, plaintext);
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("ciphertext"), "migration left plaintext on disk");
+        assert!(!on_disk.contains("schemaVersion"), "catalog content leaked into wrapper");
+
+        // The encrypted file decrypts back to the original catalog.
+        assert_eq!(super::read_catalog(path.clone()).unwrap().unwrap(), plaintext);
+
+        // A fresh write round-trips through the keychain-backed cipher.
+        assert!(super::write_catalog(path.clone(), "updated-secret".into()).unwrap());
+        assert_eq!(
+            super::read_catalog(path.clone()).unwrap().unwrap(),
+            "updated-secret"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let entry = keyring::Entry::new(&service, "connection-catalog-key").unwrap();
+        let _ = entry.delete_credential();
+        std::env::remove_var("T3CODE_TAURI_KEYCHAIN_SERVICE");
+        std::env::remove_var("T3CODE_TAURI_SECURE_CATALOG");
+    }
+}
+
 #[tauri::command]
-pub fn clear_connection_catalog(app: AppHandle) -> Result<(), String> {
+pub async fn get_connection_catalog(app: AppHandle) -> Result<Option<String>, String> {
+    let path = config_file(&app, "connection-catalog.json")?;
+    // Keychain access can block (and can prompt in dev builds whose code
+    // signature changed); keep it off the main thread.
+    tauri::async_runtime::spawn_blocking(move || read_catalog(path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn set_connection_catalog(app: AppHandle, catalog: String) -> Result<bool, String> {
+    let path = config_file(&app, "connection-catalog.json")?;
+    tauri::async_runtime::spawn_blocking(move || write_catalog(path, catalog))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn clear_connection_catalog(app: AppHandle) -> Result<(), String> {
     let path = config_file(&app, "connection-catalog.json")?;
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),

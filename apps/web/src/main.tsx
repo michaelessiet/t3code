@@ -8,7 +8,7 @@ import "@fontsource/jetbrains-mono/500.css";
 import "@xterm/xterm/css/xterm.css";
 import "./index.css";
 
-import { isElectron } from "./env";
+import { isElectron, isTauri } from "./env";
 import { ManagedRelayAuthProvider } from "./cloud/managedAuth";
 import { hasCloudPublicConfig } from "./cloud/publicConfig";
 import { getRouter } from "./router";
@@ -36,7 +36,11 @@ type AuthProviderComponent = (props: { children: ReactNode }) => ReactNode;
 // keeps @clerk/clerk-js (pulled by the Electron provider) and the unused
 // variant out of the entry chunk on both runtimes.
 async function resolveAuthProvider(publishableKey: string): Promise<AuthProviderComponent> {
-  if (isElectron) {
+  // The Tauri shell also sets window.desktopBridge (so isElectron is true
+  // there), but @clerk/electron requires the Electron preload bridge
+  // (token cache, OAuth transport, passkeys) which Tauri cannot provide —
+  // it uses the standard-browser web provider instead.
+  if (isElectron && !isTauri) {
     const [{ ClerkProvider: ElectronClerkProvider }, { passkeys }] = await Promise.all([
       import("@clerk/electron/react"),
       import("@clerk/electron/passkeys"),

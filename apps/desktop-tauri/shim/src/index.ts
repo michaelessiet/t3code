@@ -40,6 +40,7 @@ import type {
   DesktopWslState,
   EnvironmentId,
   PickFolderOptions,
+  PreviewAnnotationPayload,
   PreviewAutomationSnapshot,
   PreviewAutomationStatus,
 } from "@t3tools/contracts";
@@ -274,10 +275,12 @@ const preview: DesktopPreviewBridge = {
   getPreviewConfig: (environmentId: EnvironmentId) =>
     invoke<DesktopPreviewWebviewConfig>("preview_get_config", { environmentId }),
   setAnnotationTheme: (theme) => invoke<void>("preview_set_annotation_theme", { theme }),
-  // Element picking needs the annotation preload UI — an M3 item. preloadUrl
-  // is null in getPreviewConfig, which disables pick affordances.
-  pickElement: () => previewUnsupported("Element picking"),
-  cancelPickElement: () => Promise.resolve(),
+  // M3: the annotation studio (apps/desktop PickPreload.ts, bundled unchanged
+  // into the injected preview runtime) is armed by the shell over the picker
+  // dispatch channel; the command resolves when the guest submits or cancels.
+  pickElement: (tabId) =>
+    invoke<PreviewAnnotationPayload | null>("preview_pick_element", { tabId }),
+  cancelPickElement: (tabId) => invoke<void>("preview_cancel_pick_element", { tabId }),
   captureScreenshot: (tabId) =>
     invoke<DesktopPreviewScreenshotArtifact>("preview_capture_screenshot", { tabId }),
   revealArtifact: (path) => invoke<void>("preview_reveal_artifact", { path }),

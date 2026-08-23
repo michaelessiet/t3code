@@ -244,7 +244,10 @@ fn create_main_window(handle: &AppHandle, config: &BackendConfig) {
         #[cfg(target_os = "macos")]
         let builder = builder
             .title_bar_style(tauri::TitleBarStyle::Overlay)
-            .hidden_title(true);
+            .hidden_title(true)
+            // Same inset as Electron's trafficLightPosition (DesktopWindow.ts:
+            // getWindowTitleBarOptions) so the web titlebar CSS lines up.
+            .traffic_light_position(tauri::LogicalPosition::new(16.0, 18.0));
 
         if let Err(error) = builder.build() {
             eprintln!("[desktop-tauri] failed to create main window: {error}");

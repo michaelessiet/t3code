@@ -5,8 +5,9 @@
 //! the preview manager through the same command functions the shim invokes:
 //! tab lifecycle, bounds, navigation, Playwright locator click, type, press,
 //! scroll, waitFor, evaluate, snapshot (incl. console/network capture),
-//! screenshot artifact, zoom, and color-scheme emulation. Prints a
-//! `[PASS]`/`[FAIL]` report to stderr and exits the app with 0/1.
+//! screenshot artifact, zoom, color-scheme emulation, and the element-picker
+//! annotation flow (M3). Prints a `[PASS]`/`[FAIL]` report to stderr and
+//! exits the app with 0/1.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -409,7 +410,127 @@ fn run(app: &AppHandle, report: &mut String) -> Result<(), String> {
         })(),
     )?;
 
-    // 12. Close the tab; the webview must be gone.
+    // 12. Element picker (M3): arm → overlay + theme in the guest DOM →
+    // synthetic Escape settles null.
+    check(
+        report,
+        "pick element: arm + escape cancels",
+        (|| {
+            block_on(preview::preview_set_annotation_theme(
+                app.clone(),
+                serde_json::json!({
+                    "colorScheme": "dark",
+                    "radius": "0.5rem",
+                    "background": "black",
+                    "foreground": "white",
+                    "popover": "black",
+                    "popoverForeground": "white",
+                    "primary": "rgb(1, 2, 3)",
+                    "primaryForeground": "white",
+                    "muted": "gray",
+                    "mutedForeground": "white",
+                    "accent": "gray",
+                    "accentForeground": "white",
+                    "border": "gray",
+                    "input": "gray",
+                    "ring": "rgb(1, 2, 3)",
+                    "fontSans": "sans-serif",
+                    "fontMono": "monospace",
+                }),
+            ))?;
+            let app_for_pick = app.clone();
+            let pick = std::thread::spawn(move || {
+                block_on(preview::preview_pick_element(
+                    app_for_pick,
+                    TAB.to_string(),
+                ))
+            });
+            wait_until(Duration::from_secs(10), || {
+                Ok(eval(
+                    app,
+                    "!!document.querySelector('div[data-t3code-annotation-ui]')",
+                )? == true)
+            })
+            .map_err(|_| "annotation overlay never appeared".to_string())?;
+            let primary = eval(
+                app,
+                "document.querySelector('div[data-t3code-annotation-ui]').style.getPropertyValue('--t3-primary')",
+            )?;
+            if primary != "rgb(1, 2, 3)" {
+                return Err(format!("annotation theme not applied (--t3-primary = {primary})"));
+            }
+            eval(
+                app,
+                "(window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true})), true)",
+            )?;
+            let outcome = pick
+                .join()
+                .map_err(|_| "pick thread panicked".to_string())??;
+            if !outcome.is_null() {
+                return Err(format!("escape should settle null, got {outcome}"));
+            }
+            wait_until(Duration::from_secs(5), || {
+                Ok(eval(
+                    app,
+                    "!document.querySelector('div[data-t3code-annotation-ui]')",
+                )? == true)
+            })
+            .map_err(|_| "overlay not torn down after escape".to_string())?;
+            Ok("overlay shown, themed, escape settled null".to_string())
+        })(),
+    )?;
+
+    // 13. Element picker submit path: a guest-posted pick settles the pending
+    // command with the annotation plus a cropped screenshot.
+    check(
+        report,
+        "pick element: submit + cropped screenshot",
+        (|| {
+            let app_for_pick = app.clone();
+            let pick = std::thread::spawn(move || {
+                block_on(preview::preview_pick_element(
+                    app_for_pick,
+                    TAB.to_string(),
+                ))
+            });
+            wait_until(Duration::from_secs(10), || {
+                Ok(eval(
+                    app,
+                    "!!document.querySelector('div[data-t3code-annotation-ui]')",
+                )? == true)
+            })?;
+            // Bypass the closed-shadow-DOM UI and post the picker's own
+            // transport message, exactly as PickPreload's submit handler does.
+            eval(
+                app,
+                r#"(window.__t3pPost({kind: "pick", annotation: {id: "annotation_test", pageUrl: location.href, pageTitle: document.title, comment: "selftest", elements: [], regions: [], strokes: [], styleChanges: [], screenshot: null, createdAt: "2026-01-01T00:00:00.000Z"}, rect: {x: 10, y: 10, width: 200, height: 120}}), true)"#,
+            )?;
+            let outcome = pick
+                .join()
+                .map_err(|_| "pick thread panicked".to_string())??;
+            let data_url = outcome["screenshot"]["dataUrl"]
+                .as_str()
+                .ok_or("pick outcome has no screenshot dataUrl")?;
+            if !data_url.starts_with("data:image/png;base64,") {
+                return Err(format!("unexpected screenshot dataUrl prefix: {:.40}", data_url));
+            }
+            if outcome["screenshot"]["cropRect"]["width"] != 200.0 {
+                return Err(format!(
+                    "unexpected cropRect: {}",
+                    outcome["screenshot"]["cropRect"]
+                ));
+            }
+            if outcome["comment"] != "selftest" {
+                return Err("annotation payload not passed through".to_string());
+            }
+            Ok(format!(
+                "annotation round-tripped, screenshot {} bytes (base64)",
+                data_url.len()
+            ))
+        })(),
+    )?;
+
+    // 14. Close the tab; the webview must be gone.
     check(
         report,
         "close tab",

@@ -43,20 +43,45 @@ capabilities on WKWebView.
   via objc2, and NSAppearance for `prefers-color-scheme` emulation.
   Verified headlessly with `T3CODE_TAURI_PREVIEW_SELFTEST=1`
   (`src-tauri/src/selftest.rs`).
-- **Known M2 gaps**: element picker + annotation UI (pick affordances are
-  disabled via `preloadUrl: null`), picture-in-picture,
-  copy-artifact-to-clipboard, `LoadFailed` nav status (WKWebView load
-  failures surface as a stuck Loading state), network capture is fetch/XHR
-  only (no CDP Network domain), `automation.evaluate` cannot report syntax
-  errors (fire-and-forget eval times out instead), strict-CSP guest pages
-  may block the runtime's `fetch` posts, and native child webviews always
+- **Element picker + annotations (M3)**: apps/desktop's `PickPreload.ts`
+  annotation studio is bundled **unchanged** into the injected preview
+  runtime — `scripts/build-preview-runtime.mjs` compiles it with `electron`
+  aliased to `shim/picker/electron-adapter.ts`, so react-grab element
+  capture, the closed-shadow-DOM overlay, and the generated annotation CSS
+  stay byte-identical across shells. The shell arms/cancels sessions by
+  evaling `__t3pPickerDispatch(channel, ...)` (GuestProtocol channel names
+  preserved); the guest submits over `t3preview://` (`kind: "pick"`), and
+  preview.rs crops the screenshot natively via `WKSnapshotConfiguration.rect`.
+  Picks settle null on navigation, tab close, cancel, or Escape — same as
+  Electron.
+- **Clerk cloud auth (M3)**: runs web-side via the standard-browser
+  `@clerk/react` provider — `apps/web/src/main.tsx` routes Tauri there
+  (`isTauri` in `env.ts`; `@clerk/electron` needs the Electron preload
+  bridge). The shell adds the Clerk frontend-API origin (decoded from
+  `VITE_CLERK_PUBLISHABLE_KEY` / `T3CODE_CLERK_PUBLISHABLE_KEY` in the
+  environment) to the CSP `script-src` in `protocol.rs`. NOTE: the
+  `t3code-tauri://app` origin must be registered in the Clerk dashboard's
+  allowed origins before sign-in works in the shell.
+- **Connection catalog at rest (M3)**: AES-256-GCM with the key in the
+  macOS keychain (`keyring` crate), mirroring Electron safeStorage;
+  `setConnectionCatalog` returns `false` when the keychain is unavailable
+  and the M1 plaintext file is migrated on first read. Release-default:
+  dev (debug) binaries keep the plaintext file because their ad-hoc code
+  signature changes every rebuild, which would make the keychain prompt on
+  every read (`T3CODE_TAURI_SECURE_CATALOG=1/0` overrides). Non-macOS
+  stays plaintext until the M4 platform pass.
+- **Known gaps after M3**: picture-in-picture, copy-artifact-to-clipboard,
+  `LoadFailed` nav status (WKWebView load failures surface as a stuck
+  Loading state), network capture is fetch/XHR only (no CDP Network
+  domain), `automation.evaluate` cannot report syntax errors
+  (fire-and-forget eval times out instead), strict-CSP guest pages may
+  block the runtime's `fetch` posts, and native child webviews always
   render **above** the app UI — dialogs/menus that overlap the preview
   panel are occluded until the preview hides.
-- **Deliberately absent in M1**: Clerk cloud auth (run the web dev server
-  without `VITE_CLERK_PUBLISHABLE_KEY`), updater / SSH / WSL / server
-  exposure (inert typed stubs), safeStorage encryption for the connection
-  catalog (plaintext file — M3), Electron's traffic-light inset (default
-  position for now).
+- **Deferred to M4**: updater (tauri-plugin-updater needs signed packaged
+  bundles + an update endpoint; the typed disabled-state stub is already
+  contract-correct), SSH / WSL / server exposure (inert typed stubs),
+  Windows/Linux keychain equivalents (DPAPI / secret-service).
 
 ## Running (dev, macOS)
 

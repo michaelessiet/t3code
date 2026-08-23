@@ -116,6 +116,70 @@ fn pending_evals() -> &'static Mutex<HashMap<u64, EvalSender>> {
     PENDING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// A settled pick: `None` = cancelled; `Some((annotation, screenshotRect))`
+/// mirrors the guest picker's ELEMENT_PICKED_CHANNEL arguments.
+type PickOutcome = Option<(Value, Option<Value>)>;
+type PickSender = mpsc::Sender<PickOutcome>;
+
+/// One pending pick session per tab, keyed by tab id (Electron's
+/// pickSessionsRef equivalent).
+fn pending_picks() -> &'static Mutex<HashMap<String, PickSender>> {
+    static PENDING: OnceLock<Mutex<HashMap<String, PickSender>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn settle_pick(tab_id: &str, outcome: PickOutcome) {
+    let sender = pending_picks().lock().unwrap().remove(tab_id);
+    if let Some(sender) = sender {
+        let _ = sender.send(outcome);
+    }
+}
+
+/// The renderer-computed annotation theme, broadcast to guests (Electron's
+/// annotationThemeRef). Falls back to Manager.ts's DEFAULT_ANNOTATION_THEME
+/// until the renderer pushes one.
+fn annotation_theme() -> &'static Mutex<Option<Value>> {
+    static THEME: OnceLock<Mutex<Option<Value>>> = OnceLock::new();
+    THEME.get_or_init(|| Mutex::new(None))
+}
+
+fn default_annotation_theme() -> Value {
+    json!({
+        "colorScheme": "light",
+        "radius": "0.625rem",
+        "background": "white",
+        "foreground": "oklch(0.269 0 0)",
+        "popover": "white",
+        "popoverForeground": "oklch(0.269 0 0)",
+        "primary": "oklch(0.488 0.217 264)",
+        "primaryForeground": "white",
+        "muted": "rgb(0 0 0 / 4%)",
+        "mutedForeground": "oklch(0.556 0 0)",
+        "accent": "rgb(0 0 0 / 4%)",
+        "accentForeground": "oklch(0.269 0 0)",
+        "border": "rgb(0 0 0 / 8%)",
+        "input": "rgb(0 0 0 / 10%)",
+        "ring": "oklch(0.488 0.217 264)",
+        "fontSans": "system-ui, sans-serif",
+        "fontMono": "ui-monospace, monospace",
+    })
+}
+
+/// Fire-and-forget delivery of a GuestProtocol channel message into the
+/// guest's picker transport (shim/picker/electron-adapter.ts registers
+/// `__t3pPickerDispatch` ahead of the PickPreload bundle).
+fn picker_dispatch(app: &AppHandle, tab_id: &str, channel: &str, args: &[Value]) -> Result<(), String> {
+    let webview = webview_of(app, tab_id)?;
+    let mut call_args = json_string(channel);
+    for arg in args {
+        call_args.push_str(", ");
+        call_args.push_str(&arg.to_string());
+    }
+    let script =
+        format!("window.__t3pPickerDispatch && window.__t3pPickerDispatch({call_args});");
+    webview.eval(&script).map_err(|error| error.to_string())
+}
+
 static EVAL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static POINTER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static TIMELINE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -396,10 +460,30 @@ fn handle_guest_message(app: &AppHandle, message: Value) {
                     }
                 }
             }
+            // A `loading: true` nav means a NEW document's runtime came up
+            // (DOMContentLoaded) — any picker overlay died with the old
+            // document. Mirrors Electron settling picks on
+            // did-start-navigation. SPA pushState/popstate report
+            // loading: false and keep the session alive.
+            if kind == "nav" && message["loading"].as_bool() == Some(true) {
+                settle_pick(&tab_id, None);
+            }
             if nav_finished {
                 refresh_nav_flags(app, &tab_id);
             }
             emit_state(app, &tab_id);
+        }
+        "pick" => {
+            let annotation = message["annotation"].clone();
+            if annotation.is_null() {
+                settle_pick(&tab_id, None);
+            } else {
+                let rect = match message["rect"].clone() {
+                    Value::Null => None,
+                    rect => Some(rect),
+                };
+                settle_pick(&tab_id, Some((annotation, rect)));
+            }
         }
         "human" => {
             {
@@ -973,6 +1057,7 @@ pub async fn preview_create_tab(tab_id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn preview_close_tab(app: AppHandle, tab_id: String) -> Result<(), String> {
+    settle_pick(&tab_id, None);
     let webview = webview_of(&app, &tab_id).ok();
     {
         let mut tabs = tabs().lock().unwrap();
@@ -1244,9 +1329,123 @@ pub async fn preview_get_config(_environment_id: String) -> Result<Value, String
 }
 
 #[tauri::command]
-pub async fn preview_set_annotation_theme(_theme: Value) -> Result<(), String> {
-    // Annotation/picker UI is an M3 item; accepting the theme keeps the
-    // renderer's fire-and-forget call from surfacing errors.
+pub async fn preview_set_annotation_theme(app: AppHandle, theme: Value) -> Result<(), String> {
+    // Mirror of Manager.ts setAnnotationTheme: store for future picks and
+    // broadcast to every live guest so an active overlay restyles live.
+    *annotation_theme().lock().unwrap() = Some(theme.clone());
+    let tab_ids: Vec<String> = tabs().lock().unwrap().keys().cloned().collect();
+    for tab_id in tab_ids {
+        let _ = picker_dispatch(&app, &tab_id, "preview:annotation-theme", &[theme.clone()]);
+    }
+    Ok(())
+}
+
+/// Mirror of Manager.ts normalizeCaptureRect: clamp to non-negative integers,
+/// reject degenerate rects. Input/output are CSS px.
+fn normalize_capture_rect(rect: &Value) -> Option<(f64, f64, f64, f64)> {
+    let read = |name: &str| rect.get(name).and_then(Value::as_f64).filter(|v| v.is_finite());
+    let (x, y, width, height) = (read("x")?, read("y")?, read("width")?, read("height")?);
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    Some((
+        x.max(0.0).floor(),
+        y.max(0.0).floor(),
+        width.ceil().max(1.0),
+        height.ceil().max(1.0),
+    ))
+}
+
+/// Captures the annotation screenshot (cropped when the guest sent a union
+/// rect). Failures degrade to a null screenshot — the structured annotation
+/// is still worth returning.
+fn capture_annotation_screenshot(app: &AppHandle, tab_id: &str, rect: Option<&Value>) -> Value {
+    let crop = rect.and_then(normalize_capture_rect);
+    // The guest reports CSS px; WKSnapshotConfiguration.rect is in view
+    // points, which differ by the applied pageZoom (tab zoom × panel scale).
+    let effective_zoom = {
+        let tabs = tabs().lock().unwrap();
+        tabs.get(tab_id)
+            .map(|tab| tab.zoom * tab.bounds.as_ref().map(|bounds| bounds.scale).unwrap_or(1.0))
+            .unwrap_or(1.0)
+    };
+    let view_rect =
+        crop.map(|(x, y, w, h)| (x * effective_zoom, y * effective_zoom, w * effective_zoom, h * effective_zoom));
+    match capture_image(app, tab_id, None, view_rect, platform::ImageFormat::Png) {
+        Ok((bytes, width, height)) => {
+            let crop_rect = match crop {
+                Some((x, y, w, h)) => json!({"x": x, "y": y, "width": w, "height": h}),
+                None => json!({"x": 0, "y": 0, "width": width, "height": height}),
+            };
+            json!({
+                "dataUrl": format!(
+                    "data:image/png;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(&bytes)
+                ),
+                "width": width,
+                "height": height,
+                "cropRect": crop_rect,
+            })
+        }
+        Err(error) => {
+            eprintln!("[desktop-tauri] annotation screenshot failed: {error}");
+            Value::Null
+        }
+    }
+}
+
+fn cancel_pick(app: &AppHandle, tab_id: &str) {
+    let existing = pending_picks().lock().unwrap().remove(tab_id);
+    if let Some(sender) = existing {
+        let _ = picker_dispatch(app, tab_id, "preview:cancel-pick", &[]);
+        let _ = sender.send(None);
+    }
+}
+
+/// Arms the guest picker and blocks until the annotation studio settles:
+/// submitted payload, Escape/cancel (null), navigation (null), or tab close
+/// (null). No timeout, matching Electron — a pick can stay open for minutes.
+#[tauri::command]
+pub async fn preview_pick_element(app: AppHandle, tab_id: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_webview(&app, &tab_id)?;
+        // Only one session per tab; arming again cancels the previous one.
+        cancel_pick(&app, &tab_id);
+        let (tx, rx) = mpsc::channel();
+        pending_picks().lock().unwrap().insert(tab_id.clone(), tx);
+        let theme = annotation_theme()
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(default_annotation_theme);
+        if let Err(error) = picker_dispatch(&app, &tab_id, "preview:start-pick", &[theme]) {
+            pending_picks().lock().unwrap().remove(&tab_id);
+            return Err(error);
+        }
+        let outcome = rx
+            .recv()
+            .map_err(|_| "pick session dropped without settling".to_string())?;
+        match outcome {
+            None => Ok(Value::Null),
+            Some((mut annotation, rect)) => {
+                let screenshot = capture_annotation_screenshot(&app, &tab_id, rect.as_ref());
+                if let Value::Object(map) = &mut annotation {
+                    map.insert("screenshot".to_string(), screenshot);
+                }
+                // Screenshot done — let the guest tear the overlay down
+                // (ANNOTATION_CAPTURED_CHANNEL in Electron).
+                let _ = picker_dispatch(&app, &tab_id, "preview:annotation-captured", &[]);
+                Ok(annotation)
+            }
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn preview_cancel_pick_element(app: AppHandle, tab_id: String) -> Result<(), String> {
+    cancel_pick(&app, &tab_id);
     Ok(())
 }
 
@@ -1260,7 +1459,7 @@ fn artifacts_dir(kind: &str) -> Result<PathBuf, String> {
 #[tauri::command]
 pub async fn preview_capture_screenshot(app: AppHandle, tab_id: String) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let (bytes, _, _) = capture_image(&app, &tab_id, None, platform::ImageFormat::Png)?;
+        let (bytes, _, _) = capture_image(&app, &tab_id, None, None, platform::ImageFormat::Png)?;
         let sequence = ARTIFACT_SEQUENCE.fetch_add(1, Ordering::SeqCst);
         let id = format!("screenshot-{sequence}");
         let path = artifacts_dir("screenshots")?.join(format!("{id}.png"));
@@ -1340,6 +1539,7 @@ pub async fn preview_recording_start(app: AppHandle, tab_id: String) -> Result<(
                 &app,
                 &tab_id,
                 Some(MAX_SCREENSHOT_WIDTH),
+                None,
                 platform::ImageFormat::Jpeg,
             ) {
                 Ok((bytes, width, height)) => {
@@ -1451,6 +1651,7 @@ pub async fn preview_automation_snapshot(app: AppHandle, tab_id: String) -> Resu
                 &app,
                 &tab_id,
                 Some(MAX_SCREENSHOT_WIDTH),
+                None,
                 platform::ImageFormat::Png,
             )?;
             let (console_entries, network_entries, timeline) = {
@@ -1728,12 +1929,13 @@ fn capture_image(
     app: &AppHandle,
     tab_id: &str,
     max_width: Option<f64>,
+    rect: Option<(f64, f64, f64, f64)>,
     format: platform::ImageFormat,
 ) -> Result<(Vec<u8>, u32, u32), String> {
     let webview = webview_of(app, tab_id)?;
     let (tx, rx) = mpsc::channel::<Result<(Vec<u8>, u32, u32), String>>();
     app.run_on_main_thread(move || {
-        platform::take_snapshot(&webview, max_width, format, tx);
+        platform::take_snapshot(&webview, max_width, rect, format, tx);
     })
     .map_err(|error| error.to_string())?;
     rx.recv_timeout(Duration::from_secs(10))
@@ -1836,12 +2038,47 @@ mod platform {
         });
     }
 
+    // CGRect by-value messaging for WKSnapshotConfiguration.rect; objc2 only
+    // needs the encodings to match the Objective-C runtime's.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct CGPoint {
+        pub x: f64,
+        pub y: f64,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct CGSize {
+        pub width: f64,
+        pub height: f64,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct CGRect {
+        pub origin: CGPoint,
+        pub size: CGSize,
+    }
+    unsafe impl objc2::Encode for CGPoint {
+        const ENCODING: objc2::Encoding =
+            objc2::Encoding::Struct("CGPoint", &[objc2::Encoding::Double, objc2::Encoding::Double]);
+    }
+    unsafe impl objc2::Encode for CGSize {
+        const ENCODING: objc2::Encoding =
+            objc2::Encoding::Struct("CGSize", &[objc2::Encoding::Double, objc2::Encoding::Double]);
+    }
+    unsafe impl objc2::Encode for CGRect {
+        const ENCODING: objc2::Encoding =
+            objc2::Encoding::Struct("CGRect", &[CGPoint::ENCODING, CGSize::ENCODING]);
+    }
+
     /// Kicks off `takeSnapshotWithConfiguration:`; the completion handler
     /// re-encodes through NSBitmapImageRep and reports over `tx`. Must run on
-    /// the main thread; never blocks it.
+    /// the main thread; never blocks it. `rect` is in the web view's
+    /// coordinate system (view points).
     pub fn take_snapshot(
         webview: &tauri::webview::Webview,
         max_width: Option<f64>,
+        rect: Option<(f64, f64, f64, f64)>,
         format: ImageFormat,
         tx: mpsc::Sender<Result<(Vec<u8>, u32, u32), String>>,
     ) {
@@ -1851,6 +2088,13 @@ mod platform {
             if let Some(width) = max_width {
                 let number: *mut AnyObject = msg_send![class!(NSNumber), numberWithDouble: width];
                 let _: () = msg_send![configuration, setSnapshotWidth: number];
+            }
+            if let Some((x, y, width, height)) = rect {
+                let cg_rect = CGRect {
+                    origin: CGPoint { x, y },
+                    size: CGSize { width, height },
+                };
+                let _: () = msg_send![configuration, setRect: cg_rect];
             }
             let tx_for_block = tx.clone();
             let completion = RcBlock::new(move |image: *mut AnyObject, _error: *mut AnyObject| {
@@ -1954,6 +2198,7 @@ mod platform {
     pub fn take_snapshot(
         _webview: &tauri::webview::Webview,
         _max_width: Option<f64>,
+        _rect: Option<(f64, f64, f64, f64)>,
         _format: ImageFormat,
         tx: mpsc::Sender<Result<(Vec<u8>, u32, u32), String>>,
     ) {
