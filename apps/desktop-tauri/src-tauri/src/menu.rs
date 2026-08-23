@@ -9,10 +9,10 @@ use crate::bridge;
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let app_menu = Submenu::with_items(
         app,
-        "T3 Code",
+        "Vitre",
         true,
         &[
-            &PredefinedMenuItem::about(app, Some("About T3 Code"), Some(AboutMetadata::default()))?,
+            &PredefinedMenuItem::about(app, Some("About Vitre"), Some(AboutMetadata::default()))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(
                 app,

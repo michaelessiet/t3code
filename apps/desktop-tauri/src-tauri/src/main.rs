@@ -1,8 +1,8 @@
-//! Tauri shell for T3 Code — milestone 1 walking skeleton.
+//! Vitre — Tauri-based desktop shell, evolved from T3 Code.
 //!
 //! Boots the real Node server (bootstrap envelope over stdin, the server's
 //! existing `--bootstrap-fd 0` path), serves the real web UI through the
-//! `t3code-tauri://app/` custom protocol (proxying to the Vite dev server or
+//! `vitre://app/` custom protocol (proxying to the Vite dev server or
 //! the backend, mirroring Electron's ElectronProtocol.ts), and injects the
 //! desktopBridge shim as an initialization script. See ../README.md.
 
@@ -28,27 +28,27 @@ fn env_var(name: &str) -> Option<String> {
 }
 
 fn read_backend_config() -> backend::BackendConfig {
-    let server_entry = env_var("T3CODE_TAURI_SERVER_ENTRY")
+    let server_entry = env_var("VITRE_SERVER_ENTRY")
         .map(PathBuf::from)
-        .expect("T3CODE_TAURI_SERVER_ENTRY must point at apps/server/dist/bin.mjs");
-    let shim_path = env_var("T3CODE_TAURI_SHIM_PATH")
+        .expect("VITRE_SERVER_ENTRY must point at apps/server/dist/bin.mjs");
+    let shim_path = env_var("VITRE_SHIM_PATH")
         .map(PathBuf::from)
-        .expect("T3CODE_TAURI_SHIM_PATH must point at the built desktopBridge shim");
+        .expect("VITRE_SHIM_PATH must point at the built desktopBridge shim");
     let shim_source = std::fs::read_to_string(&shim_path)
         .unwrap_or_else(|error| panic!("failed to read shim at {}: {error}", shim_path.display()));
 
     // Isolated by default so a concurrently running Electron dev app doesn't
-    // share the same SQLite state; override with T3CODE_TAURI_HOME=~/.t3.
-    let t3_home = env_var("T3CODE_TAURI_HOME")
+    // share the same SQLite state; override with VITRE_HOME=~/.t3.
+    let t3_home = env_var("VITRE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("/"))
-                .join(".t3-tauri")
+                .join(".vitre")
         });
 
     backend::BackendConfig {
-        node_binary: env_var("T3CODE_TAURI_NODE").unwrap_or_else(|| "node".to_string()),
+        node_binary: env_var("VITRE_NODE").unwrap_or_else(|| "node".to_string()),
         server_entry,
         t3_home,
         dev_server_url: env_var("VITE_DEV_SERVER_URL"),
@@ -67,21 +67,21 @@ unsafe extern "C" fn on_terminate_signal(_signal: i32) {
 }
 
 fn read_preview_config() -> preview::PreviewConfig {
-    let runtime_path = env_var("T3CODE_TAURI_PREVIEW_RUNTIME_PATH")
+    let runtime_path = env_var("VITRE_PREVIEW_RUNTIME_PATH")
         .map(PathBuf::from)
-        .expect("T3CODE_TAURI_PREVIEW_RUNTIME_PATH must point at the built preview runtime");
+        .expect("VITRE_PREVIEW_RUNTIME_PATH must point at the built preview runtime");
     let runtime_source = std::fs::read_to_string(&runtime_path).unwrap_or_else(|error| {
         panic!(
             "failed to read preview runtime at {}: {error}",
             runtime_path.display()
         )
     });
-    let t3_home = env_var("T3CODE_TAURI_HOME")
+    let t3_home = env_var("VITRE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("/"))
-                .join(".t3-tauri")
+                .join(".vitre")
         });
     preview::PreviewConfig {
         runtime_source,

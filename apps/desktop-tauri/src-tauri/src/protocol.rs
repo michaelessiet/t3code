@@ -1,4 +1,4 @@
-//! `t3code-tauri://app/` custom-protocol serving, mirroring the Electron
+//! `vitre://app/` custom-protocol serving, mirroring the Electron
 //! app's ElectronProtocol.ts: proxy every renderer request to the target
 //! origin (the Vite dev server in dev, the backend's static client serving in
 //! prod) and stamp a Content-Security-Policy on the response. This gives the
@@ -7,7 +7,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-pub const SCHEME: &str = "t3code-tauri";
+pub const SCHEME: &str = "vitre";
 pub const HOST: &str = "app";
 
 static TARGET: OnceLock<reqwest::Url> = OnceLock::new();

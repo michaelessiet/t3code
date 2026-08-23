@@ -105,7 +105,7 @@ const outPath = NodePath.join(packageDir, "shim/dist/preview-runtime.js");
 NodeFS.mkdirSync(NodePath.dirname(outPath), { recursive: true });
 NodeFS.writeFileSync(outPath, `${installExpression}\n${runtime}\n${picker}`);
 console.log(
-  `[desktop-tauri] preview runtime built: ${outPath} (${Math.round(
+  `[vitre] preview runtime built: ${outPath} (${Math.round(
     (installExpression.length + runtime.length + picker.length) / 1024,
   )}KB, picker ${Math.round(picker.length / 1024)}KB)`,
 );

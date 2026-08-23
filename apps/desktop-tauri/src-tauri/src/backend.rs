@@ -211,18 +211,19 @@ fn create_main_window(handle: &AppHandle, config: &BackendConfig) {
     let info = BACKEND_INFO
         .get()
         .expect("backend info set before window creation");
+    let stage_label = if cfg!(debug_assertions) { Some("Dev") } else { None };
     let seed = serde_json::json!({
         "branding": {
-            "baseName": "T3 Code",
-            "stageLabel": "Dev",
-            "displayName": "T3 Code (Dev)",
+            "baseName": "Vitre",
+            "stageLabel": stage_label,
+            "displayName": if cfg!(debug_assertions) { "Vitre (Dev)" } else { "Vitre" },
         },
         "bootstraps": bootstraps_json(info),
         "appVersion": env!("CARGO_PKG_VERSION"),
         "arch": if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" },
     });
     let script = format!(
-        "window.__T3CODE_TAURI_SEED__ = {seed};\n{shim}",
+        "window.__VITRE_SEED__ = {seed};\n{shim}",
         shim = config.shim_source
     );
 
@@ -236,7 +237,7 @@ fn create_main_window(handle: &AppHandle, config: &BackendConfig) {
             "main",
             tauri::WebviewUrl::External(url),
         )
-        .title("T3 Code (Tauri Dev)")
+        .title(if cfg!(debug_assertions) { "Vitre (Dev)" } else { "Vitre" })
         .inner_size(1280.0, 860.0)
         .min_inner_size(840.0, 620.0)
         .initialization_script(&script);
@@ -250,18 +251,18 @@ fn create_main_window(handle: &AppHandle, config: &BackendConfig) {
             .traffic_light_position(tauri::LogicalPosition::new(16.0, 18.0));
 
         if let Err(error) = builder.build() {
-            eprintln!("[desktop-tauri] failed to create main window: {error}");
+            eprintln!("[vitre] failed to create main window: {error}");
         }
     });
     if let Err(error) = result {
-        eprintln!("[desktop-tauri] failed to dispatch window creation: {error}");
+        eprintln!("[vitre] failed to dispatch window creation: {error}");
     }
 }
 
 /// Supervision loop, run on a dedicated std thread for the app's lifetime.
 pub fn run(handle: AppHandle, config: BackendConfig) {
     let Some(port) = pick_port(config.fixed_port) else {
-        eprintln!("[desktop-tauri] no free backend port found");
+        eprintln!("[vitre] no free backend port found");
         return;
     };
     let token = random_hex_token();
@@ -280,14 +281,14 @@ pub fn run(handle: AppHandle, config: BackendConfig) {
     let mut window_created = false;
     let mut backoff_ms: u64 = 500;
     loop {
-        eprintln!("[desktop-tauri] starting backend on 127.0.0.1:{port}");
+        eprintln!("[vitre] starting backend on 127.0.0.1:{port}");
         if SHUTTING_DOWN.load(Ordering::SeqCst) {
             return;
         }
         let mut child = match spawn_backend(&config, port, &token) {
             Ok(child) => child,
             Err(error) => {
-                eprintln!("[desktop-tauri] failed to spawn backend: {error}");
+                eprintln!("[vitre] failed to spawn backend: {error}");
                 std::thread::sleep(Duration::from_millis(backoff_ms));
                 backoff_ms = (backoff_ms * 2).min(10_000);
                 continue;
@@ -297,7 +298,7 @@ pub fn run(handle: AppHandle, config: BackendConfig) {
 
         if wait_until_ready(port, &mut child, READINESS_TIMEOUT) {
             backoff_ms = 500;
-            eprintln!("[desktop-tauri] backend ready at http://127.0.0.1:{port}");
+            eprintln!("[vitre] backend ready at http://127.0.0.1:{port}");
             if window_created {
                 let info = BACKEND_INFO.get().expect("backend info");
                 let _ = handle.emit("t3code://bootstraps-changed", bootstraps_json(info));
@@ -306,7 +307,7 @@ pub fn run(handle: AppHandle, config: BackendConfig) {
                 create_main_window(&handle, &config);
             }
         } else {
-            eprintln!("[desktop-tauri] backend did not become ready within the timeout");
+            eprintln!("[vitre] backend did not become ready within the timeout");
         }
 
         let status = child.wait();
@@ -314,7 +315,7 @@ pub fn run(handle: AppHandle, config: BackendConfig) {
         if SHUTTING_DOWN.load(Ordering::SeqCst) {
             return;
         }
-        eprintln!("[desktop-tauri] backend exited ({status:?}); restarting in {backoff_ms}ms");
+        eprintln!("[vitre] backend exited ({status:?}); restarting in {backoff_ms}ms");
         std::thread::sleep(Duration::from_millis(backoff_ms));
         backoff_ms = (backoff_ms * 2).min(10_000);
     }

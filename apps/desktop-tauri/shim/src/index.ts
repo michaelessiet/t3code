@@ -6,7 +6,7 @@
  * commands and events. Three bridge methods are synchronous in the contract
  * (`getAppBranding`, `getLocalEnvironmentBootstraps`,
  * `getWindowFullscreenState`), so the Rust shell prepends a
- * `__T3CODE_TAURI_SEED__` JSON blob to this script (generated after the
+ * `__VITRE_SEED__` JSON blob to this script (generated after the
  * backend is ready, before the window exists) and keeps the snapshot fresh
  * through Tauri events.
  *
@@ -64,15 +64,15 @@ interface TauriGlobal {
 declare global {
   interface Window {
     desktopBridge?: DesktopBridge;
-    __T3CODE_TAURI_SEED__?: TauriSeed;
+    __VITRE_SEED__?: TauriSeed;
     __TAURI__?: TauriGlobal;
   }
 }
 
 const seed: TauriSeed = (() => {
-  const injected = window.__T3CODE_TAURI_SEED__;
+  const injected = window.__VITRE_SEED__;
   if (!injected) {
-    throw new Error("desktop-tauri shim loaded without a __T3CODE_TAURI_SEED__ blob");
+    throw new Error("vitre shim loaded without a __VITRE_SEED__ blob");
   }
   return injected;
 })();
@@ -163,7 +163,7 @@ function getLocalEnvironmentBearerToken(): Promise<string> {
         subject_token: primary.bootstrapToken,
         subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
         requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
-        client_label: "T3 Code Desktop (Tauri)",
+        client_label: "Vitre Desktop",
         client_device_type: "desktop",
       }),
     });

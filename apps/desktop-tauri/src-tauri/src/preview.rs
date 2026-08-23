@@ -1405,7 +1405,7 @@ fn capture_annotation_screenshot(app: &AppHandle, tab_id: &str, rect: Option<&Va
             })
         }
         Err(error) => {
-            eprintln!("[desktop-tauri] annotation screenshot failed: {error}");
+            eprintln!("[vitre] annotation screenshot failed: {error}");
             Value::Null
         }
     }

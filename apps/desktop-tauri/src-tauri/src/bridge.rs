@@ -143,11 +143,11 @@ mod catalog_crypto {
     use base64::Engine as _;
     use rand::RngCore as _;
 
-    const KEYCHAIN_SERVICE: &str = "com.t3code.desktop-tauri";
+    const KEYCHAIN_SERVICE: &str = "com.axexo.vitre";
     const KEYCHAIN_ACCOUNT: &str = "connection-catalog-key";
 
     fn keychain_service() -> String {
-        std::env::var("T3CODE_TAURI_KEYCHAIN_SERVICE")
+        std::env::var("VITRE_KEYCHAIN_SERVICE")
             .unwrap_or_else(|_| KEYCHAIN_SERVICE.to_string())
     }
 
@@ -224,10 +224,10 @@ mod catalog_crypto {
 /// a blocking permission prompt for an item the previous build created —
 /// Electron avoids this only because its dev binary is the stable prebuilt
 /// Electron. Dev builds therefore keep the M1 plaintext file unless
-/// T3CODE_TAURI_SECURE_CATALOG=1 opts in (=0 opts a release build out).
+/// VITRE_SECURE_CATALOG=1 opts in (=0 opts a release build out).
 #[cfg(target_os = "macos")]
 fn secure_catalog_enabled() -> bool {
-    match std::env::var("T3CODE_TAURI_SECURE_CATALOG").as_deref() {
+    match std::env::var("VITRE_SECURE_CATALOG").as_deref() {
         Ok("1") => true,
         Ok("0") => false,
         _ => !cfg!(debug_assertions),
@@ -258,7 +258,7 @@ fn read_catalog(path: PathBuf) -> Result<Option<String>, String> {
                 write_atomic(&path, &contents)?;
             }
             Err(error) => {
-                eprintln!("[desktop-tauri] catalog migration deferred: {error}");
+                eprintln!("[vitre] catalog migration deferred: {error}");
             }
         }
     }
@@ -291,7 +291,7 @@ fn write_catalog(path: PathBuf, catalog: String) -> Result<bool, String> {
             // `false` is the contract for "secure storage unavailable" — the
             // web app surfaces it (apps/web/src/connection/storage.ts) instead
             // of persisting secrets in the clear.
-            eprintln!("[desktop-tauri] connection catalog not saved: {error}");
+            eprintln!("[vitre] connection catalog not saved: {error}");
             Ok(false)
         }
     }
@@ -310,9 +310,9 @@ mod catalog_tests {
     // order-dependent.
     #[test]
     fn catalog_migration_and_roundtrip() {
-        let service = format!("com.t3code.desktop-tauri.test-{}", std::process::id());
-        std::env::set_var("T3CODE_TAURI_KEYCHAIN_SERVICE", &service);
-        std::env::set_var("T3CODE_TAURI_SECURE_CATALOG", "1");
+        let service = format!("com.axexo.vitre.test-{}", std::process::id());
+        std::env::set_var("VITRE_KEYCHAIN_SERVICE", &service);
+        std::env::set_var("VITRE_SECURE_CATALOG", "1");
 
         let dir = std::env::temp_dir().join(format!("t3-catalog-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -340,8 +340,8 @@ mod catalog_tests {
         let _ = std::fs::remove_dir_all(&dir);
         let entry = keyring::Entry::new(&service, "connection-catalog-key").unwrap();
         let _ = entry.delete_credential();
-        std::env::remove_var("T3CODE_TAURI_KEYCHAIN_SERVICE");
-        std::env::remove_var("T3CODE_TAURI_SECURE_CATALOG");
+        std::env::remove_var("VITRE_KEYCHAIN_SERVICE");
+        std::env::remove_var("VITRE_SECURE_CATALOG");
     }
 }
 

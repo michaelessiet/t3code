@@ -1,8 +1,8 @@
 [package]
-name = "t3code-desktop-tauri"
+name = "vitre"
 version = "0.0.1"
 edition = "2021"
-description = "Tauri shell for T3 Code (parallel to the Electron apps/desktop; milestone 1 walking skeleton)"
+description = "Vitre — Tauri-based desktop shell, evolved from T3 Code (parallel to the Electron apps/desktop)"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

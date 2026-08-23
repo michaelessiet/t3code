@@ -1,7 +1,7 @@
 // Dev runner for the Tauri shell. Run everything with one command from the
 // repo root:
 //
-//   pnpm dev:desktop-tauri
+//   pnpm dev:vitre
 //
 // (scripts/dev-runner.ts starts the web dev server and this script in
 // parallel with pinned HOST/ports, like dev:desktop does for Electron.)
@@ -26,10 +26,10 @@ const repoRoot = path.resolve(packageDir, "../..");
 
 const devServerUrl = process.env.VITE_DEV_SERVER_URL ?? "http://127.0.0.1:5733";
 const serverEntry =
-  process.env.T3CODE_TAURI_SERVER_ENTRY ?? path.join(repoRoot, "apps/server/dist/bin.mjs");
+  process.env.VITRE_SERVER_ENTRY ?? path.join(repoRoot, "apps/server/dist/bin.mjs");
 const shimPath = path.join(packageDir, "shim/dist/shim.js");
 
-// Under `pnpm dev:desktop-tauri` the web dev server starts concurrently with
+// Under `pnpm dev:vitre` the web dev server starts concurrently with
 // this script, so both prerequisites are awaited rather than asserted.
 const WAIT_TIMEOUT_MS = 120_000;
 const WAIT_POLL_MS = 500;
@@ -47,7 +47,7 @@ async function waitFor(check, description, hint) {
     }
     if (!announced) {
       announced = true;
-      console.log(`[desktop-tauri] waiting for ${description}…`);
+      console.log(`[vitre] waiting for ${description}…`);
     }
     await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_MS));
   }
@@ -86,15 +86,15 @@ if (cargoBuild.status !== 0) {
   process.exit(cargoBuild.status ?? 1);
 }
 
-const child = spawn(path.join(srcTauriDir, "target/debug/t3code-desktop-tauri"), [], {
+const child = spawn(path.join(srcTauriDir, "target/debug/vitre"), [], {
   cwd: srcTauriDir,
   stdio: "inherit",
   env: {
     ...process.env,
     VITE_DEV_SERVER_URL: devServerUrl,
-    T3CODE_TAURI_SERVER_ENTRY: serverEntry,
-    T3CODE_TAURI_SHIM_PATH: shimPath,
-    T3CODE_TAURI_PREVIEW_RUNTIME_PATH: path.join(packageDir, "shim/dist/preview-runtime.js"),
+    VITRE_SERVER_ENTRY: serverEntry,
+    VITRE_SHIM_PATH: shimPath,
+    VITRE_PREVIEW_RUNTIME_PATH: path.join(packageDir, "shim/dist/preview-runtime.js"),
   },
 });
 child.on("exit", (code) => process.exit(code ?? 0));

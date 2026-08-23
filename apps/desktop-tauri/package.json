@@ -1,5 +1,5 @@
 {
-  "name": "@t3tools/desktop-tauri",
+  "name": "@t3tools/vitre",
   "version": "0.0.1",
   "private": true,
   "type": "module",

@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "T3 Code Tauri",
+  "productName": "Vitre",
   "version": "0.0.1",
-  "identifier": "com.t3code.desktop-tauri",
+  "identifier": "com.axexo.vitre",
   "build": {
     "frontendDist": "./ui"
   },

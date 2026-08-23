@@ -1,6 +1,6 @@
-# @t3tools/desktop-tauri
+# @t3tools/vitre
 
-Parallel **Tauri 2** shell for T3 Code. The Electron app (`apps/desktop`) is
+**Vitre** — the Tauri 2 desktop app, evolved from T3 Code into its own product. The Electron app (`apps/desktop`) is
 untouched and remains the shipping product; this project exists so the Tauri
 migration can be evaluated (and abandoned) without risk. Groundwork:
 `experiments/tauri-preview-probe` (PR #27) proved the preview subsystem's hard
@@ -13,9 +13,9 @@ capabilities on WKWebView.
   `--bootstrap-fd 0` path that the Electron app already uses for WSL
   (`DesktopBackendConfiguration.ts`). Port scan from 3773, readiness poll on
   `/.well-known/t3/environment`, restart with backoff. State lives in
-  `~/.t3-tauri` by default (isolated from the Electron app's `~/.t3`; override
-  with `T3CODE_TAURI_HOME`).
-- **UI serving**: the window loads `t3code-tauri://app/`, a custom protocol
+  `~/.vitre` by default (isolated from the Electron app's `~/.t3`; override
+  with `VITRE_HOME`).
+- **UI serving**: the window loads `vitre://app/`, a custom protocol
   that proxies to the target origin and stamps the same CSP shape as
   Electron's `ElectronProtocol.ts` — the Vite dev server in dev, the backend's
   static client serving in prod. Stable renderer origin, independent of the
@@ -41,7 +41,7 @@ capabilities on WKWebView.
   built by `scripts/build-preview-runtime.mjs`), eval-with-results over the
   `t3preview://` custom protocol, `takeSnapshotWithConfiguration:` capture
   via objc2, and NSAppearance for `prefers-color-scheme` emulation.
-  Verified headlessly with `T3CODE_TAURI_PREVIEW_SELFTEST=1`
+  Verified headlessly with `VITRE_PREVIEW_SELFTEST=1`
   (`src-tauri/src/selftest.rs`).
 - **Element picker + annotations (M3)**: apps/desktop's `PickPreload.ts`
   annotation studio is bundled **unchanged** into the injected preview
@@ -60,7 +60,7 @@ capabilities on WKWebView.
   bridge). The shell adds the Clerk frontend-API origin (decoded from
   `VITE_CLERK_PUBLISHABLE_KEY` / `T3CODE_CLERK_PUBLISHABLE_KEY` in the
   environment) to the CSP `script-src` in `protocol.rs`. NOTE: the
-  `t3code-tauri://app` origin must be registered in the Clerk dashboard's
+  `vitre://app` origin must be registered in the Clerk dashboard's
   allowed origins before sign-in works in the shell.
 - **Connection catalog at rest (M3)**: AES-256-GCM with the key in the
   macOS keychain (`keyring` crate), mirroring Electron safeStorage;
@@ -68,7 +68,7 @@ capabilities on WKWebView.
   and the M1 plaintext file is migrated on first read. Release-default:
   dev (debug) binaries keep the plaintext file because their ad-hoc code
   signature changes every rebuild, which would make the keychain prompt on
-  every read (`T3CODE_TAURI_SECURE_CATALOG=1/0` overrides). Non-macOS
+  every read (`VITRE_SECURE_CATALOG=1/0` overrides). Non-macOS
   stays plaintext until the M4 platform pass.
 - **Picture-in-picture (M3)**: per-tab always-on-top `WebviewWindow` showing
   the live preview — the recording frame loop in `preview.rs` is a shared
@@ -95,14 +95,14 @@ capabilities on WKWebView.
 pnpm build:bundle
 
 # Everything else, from the repo root (mirrors pnpm dev:desktop):
-pnpm dev:desktop-tauri
+pnpm dev:vitre
 ```
 
-`dev:desktop-tauri` is a dev-runner mode (`scripts/dev-runner.ts`) that
+`dev:vitre` is a dev-runner mode (`scripts/dev-runner.ts`) that
 starts the web dev server and this package's `dev` script in parallel with
 pinned HOST/ports. The package script builds the shim, waits for the
 prerequisites, and runs the shell with `VITE_DEV_SERVER_URL`,
-`T3CODE_TAURI_SERVER_ENTRY`, and `T3CODE_TAURI_SHIM_PATH` set.
+`VITRE_SERVER_ENTRY`, and `VITRE_SHIM_PATH` set.
 
 To run the pieces separately: start the web dev server with
 `cd apps/web && HOST=127.0.0.1 ../../node_modules/.bin/vp dev` (not
@@ -110,8 +110,8 @@ To run the pieces separately: start the web dev server with
 `HOST=localhost` binds IPv6-only while the proxy dials IPv4), then
 `cd apps/desktop-tauri && pnpm dev`.
 
-Useful overrides: `T3CODE_PORT` (fixed backend port), `T3CODE_TAURI_NODE`
-(node binary), `T3CODE_TAURI_HOME` (state dir).
+Useful overrides: `T3CODE_PORT` (fixed backend port), `VITRE_NODE`
+(node binary), `VITRE_HOME` (state dir).
 
 ## Milestones
 

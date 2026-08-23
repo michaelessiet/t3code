@@ -83,12 +83,12 @@ const MODE_ARGS = {
   "dev:server": ["run", "--filter=t3", "dev"],
   "dev:web": ["run", "--filter=@t3tools/web", "dev"],
   "dev:desktop": ["run", "--filter=@t3tools/desktop", "--filter=@t3tools/web", "dev"],
-  "dev:desktop-tauri": ["run", "--filter=@t3tools/desktop-tauri", "--filter=@t3tools/web", "dev"],
+  "dev:vitre": ["run", "--filter=@t3tools/vitre", "--filter=@t3tools/web", "dev"],
 } as const satisfies Record<string, ReadonlyArray<string>>;
 
 /** Modes whose renderer is a desktop shell pinned to loopback (not a browser). */
 function isDesktopDevMode(mode: DevMode): boolean {
-  return mode === "dev:desktop" || mode === "dev:desktop-tauri";
+  return mode === "dev:desktop" || mode === "dev:vitre";
 }
 
 type DevMode = keyof typeof MODE_ARGS;
@@ -157,7 +157,7 @@ export class DevRunnerProcessError extends Schema.TaggedErrorClass<DevRunnerProc
   "DevRunnerProcessError",
   {
     operation: Schema.Literals(["spawn", "wait-for-exit"]),
-    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop", "dev:desktop-tauri"]),
+    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop", "dev:vitre"]),
     executable: Schema.Literal("vp"),
     argumentCount: Schema.Number,
     shell: Schema.Boolean,
@@ -172,7 +172,7 @@ export class DevRunnerProcessError extends Schema.TaggedErrorClass<DevRunnerProc
 export class DevRunnerProcessExitError extends Schema.TaggedErrorClass<DevRunnerProcessExitError>()(
   "DevRunnerProcessExitError",
   {
-    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop", "dev:desktop-tauri"]),
+    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop", "dev:vitre"]),
     executable: Schema.Literal("vp"),
     argumentCount: Schema.Number,
     shell: Schema.Boolean,

@@ -1,6 +1,6 @@
 //! Headless end-to-end self-test for the preview subsystem (M2).
 //!
-//! Enabled by `T3CODE_TAURI_PREVIEW_SELFTEST=1`. Waits for the main window
+//! Enabled by `VITRE_PREVIEW_SELFTEST=1`. Waits for the main window
 //! (i.e. backend + web dev server up), serves a local guest page, then drives
 //! the preview manager through the same command functions the shim invokes:
 //! tab lifecycle, bounds, navigation, Playwright locator click, type, press,
@@ -78,7 +78,7 @@ fn spawn_guest_server() {
 }
 
 pub fn maybe_run(app: &AppHandle) {
-    if std::env::var("T3CODE_TAURI_PREVIEW_SELFTEST").is_err() {
+    if std::env::var("VITRE_PREVIEW_SELFTEST").is_err() {
         return;
     }
     let app = app.clone();
