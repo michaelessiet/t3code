@@ -289,7 +289,14 @@ const WorkspaceContentSearchLayerLive = WorkspaceContentSearch.layer.pipe(
   Layer.provide(WorkspacePaths.layer),
 );
 
-const LspManagerLayerLive = LspManager.layer.pipe(Layer.provide(WorkspacePaths.layer));
+// LspManager forwards didSave from workspace changes, so it needs the watcher.
+// Providing the same `WorkspaceWatcherLayerLive` reference that WorkspaceLayerLive
+// merges keeps this the one shared instance — Layer construction is memoized per
+// reference within a build, so no second set of filesystem watches is created.
+const LspManagerLayerLive = LspManager.layer.pipe(
+  Layer.provide(WorkspacePaths.layer),
+  Layer.provide(WorkspaceWatcherLayerLive),
+);
 
 const GraphifyRuntimeLayerLive = GraphifyRuntime.layer.pipe(Layer.provide(ProcessRunner.layer));
 

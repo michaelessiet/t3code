@@ -239,13 +239,18 @@ export class LspClient {
     connection.listen();
 
     const rootUri = NodeURL.pathToFileURL(this.options.workspaceRoot).toString();
+    const initializationOptions = await this.resolveInitializationOptions();
     const initializeParams: Protocol.InitializeParams = {
       processId: process.pid,
       rootUri,
       workspaceFolders: [{ uri: rootUri, name: "workspace" }],
+      ...(initializationOptions !== undefined ? { initializationOptions } : {}),
       capabilities: {
         textDocument: {
-          synchronization: { didSave: false },
+          // LspManager forwards didSave from workspace file changes. It gates
+          // save-triggered analysis: rust-analyzer runs `cargo check` only on
+          // save, so without it those diagnostics never refresh.
+          synchronization: { didSave: true },
           completion: {
             contextSupport: true,
             completionItem: {
@@ -282,6 +287,23 @@ export class LspClient {
       this.options.config.initializeTimeoutMs ?? INITIALIZE_TIMEOUT_MS,
     );
     await connection.sendNotification("initialized", {});
+  }
+
+  /**
+   * Workspace-specific initialize options, or undefined when the server has no
+   * resolver or the resolver declines. A resolver failure degrades to the
+   * server's defaults rather than aborting the handshake: losing
+   * `linkedProjects` costs language features, while failing the start costs
+   * the editor its server entirely.
+   */
+  private async resolveInitializationOptions(): Promise<Record<string, unknown> | undefined> {
+    const resolve = this.options.config.resolveInitializationOptions;
+    if (resolve === undefined) return undefined;
+    try {
+      return await resolve(this.options.workspaceRoot);
+    } catch {
+      return undefined;
+    }
   }
 
   private requireConnection(): MessageConnection {
