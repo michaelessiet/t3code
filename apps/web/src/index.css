@@ -992,10 +992,13 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
    strength — while the right panel's content surfaces (code editor, diff,
    file explorer, search, preview) re-solidify at the panel boundary. The
    [data-sidebar-version] variants redefine --background/--sidebar on their
-   own subtree, so they need the same treatment locally. */
-html.vibrancy,
-html.vibrancy [data-sidebar-version="v1"],
-html.vibrancy [data-sidebar-version="v2"] {
+   own subtree, so they need the same treatment locally.
+   The `:root` tag is load-bearing: the dark token block compiles to
+   `:root:is(.dark,.dark *)` (0,2,0), which would otherwise out-rank a bare
+   `html.vibrancy` (0,1,1) and re-solidify the chrome in dark mode. */
+html.vibrancy:root,
+html.vibrancy:root [data-sidebar-version="v1"],
+html.vibrancy:root [data-sidebar-version="v2"] {
   --app-chrome-background: transparent;
   --background: color-mix(in srgb, var(--surface-solid) var(--glass-opacity), transparent);
   --sidebar: color-mix(in srgb, var(--sidebar-solid) var(--glass-opacity), transparent);
