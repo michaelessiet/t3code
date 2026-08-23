@@ -70,7 +70,12 @@ capabilities on WKWebView.
   signature changes every rebuild, which would make the keychain prompt on
   every read (`T3CODE_TAURI_SECURE_CATALOG=1/0` overrides). Non-macOS
   stays plaintext until the M4 platform pass.
-- **Known gaps after M3**: picture-in-picture, copy-artifact-to-clipboard,
+- **Picture-in-picture (M3)**: per-tab always-on-top `WebviewWindow` showing
+  the live preview — the recording frame loop in `preview.rs` is a shared
+  consumer loop (recording broadcasts `t3code://preview-frame`; PiP evals
+  JPEG frames into the window's `<img>` and refits the window aspect to the
+  content), mirroring Electron's screencast consumer set.
+- **Known gaps after M3**: copy-artifact-to-clipboard,
   `LoadFailed` nav status (WKWebView load failures surface as a stuck
   Loading state), network capture is fetch/XHR only (no CDP Network
   domain), `automation.evaluate` cannot report syntax errors

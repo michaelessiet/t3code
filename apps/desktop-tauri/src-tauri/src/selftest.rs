@@ -5,9 +5,9 @@
 //! the preview manager through the same command functions the shim invokes:
 //! tab lifecycle, bounds, navigation, Playwright locator click, type, press,
 //! scroll, waitFor, evaluate, snapshot (incl. console/network capture),
-//! screenshot artifact, zoom, color-scheme emulation, and the element-picker
-//! annotation flow (M3). Prints a `[PASS]`/`[FAIL]` report to stderr and
-//! exits the app with 0/1.
+//! screenshot artifact, zoom, color-scheme emulation, the element-picker
+//! annotation flow (M3), and picture-in-picture (M3). Prints a
+//! `[PASS]`/`[FAIL]` report to stderr and exits the app with 0/1.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -530,7 +530,40 @@ fn run(app: &AppHandle, report: &mut String) -> Result<(), String> {
         })(),
     )?;
 
-    // 14. Close the tab; the webview must be gone.
+    // 14. Picture-in-picture (M3): open spawns the always-on-top frame
+    // window and flips tab state; close tears both down.
+    check(
+        report,
+        "picture in picture: open + close",
+        (|| {
+            let pip_window_count = || {
+                app.webview_windows()
+                    .keys()
+                    .filter(|label| label.starts_with("pip-"))
+                    .count()
+            };
+            block_on(preview::preview_pip_open(app.clone(), TAB.to_string()))?;
+            let state = preview::selftest_tab_state(TAB).ok_or("tab state missing")?;
+            if state["pictureInPicture"] != true {
+                return Err(format!("pictureInPicture flag not set: {state}"));
+            }
+            if pip_window_count() != 1 {
+                return Err("PiP window was not created".to_string());
+            }
+            // Let the shared frame loop deliver a few frames into the window.
+            std::thread::sleep(Duration::from_millis(500));
+            block_on(preview::preview_pip_close(app.clone(), TAB.to_string()))?;
+            let state = preview::selftest_tab_state(TAB).ok_or("tab state missing")?;
+            if state["pictureInPicture"] != false {
+                return Err(format!("pictureInPicture flag not cleared: {state}"));
+            }
+            wait_until(Duration::from_secs(5), || Ok(pip_window_count() == 0))
+                .map_err(|_| "PiP window was not closed".to_string())?;
+            Ok("window opened, frames flowed, window closed".to_string())
+        })(),
+    )?;
+
+    // 15. Close the tab; the webview must be gone.
     check(
         report,
         "close tab",

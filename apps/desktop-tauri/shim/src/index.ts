@@ -285,9 +285,10 @@ const preview: DesktopPreviewBridge = {
     invoke<DesktopPreviewScreenshotArtifact>("preview_capture_screenshot", { tabId }),
   revealArtifact: (path) => invoke<void>("preview_reveal_artifact", { path }),
   copyArtifactToClipboard: () => previewUnsupported("Copying artifacts to the clipboard"),
+  // M3: per-tab always-on-top window fed by the shell's shared frame loop.
   pictureInPicture: {
-    open: () => previewUnsupported("Picture-in-picture"),
-    close: () => Promise.resolve(),
+    open: (tabId) => invoke<void>("preview_pip_open", { tabId }),
+    close: (tabId) => invoke<void>("preview_pip_close", { tabId }),
   },
   recording: {
     startScreencast: (tabId) => invoke<void>("preview_recording_start", { tabId }),

@@ -137,6 +137,8 @@ fn main() {
             preview::preview_set_annotation_theme,
             preview::preview_pick_element,
             preview::preview_cancel_pick_element,
+            preview::preview_pip_open,
+            preview::preview_pip_close,
             preview::preview_capture_screenshot,
             preview::preview_reveal_artifact,
             preview::preview_recording_start,

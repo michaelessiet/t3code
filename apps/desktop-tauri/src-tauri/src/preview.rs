@@ -19,7 +19,9 @@
 //! - **Capture**: `takeSnapshotWithConfiguration:` via objc2 dynamic
 //!   messaging, re-encoded PNG/JPEG through NSBitmapImageRep.
 //!
-//! Known M2 gaps (documented in README): element picker, PiP,
+//! M3 added the element picker (apps/desktop's PickPreload.ts bundled into
+//! the runtime) and picture-in-picture (per-tab always-on-top window fed by
+//! the shared frame loop). Remaining gaps (documented in README):
 //! copy-artifact-to-clipboard, LoadFailed nav status, and network capture is
 //! fetch/XHR-only (no subresources — no CDP Network domain equivalent).
 
@@ -99,9 +101,21 @@ struct Tab {
     human_until: Option<Instant>,
     agent_until: Option<Instant>,
     recording: bool,
+    /// A picture-in-picture window (label `pip-{surrogate}`) is consuming
+    /// frames.
+    pip: bool,
+    /// Guards against spawning a second frame-capture loop; the loop clears
+    /// it under the tabs lock as it exits.
+    frame_loop: bool,
     console_entries: VecDeque<Value>,
     network_entries: VecDeque<Value>,
     timeline: VecDeque<Value>,
+}
+
+impl Tab {
+    fn pip_label(&self) -> String {
+        format!("pip-{}", self.surrogate_id)
+    }
 }
 
 fn tabs() -> &'static Mutex<HashMap<String, Tab>> {
@@ -223,7 +237,7 @@ fn tab_state_json(tab_id: &str, tab: &Tab) -> Value {
         "canGoBack": tab.can_go_back,
         "canGoForward": tab.can_go_forward,
         "zoomFactor": tab.zoom,
-        "pictureInPicture": false,
+        "pictureInPicture": tab.pip,
         "colorScheme": tab.color_scheme,
         "controller": controller,
         "updatedAt": now_iso(),
@@ -1048,6 +1062,8 @@ pub async fn preview_create_tab(tab_id: String) -> Result<(), String> {
         human_until: None,
         agent_until: None,
         recording: false,
+        pip: false,
+        frame_loop: false,
         console_entries: VecDeque::new(),
         network_entries: VecDeque::new(),
         timeline: VecDeque::new(),
@@ -1058,6 +1074,7 @@ pub async fn preview_create_tab(tab_id: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn preview_close_tab(app: AppHandle, tab_id: String) -> Result<(), String> {
     settle_pick(&tab_id, None);
+    close_pip_window(&app, &tab_id);
     let webview = webview_of(&app, &tab_id).ok();
     {
         let mut tabs = tabs().lock().unwrap();
@@ -1507,6 +1524,222 @@ pub async fn preview_reveal_artifact(path: String) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// Shared frame-capture loop. Two consumers, mirroring the Electron
+// screencast consumer set (Manager.ts): recording (frames broadcast on
+// FRAME_EVENT for the renderer's MediaRecorder) and picture-in-picture
+// (frames evaled straight into the PiP window's <img>). One thread per tab,
+// alive while either consumer flag is set.
+
+fn ensure_frame_loop(app: AppHandle, tab_id: String) {
+    {
+        let mut tabs = tabs().lock().unwrap();
+        let Some(tab) = tabs.get_mut(&tab_id) else {
+            return;
+        };
+        if tab.frame_loop {
+            return;
+        }
+        tab.frame_loop = true;
+    }
+    std::thread::spawn(move || {
+        let interval = Duration::from_millis(1_000 / RECORDING_FPS);
+        let mut pip_aspect: Option<f64> = None;
+        loop {
+            // Consumer check + exit share one lock acquisition so a consumer
+            // arriving between them still sees frame_loop cleared and
+            // re-spawns the loop.
+            let consumers = {
+                let mut tabs = tabs().lock().unwrap();
+                match tabs.get_mut(&tab_id) {
+                    Some(tab) if tab.recording || tab.pip => {
+                        Some((tab.recording, tab.pip, tab.pip_label()))
+                    }
+                    Some(tab) => {
+                        tab.frame_loop = false;
+                        None
+                    }
+                    None => None,
+                }
+            };
+            let Some((recording, pip, pip_label)) = consumers else {
+                break;
+            };
+            let started = Instant::now();
+            match capture_image(
+                &app,
+                &tab_id,
+                Some(MAX_SCREENSHOT_WIDTH),
+                None,
+                platform::ImageFormat::Jpeg,
+            ) {
+                Ok((bytes, width, height)) => {
+                    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    if recording {
+                        let _ = app.emit(
+                            FRAME_EVENT,
+                            json!({
+                                "tabId": tab_id,
+                                "data": data.as_str(),
+                                "width": width,
+                                "height": height,
+                                "receivedAt": now_iso(),
+                            }),
+                        );
+                    }
+                    if pip {
+                        if let Some(window) = app.get_webview_window(&pip_label) {
+                            let _ = window.eval(&format!(
+                                "document.getElementById('preview-frame').src = 'data:image/jpeg;base64,{data}';"
+                            ));
+                            // Keep the window aspect matched to the content —
+                            // Electron's fitPictureInPictureContentSize.
+                            if width > 0 && height > 0 {
+                                let aspect = f64::from(width) / f64::from(height);
+                                if pip_aspect.map_or(true, |last| (last - aspect).abs() > 0.01) {
+                                    pip_aspect = Some(aspect);
+                                    let _ = on_main(&app, move || {
+                                        let (Ok(size), Ok(scale)) =
+                                            (window.inner_size(), window.scale_factor())
+                                        else {
+                                            return;
+                                        };
+                                        let logical: tauri::LogicalSize<f64> =
+                                            size.to_logical(scale);
+                                        let _ = window.set_size(tauri::LogicalSize::new(
+                                            logical.width,
+                                            (logical.width / aspect).max(90.0),
+                                        ));
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Webview gone (tab closed mid-stream) — stop quietly and
+                    // drop the consumers that can no longer be served.
+                    if webview_of(&app, &tab_id).is_err() {
+                        if let Some(tab) = tabs().lock().unwrap().get_mut(&tab_id) {
+                            tab.recording = false;
+                            tab.pip = false;
+                            tab.frame_loop = false;
+                        }
+                        break;
+                    }
+                }
+            }
+            let elapsed = started.elapsed();
+            if elapsed < interval {
+                std::thread::sleep(interval - elapsed);
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Commands: picture-in-picture — a small always-on-top window per tab fed
+// by the shared frame loop (Electron parity: Manager.ts
+// openPictureInPicture / buildPreviewPictureInPictureDataUrl).
+
+const PIP_HTML: &str = r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>Preview</title><style>html,body{margin:0;height:100%;background:#000;overflow:hidden}img{display:block;width:100%;height:100%;object-fit:contain}</style></head><body><img id="preview-frame" alt=""></body></html>"#;
+
+#[tauri::command]
+pub async fn preview_pip_open(app: AppHandle, tab_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        ensure_webview(&app, &tab_id)?;
+        let (label, content_width, content_height, already_open) = {
+            let tabs = tabs().lock().unwrap();
+            let tab = tabs
+                .get(&tab_id)
+                .ok_or_else(|| format!("Unknown preview tab: {tab_id}"))?;
+            let (width, height) = tab
+                .bounds
+                .as_ref()
+                .map(|bounds| (bounds.width.max(1.0), bounds.height.max(1.0)))
+                .unwrap_or((DEFAULT_TAB_WIDTH, DEFAULT_TAB_HEIGHT));
+            (tab.pip_label(), width, height, tab.pip)
+        };
+        if already_open && app.get_webview_window(&label).is_some() {
+            return Ok(());
+        }
+        let pip_width = 480.0_f64;
+        let pip_height = (pip_width * content_height / content_width).clamp(90.0, 480.0);
+        let app_for_build = app.clone();
+        let label_for_build = label.clone();
+        on_main(&app, move || -> Result<(), String> {
+            if app_for_build.get_webview_window(&label_for_build).is_some() {
+                return Ok(());
+            }
+            let url = tauri::Url::parse(&format!(
+                "data:text/html;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(PIP_HTML)
+            ))
+            .map_err(|error| error.to_string())?;
+            tauri::WebviewWindowBuilder::new(
+                &app_for_build,
+                &label_for_build,
+                tauri::WebviewUrl::External(url),
+            )
+            .title("Preview")
+            .inner_size(pip_width, pip_height)
+            .min_inner_size(160.0, 90.0)
+            .always_on_top(true)
+            .build()
+            .map_err(|error| error.to_string())?;
+            Ok(())
+        })??;
+        // The user can close the window directly (title-bar close button);
+        // reflect that back into tab state.
+        if let Some(window) = app.get_webview_window(&label) {
+            let app_for_event = app.clone();
+            let tab_for_event = tab_id.clone();
+            window.on_window_event(move |event| {
+                if matches!(event, tauri::WindowEvent::Destroyed) {
+                    if let Some(tab) = tabs().lock().unwrap().get_mut(&tab_for_event) {
+                        tab.pip = false;
+                    }
+                    emit_state(&app_for_event, &tab_for_event);
+                }
+            });
+        }
+        if let Some(tab) = tabs().lock().unwrap().get_mut(&tab_id) {
+            tab.pip = true;
+        }
+        ensure_frame_loop(app.clone(), tab_id.clone());
+        emit_state(&app, &tab_id);
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn preview_pip_close(app: AppHandle, tab_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        close_pip_window(&app, &tab_id);
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Clears the PiP consumer flag and closes the tab's PiP window if open.
+fn close_pip_window(app: &AppHandle, tab_id: &str) {
+    let label = {
+        let mut tabs = tabs().lock().unwrap();
+        let Some(tab) = tabs.get_mut(tab_id) else {
+            return;
+        };
+        tab.pip = false;
+        tab.pip_label()
+    };
+    if let Some(window) = app.get_webview_window(&label) {
+        let _ = on_main(app, move || window.close());
+    }
+    emit_state(app, tab_id);
+}
+
+// ---------------------------------------------------------------------------
 // Commands: recording (shell captures frames; renderer encodes with
 // MediaRecorder and sends the finished blob back through recording_save)
 
@@ -1523,50 +1756,7 @@ pub async fn preview_recording_start(app: AppHandle, tab_id: String) -> Result<(
         tab.recording = true;
     }
     webview_of(&app, &tab_id)?;
-    std::thread::spawn(move || {
-        let interval = Duration::from_millis(1_000 / RECORDING_FPS);
-        loop {
-            let still_recording = tabs()
-                .lock()
-                .unwrap()
-                .get(&tab_id)
-                .is_some_and(|tab| tab.recording);
-            if !still_recording {
-                break;
-            }
-            let started = Instant::now();
-            match capture_image(
-                &app,
-                &tab_id,
-                Some(MAX_SCREENSHOT_WIDTH),
-                None,
-                platform::ImageFormat::Jpeg,
-            ) {
-                Ok((bytes, width, height)) => {
-                    let _ = app.emit(
-                        FRAME_EVENT,
-                        json!({
-                            "tabId": tab_id,
-                            "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
-                            "width": width,
-                            "height": height,
-                            "receivedAt": now_iso(),
-                        }),
-                    );
-                }
-                Err(_) => {
-                    // Webview gone (tab closed mid-recording) — stop quietly.
-                    if webview_of(&app, &tab_id).is_err() {
-                        break;
-                    }
-                }
-            }
-            let elapsed = started.elapsed();
-            if elapsed < interval {
-                std::thread::sleep(interval - elapsed);
-            }
-        }
-    });
+    ensure_frame_loop(app, tab_id);
     Ok(())
 }
 
