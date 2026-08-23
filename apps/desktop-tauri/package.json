@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "build:shim": "node scripts/build-shim.mjs",
+    "build:app": "node ../../scripts/build-vitre-app.ts",
+    "tauri": "tauri",
     "typecheck": "tsgo --noEmit",
     "dev": "node scripts/dev.mjs"
   },
@@ -12,6 +14,7 @@
     "@t3tools/contracts": "workspace:*"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.9.0",
     "@types/node": "catalog:"
   }
 }

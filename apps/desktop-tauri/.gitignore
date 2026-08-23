@@ -1,3 +1,7 @@
 # build artifacts
 shim/dist/
 tsconfig.tsbuildinfo
+
+# packaging artifacts (scripts/build-app.ts)
+src-tauri/staged/
+src-tauri/binaries/

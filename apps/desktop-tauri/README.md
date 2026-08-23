@@ -121,10 +121,81 @@ Useful overrides: `T3CODE_PORT` (fixed backend port), `VITRE_NODE`
   `DesktopPreviewBridge`; first additive `apps/web` change
   (bounds-sync mode in `HostedBrowserWebview` + a no-`<webview>` fallback in
   `PreviewAutomationHosts`).
-- **M3 — auth + parity**: Clerk via the web provider under Tauri (additive
-  `main.tsx` runtime detection), keychain-backed secrets, updater
-  (tauri-plugin-updater), element picker/annotations, PiP, traffic-light
-  inset.
-- **M4 — packaging + platforms**: Tauri bundler with a Node sidecar (or
-  WS2-style download-on-first-run runtime) + server dist + pruned
-  node_modules resources; Windows (WebView2 has real CDP) and Linux; WSL.
+- **M3 (done)** — auth + parity: Clerk via the web provider under Tauri
+  (additive `main.tsx` runtime detection), keychain-backed secrets, element
+  picker/annotations, PiP, traffic-light inset. Updater deferred to a signed
+  packaging pass.
+- **M4 (this)** — macOS packaging (design below); Windows (WebView2 has real
+  CDP), Linux, and WSL remain future platform passes.
+
+## Packaging design (M4, macOS)
+
+Goal: `pnpm --dir apps/desktop-tauri build:app` produces a standalone
+`Vitre.app` (+ DMG) — ad-hoc signed (`signingIdentity: "-"`) for local
+verification; real signing/notarization/updater are a later pass.
+
+**Bundle layout** (`bundle.resources` list-form preserves directory
+structure under `Contents/Resources/`):
+
+- `Contents/MacOS/vitre` — the Tauri binary.
+- `Contents/MacOS/node` — real Node sidecar via `bundle.externalBin`
+  (`binaries/node-<target-triple>`, downloaded from nodejs.org at stage
+  time, version pinned to the root `engines.node`). `bin.mjs` uses
+  `node:sqlite`, so a real Node ≥ 24 is required; there is no Electron
+  `ELECTRON_RUN_AS_NODE` trick here.
+- `Contents/Resources/staged/backend/` — a staged production install
+  mirroring the Electron artifact's `app/` layout so Node resolution works
+  above `bin.mjs`: `apps/server/dist/` (bin.mjs + `client/` sibling),
+  `package.json` (resolved server deps + fff native packages),
+  `pnpm-workspace.yaml`, `node_modules/` from `vp install --prod` with
+  `node-linker=hoisted` (no pnpm symlink farm for the bundler to copy),
+  then `stripStagedSourcemaps` + `pruneClaudeSdkPlatformPackages` +
+  `pruneStagedNodeModules` reused from `scripts/build-desktop-artifact.ts`.
+  No asar → the Electron d.ts-rescue hook is unnecessary.
+- `Contents/Resources/staged/shim.js` + `staged/preview-runtime.js` — the
+  built injection scripts.
+
+**Rust changes**: asset/config resolution moves behind a fallback chain —
+`VITRE_*` env override (dev) → `resource_dir()/staged/...` (packaged);
+node resolution: `VITRE_NODE` → sidecar next to `current_exe()` → `node`
+on PATH. Clerk key for the CSP: runtime env → `option_env!` compile-time
+bake (the staging script exports the repo `.env` key to `cargo build`;
+the web client bakes `VITE_CLERK_PUBLISHABLE_KEY` at its own build).
+`resource_dir()` requires an app handle, so config reading moves from
+`main()` into `.setup()`. The `devtools` feature stays enabled in M4
+builds for verification and is dropped when shipping.
+
+**Build orchestration** (`scripts/build-vitre-app.ts` at the repo root;
+run `pnpm dist:vitre:app`, or `--skip-build` to reuse dist outputs):
+build inputs (`vp run --filter t3 build` for server dist + bundled
+client, plus `build-shim.mjs` / `build-preview-runtime.mjs`), stage
+`src-tauri/staged/` (gitignored), copy the Node sidecar into
+`src-tauri/binaries/`, then run `tauri build` via the `@tauri-apps/cli`
+devDependency. Prod serving needs no dev servers: the `vitre://app`
+protocol proxies to the backend, which serves the bundled client.
+
+Packaging gotchas learned the hard way:
+
+- `bundle.resources`/`externalBin` live in `tauri.bundle.conf.json`
+  (passed with `--config`) because tauri-build validates them on every
+  cargo compile — keeping them in `tauri.conf.json` would make plain dev
+  `cargo build` fail until staging ran.
+- `entitlements.plist` (allow-jit, allow-unsigned-executable-memory,
+  disable-library-validation) is mandatory even for ad-hoc signing: the
+  hardened runtime is on by default and V8 dies at isolate init without
+  the JIT entitlements ("Failed to reserve virtual memory for
+  CodeRange").
+- The window icon embedded by `tauri::generate_context!` must be an
+  8-bit PNG (16-bit fails at window creation with "invalid icon ...
+  pixel count"), and tauri-build does NOT watch `icons/` — touch
+  `tauri.conf.json` after changing icons or the stale icon stays
+  embedded.
+- Verify with the packaged selftest (no node on PATH proves the
+  sidecar): `env -i HOME="$HOME" PATH=/usr/bin:/bin
+VITRE_PREVIEW_SELFTEST=1 …/Vitre.app/Contents/MacOS/vitre`.
+
+**Icon**: `icons/icon.png` + `icons/icon.icns` are generated from
+`scripts/generate-icon.swift` (a glazed-glass "V" over a translucent
+frosted backdrop) — `swift scripts/generate-icon.swift
+src-tauri/icons/icon.png`, then rebuild the iconset with
+`sips`/`iconutil` at 16–1024.

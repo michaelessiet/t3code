@@ -25,7 +25,10 @@ fn clerk_frontend_api_hostname() -> Option<String> {
 
     let key = std::env::var("VITE_CLERK_PUBLISHABLE_KEY")
         .or_else(|_| std::env::var("T3CODE_CLERK_PUBLISHABLE_KEY"))
-        .ok()?;
+        .ok()
+        // Packaged fallback: scripts/build-app.ts exports the repo .env key to
+        // `cargo build`, mirroring how the web bundle bakes it at build time.
+        .or_else(|| option_env!("VITE_CLERK_PUBLISHABLE_KEY").map(String::from))?;
     let key = key.trim();
     let encoded = key
         .strip_prefix("pk_test_")

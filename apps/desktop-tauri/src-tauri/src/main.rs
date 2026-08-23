@@ -18,7 +18,7 @@ mod selftest;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 fn env_var(name: &str) -> Option<String> {
     std::env::var(name)
@@ -27,30 +27,65 @@ fn env_var(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn read_backend_config() -> backend::BackendConfig {
-    let server_entry = env_var("VITRE_SERVER_ENTRY")
-        .map(PathBuf::from)
-        .expect("VITRE_SERVER_ENTRY must point at apps/server/dist/bin.mjs");
-    let shim_path = env_var("VITRE_SHIM_PATH")
-        .map(PathBuf::from)
-        .expect("VITRE_SHIM_PATH must point at the built desktopBridge shim");
+/// Dev overrides assets through `VITRE_*` env vars (scripts/dev.mjs); the
+/// packaged app falls back to `Contents/Resources/staged/…` populated by
+/// scripts/build-app.ts.
+fn resolve_asset_path(app: &tauri::App, env_name: &str, staged_relative: &str) -> PathBuf {
+    if let Some(value) = env_var(env_name) {
+        return PathBuf::from(value);
+    }
+    let staged = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|dir| dir.join("staged").join(staged_relative));
+    match staged {
+        Some(path) if path.exists() => path,
+        _ => panic!("{env_name} is unset and no packaged resource exists at staged/{staged_relative}"),
+    }
+}
+
+/// `VITRE_NODE` (dev) → the bundled Node sidecar next to the shell binary
+/// (`bundle.externalBin`) → `node` on PATH. The server needs a real Node
+/// (`node:sqlite`); there is no ELECTRON_RUN_AS_NODE equivalent here.
+fn resolve_node_binary() -> String {
+    if let Some(value) = env_var("VITRE_NODE") {
+        return value;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(sidecar) = exe.parent().map(|dir| dir.join("node")) {
+            if sidecar.is_file() {
+                return sidecar.to_string_lossy().into_owned();
+            }
+        }
+    }
+    "node".to_string()
+}
+
+fn default_home() -> PathBuf {
+    // Isolated by default so a concurrently running Electron dev app doesn't
+    // share the same SQLite state; override with VITRE_HOME=~/.t3.
+    env_var("VITRE_HOME").map(PathBuf::from).unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/"))
+            .join(".vitre")
+    })
+}
+
+fn read_backend_config(app: &tauri::App) -> backend::BackendConfig {
+    let server_entry = resolve_asset_path(
+        app,
+        "VITRE_SERVER_ENTRY",
+        "backend/apps/server/dist/bin.mjs",
+    );
+    let shim_path = resolve_asset_path(app, "VITRE_SHIM_PATH", "shim.js");
     let shim_source = std::fs::read_to_string(&shim_path)
         .unwrap_or_else(|error| panic!("failed to read shim at {}: {error}", shim_path.display()));
 
-    // Isolated by default so a concurrently running Electron dev app doesn't
-    // share the same SQLite state; override with VITRE_HOME=~/.t3.
-    let t3_home = env_var("VITRE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/"))
-                .join(".vitre")
-        });
-
     backend::BackendConfig {
-        node_binary: env_var("VITRE_NODE").unwrap_or_else(|| "node".to_string()),
+        node_binary: resolve_node_binary(),
         server_entry,
-        t3_home,
+        t3_home: default_home(),
         dev_server_url: env_var("VITE_DEV_SERVER_URL"),
         fixed_port: env_var("T3CODE_PORT").and_then(|value| value.parse().ok()),
         shim_source,
@@ -66,33 +101,21 @@ unsafe extern "C" fn on_terminate_signal(_signal: i32) {
     libc::_exit(0);
 }
 
-fn read_preview_config() -> preview::PreviewConfig {
-    let runtime_path = env_var("VITRE_PREVIEW_RUNTIME_PATH")
-        .map(PathBuf::from)
-        .expect("VITRE_PREVIEW_RUNTIME_PATH must point at the built preview runtime");
+fn read_preview_config(app: &tauri::App) -> preview::PreviewConfig {
+    let runtime_path = resolve_asset_path(app, "VITRE_PREVIEW_RUNTIME_PATH", "preview-runtime.js");
     let runtime_source = std::fs::read_to_string(&runtime_path).unwrap_or_else(|error| {
         panic!(
             "failed to read preview runtime at {}: {error}",
             runtime_path.display()
         )
     });
-    let t3_home = env_var("VITRE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/"))
-                .join(".vitre")
-        });
     preview::PreviewConfig {
         runtime_source,
-        artifacts_dir: t3_home.join("preview-artifacts"),
+        artifacts_dir: default_home().join("preview-artifacts"),
     }
 }
 
 fn main() {
-    let config = read_backend_config();
-    preview::init(read_preview_config());
-
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGTERM, on_terminate_signal as *const () as usize);
@@ -163,6 +186,10 @@ fn main() {
             }
         })
         .setup(move |app| {
+            // Config resolution lives here (not in main) because the packaged
+            // fallback needs `app.path().resource_dir()`.
+            let config = read_backend_config(app);
+            preview::init(read_preview_config(app));
             menu::install(app.handle())?;
             let handle = app.handle().clone();
             std::thread::spawn(move || backend::run(handle, config));
