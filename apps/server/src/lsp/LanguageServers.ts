@@ -11,6 +11,8 @@
  */
 import type { CustomLanguageServer } from "@t3tools/contracts";
 
+import { rustAnalyzerInitializationOptions } from "./RustProject.ts";
+
 export interface LanguageServerConfig {
   /** Stable id used in status reporting and registry keys. */
   readonly serverId: string;
@@ -22,6 +24,17 @@ export interface LanguageServerConfig {
   readonly bundled: boolean;
   /** Initialize handshake budget; unset means the LspClient default (30s). */
   readonly initializeTimeoutMs?: number;
+  /**
+   * Per-workspace `initializationOptions` for the initialize handshake.
+   *
+   * Resolved once per client start, and async because a server may need to
+   * inspect the workspace first (rust-analyzer must be told where the Cargo
+   * manifests are). Servers that take configuration through
+   * `workspace/configuration` instead — vtsls — leave this unset.
+   */
+  readonly resolveInitializationOptions?: (
+    workspaceRoot: string,
+  ) => Promise<Record<string, unknown> | undefined>;
 }
 
 /**
@@ -45,6 +58,9 @@ const RUST_ANALYZER: LanguageServerConfig = {
   command: "rust-analyzer",
   args: [],
   bundled: false,
+  // Without linkedProjects, a workspace whose crates live in subdirectories
+  // loads no crate graph at all; see RustProject for the failure mode.
+  resolveInitializationOptions: rustAnalyzerInitializationOptions,
 };
 
 const PYRIGHT: LanguageServerConfig = {
