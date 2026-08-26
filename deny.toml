@@ -1,0 +1,41 @@
+# cargo-deny policy: the licensing firewall for Vitre.
+# Zed's GPL crates must never enter this build; only its Apache-2.0 island is
+# allowed (gpui + transitive deps), with `ztracing` patched to a local MIT stub.
+
+[licenses]
+allow = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "BSL-1.0",
+  "CC0-1.0",
+  "MPL-2.0",
+  "OFL-1.1",
+  "Unicode-3.0",
+  "CDLA-Permissive-2.0",
+  # Classic bzip2 license (BSD-style permissive); pulled in by libbz2-rs-sys
+  # via gpui's image stack.
+  "bzip2-1.0.6",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "allow"
+
+[[bans.deny]]
+# Belt and braces: even though the allowlist rejects GPL, name the known
+# GPL crate from the zed monorepo explicitly. The [patch] replaces it with
+# third_party/ztracing (MIT); if the patch ever stops applying, this fails.
+name = "zlog"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[sources.allow-org]
+github = ["zed-industries", "rust-lang"]

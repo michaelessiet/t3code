@@ -1,0 +1,10 @@
+[package]
+name = "ztracing-macro"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "No-op #[instrument] attribute for the ztracing stub"
+
+[lib]
+proc-macro = true

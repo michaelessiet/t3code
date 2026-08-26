@@ -35,3 +35,6 @@ node_modules/
 *.log
 .env*
 !.env.example
+
+# Rust
+/target

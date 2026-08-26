@@ -1,0 +1,74 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/vitre-app",
+  "crates/vitre-rpc",
+  "third_party/ztracing",
+  "third_party/ztracing-macro",
+]
+default-members = ["crates/vitre-app"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# --- zed pin (Apache-2.0 island only; see docs/vitre-licensing.md) ---
+gpui = { git = "https://github.com/zed-industries/zed", rev = "f66ed399cdde86092af8af3dc7b418abf45f37f8" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f66ed399cdde86092af8af3dc7b418abf45f37f8", features = [
+  "font-kit",
+  "runtime_shaders",
+] }
+gpui_macros = { git = "https://github.com/zed-industries/zed", rev = "f66ed399cdde86092af8af3dc7b418abf45f37f8" }
+gpui_tokio = { git = "https://github.com/zed-industries/zed", rev = "f66ed399cdde86092af8af3dc7b418abf45f37f8" }
+
+# --- vitre crates ---
+vitre-rpc = { path = "crates/vitre-rpc" }
+
+# --- third-party ---
+anyhow = "1"
+futures = "0.3"
+getrandom = "0.3"
+libc = "0.2"
+percent-encoding = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "time",
+  "process",
+  "io-util",
+  "sync",
+  "signal",
+] }
+tokio-tungstenite = "0.26"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tracing = "0.1"
+
+# The GPL `ztracing` crate inside the zed monorepo is replaced by a local MIT
+# no-op stub so no GPL code enters the build (zed issue #55470).
+[patch."https://github.com/zed-industries/zed"]
+ztracing = { path = "third_party/ztracing" }
+
+[profile.dev]
+codegen-units = 16
+debug = "limited"
+split-debuginfo = "unpacked"
+
+[profile.dev.package]
+gpui = { opt-level = 3 }
+gpui_platform = { opt-level = 3 }
+resvg = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
+sum_tree = { opt-level = 3 }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
