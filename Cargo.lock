@@ -8244,6 +8244,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vitre-contracts-gen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+]
+
+[[package]]
 name = "vitre-rpc"
 version = "0.1.0"
 dependencies = [
