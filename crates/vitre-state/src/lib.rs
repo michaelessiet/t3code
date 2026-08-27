@@ -21,6 +21,7 @@
 //! `"full-access"`, `interactionMode` → `"default"`) get the same defaults
 //! applied here when the reducer reads them.
 
+pub mod session_logic;
 pub mod shell;
 pub mod shell_sync;
 pub mod thread;

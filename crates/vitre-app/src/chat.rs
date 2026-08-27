@@ -5,11 +5,14 @@
 //! only carries the six detail event kinds, so title/meta always come from
 //! the thread shell (the TS client's `mergeEnvironmentThread` split).
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{Context, Entity, SharedString, Subscription, Window, div, prelude::*, px, relative};
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
     input::{InputEvent, Textarea, TextareaState},
     text::TextView,
     v_flex,
@@ -18,12 +21,17 @@ use gpui_tokio::Tokio;
 use tokio::sync::watch;
 use vitre_client::{EnvironmentClient, ShellState, SyncPhase, ThreadHandle, ThreadState};
 use vitre_contracts::{
-    ClientOrchestrationCommand, CommandId, MessageId, ModelSelection, OrchestrationMessage,
-    OrchestrationMessageRole, OrchestrationSessionStatus, OrchestrationThread,
-    OrchestrationThreadActivity, OrchestrationThreadActivityTone, OrchestrationThreadShell,
-    ProviderInteractionMode, RuntimeMode, ServerConfig, ThreadId, TrimmedNonEmptyString,
+    ApprovalRequestId, ClientOrchestrationCommand, CommandId, MessageId, ModelSelection,
+    OrchestrationMessage, OrchestrationMessageRole, OrchestrationSessionStatus,
+    OrchestrationThread, OrchestrationThreadActivity, OrchestrationThreadActivityTone,
+    OrchestrationThreadShell, ProviderApprovalDecision, ProviderInteractionMode, RuntimeMode,
+    ServerConfig, ThreadId, TrimmedNonEmptyString,
 };
 use vitre_sidecar::SupervisorStatus;
+use vitre_state::session_logic::{
+    ActivePlanState, ApprovalRequestKind, PendingApproval, PendingUserInput, PlanStepStatus,
+    derive_active_plan_state, derive_pending_approvals, derive_pending_user_inputs,
+};
 
 pub struct ChatApp {
     client: Option<Arc<EnvironmentClient>>,
@@ -32,7 +40,20 @@ pub struct ChatApp {
     thread: Option<OpenThread>,
     composer: Entity<TextareaState>,
     last_error: Option<SharedString>,
+    /// Request ids with an approval / user-input response in flight.
+    responding: HashSet<String>,
+    /// Local draft state for the active pending user-input request.
+    input_draft: Option<InputDraft>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Draft answers for the front pending user-input request, keyed by its
+/// request id so a new request starts clean (Electron keys drafts the same
+/// way, per request id).
+struct InputDraft {
+    request_id: String,
+    question_index: usize,
+    selections: HashMap<String, Vec<String>>,
 }
 
 struct OpenThread {
@@ -237,6 +258,8 @@ impl ChatApp {
             thread: None,
             composer,
             last_error: None,
+            responding: HashSet::new(),
+            input_draft: None,
             _subscriptions: subscriptions,
         }
     }
@@ -346,6 +369,14 @@ impl ChatApp {
         let Some(view) = open.state.view.clone() else {
             return;
         };
+        // While an approval or user-input request is pending, the composer's
+        // primary action belongs to that request — don't start a new turn.
+        // (Custom free-text answers are a post-parity iteration.)
+        if !derive_pending_approvals(&view.activities).is_empty()
+            || !derive_pending_user_inputs(&view.activities).is_empty()
+        {
+            return;
+        }
         let text = self.composer.read(cx).value().trim().to_string();
         if text.is_empty() {
             return;
@@ -413,6 +444,156 @@ impl ChatApp {
         .detach();
     }
 
+    /// Dispatch an approval / user-input response, tracking the request id so
+    /// its buttons disable while the command is in flight.
+    fn dispatch_response(
+        &mut self,
+        request_id: String,
+        command: ClientOrchestrationCommand,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        if !self.responding.insert(request_id.clone()) {
+            return;
+        }
+        self.last_error = None;
+        cx.spawn(async move |this, cx| {
+            let result = client.dispatch(&command).await;
+            let _ = this.update(cx, |app, cx| {
+                app.responding.remove(&request_id);
+                if let Err(error) = result {
+                    app.last_error = Some(format!("response failed: {error:?}").into());
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn respond_approval(
+        &mut self,
+        request_id: String,
+        decision: ProviderApprovalDecision,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(open) = &self.thread else {
+            return;
+        };
+        let command = ClientOrchestrationCommand::ThreadApprovalRespond {
+            command_id: CommandId(fresh_id("vitre-cmd")),
+            created_at: tnes(now_iso()),
+            decision,
+            request_id: ApprovalRequestId(request_id.clone()),
+            thread_id: open.id.clone(),
+            r#type: Default::default(),
+        };
+        self.dispatch_response(request_id, command, cx);
+    }
+
+    /// The front pending user-input request (the one the panel shows).
+    fn active_pending_user_input(&self) -> Option<PendingUserInput> {
+        let view = self.thread.as_ref()?.state.view.as_ref()?;
+        derive_pending_user_inputs(&view.activities)
+            .into_iter()
+            .next()
+    }
+
+    /// Draft for `request_id`, resetting whenever the front request changes.
+    fn input_draft_mut(&mut self, request_id: &str) -> &mut InputDraft {
+        if self
+            .input_draft
+            .as_ref()
+            .is_none_or(|draft| draft.request_id != request_id)
+        {
+            self.input_draft = Some(InputDraft {
+                request_id: request_id.to_string(),
+                question_index: 0,
+                selections: HashMap::new(),
+            });
+        }
+        self.input_draft.as_mut().expect("draft just ensured")
+    }
+
+    fn toggle_user_input_option(&mut self, option_label: String, cx: &mut Context<Self>) {
+        let Some(pending) = self.active_pending_user_input() else {
+            return;
+        };
+        if self.responding.contains(&pending.request_id) {
+            return;
+        }
+        let draft = self.input_draft_mut(&pending.request_id);
+        let index = draft.question_index.min(pending.questions.len() - 1);
+        let question = &pending.questions[index];
+        let selections = draft.selections.entry(question.id.clone()).or_default();
+        if question.multi_select {
+            if let Some(position) = selections.iter().position(|label| *label == option_label) {
+                selections.remove(position);
+            } else {
+                selections.push(option_label);
+            }
+            cx.notify();
+        } else {
+            // Single-select answers advance immediately (Electron auto-advances
+            // 200ms after the click).
+            *selections = vec![option_label];
+            self.advance_user_input(cx);
+        }
+    }
+
+    /// Move to the next question, or submit `ThreadUserInputRespond` from the
+    /// last one. Answers mirror `resolvePendingUserInputAnswer`: label array
+    /// for multi-select questions, single label string otherwise. (Custom
+    /// free-text answers are a post-parity iteration.)
+    fn advance_user_input(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.active_pending_user_input() else {
+            return;
+        };
+        if self.responding.contains(&pending.request_id) {
+            return;
+        }
+        let Some(open) = &self.thread else {
+            return;
+        };
+        let thread_id = open.id.clone();
+        let draft = self.input_draft_mut(&pending.request_id);
+        let index = draft.question_index.min(pending.questions.len() - 1);
+        if index + 1 < pending.questions.len() {
+            draft.question_index = index + 1;
+            cx.notify();
+            return;
+        }
+        let mut answers = serde_json::Map::new();
+        for question in &pending.questions {
+            let labels = draft
+                .selections
+                .get(&question.id)
+                .cloned()
+                .unwrap_or_default();
+            let value = if question.multi_select {
+                serde_json::Value::Array(
+                    labels.into_iter().map(serde_json::Value::String).collect(),
+                )
+            } else if let Some(label) = labels.into_iter().next() {
+                serde_json::Value::String(label)
+            } else {
+                serde_json::Value::Null
+            };
+            answers.insert(question.id.clone(), value);
+        }
+        let command = ClientOrchestrationCommand::ThreadUserInputRespond {
+            answers,
+            command_id: CommandId(fresh_id("vitre-cmd")),
+            created_at: tnes(now_iso()),
+            request_id: ApprovalRequestId(pending.request_id.clone()),
+            thread_id,
+            r#type: Default::default(),
+        };
+        self.dispatch_response(pending.request_id, command, cx);
+    }
+
     fn shell_threads(&self) -> Vec<OrchestrationThreadShell> {
         let Some(snapshot) = &self.shell.snapshot else {
             return Vec::new();
@@ -438,6 +619,415 @@ impl ChatApp {
             .and_then(|snapshot| snapshot.threads.iter().find(|thread| thread.id == *id))
             .map(|thread| thread.title.0.clone().into())
             .unwrap_or_else(|| "(untitled)".into())
+    }
+
+    /// Composer-top approval panel (`ComposerPendingApprovalPanel`): PENDING
+    /// APPROVAL eyebrow + kind summary + count, and a mono detail box.
+    fn render_approval_panel(
+        &self,
+        approval: &PendingApproval,
+        pending_count: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let (summary, detail_label) = match approval.request_kind {
+            ApprovalRequestKind::Command => ("Command approval requested", "Command"),
+            ApprovalRequestKind::FileRead => ("File-read approval requested", "File to read"),
+            ApprovalRequestKind::FileChange => ("File-change approval requested", "File change"),
+        };
+        let mut panel = v_flex().px_4().py_3p5().child(
+            h_flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_semibold()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("PENDING APPROVAL"),
+                )
+                .child(div().text_sm().font_medium().child(summary))
+                .when(pending_count > 1, |this| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(format!("1/{pending_count}"))),
+                    )
+                }),
+        );
+        if let Some(detail) = &approval.detail {
+            panel = panel.child(
+                v_flex()
+                    .mt_3()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().background.opacity(0.7))
+                    .p_3()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_medium()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(detail_label),
+                    )
+                    .child(
+                        div()
+                            .id("approval-detail")
+                            .mt_2()
+                            .max_h(px(160.))
+                            .overflow_y_scroll()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_xs()
+                            .text_color(cx.theme().foreground)
+                            .whitespace_normal()
+                            .child(SharedString::from(detail.clone())),
+                    ),
+            );
+        }
+        panel.into_any_element()
+    }
+
+    /// Composer footer replacement while an approval is pending
+    /// (`ComposerPendingApprovalActions`): Cancel turn / Decline / Always
+    /// allow this session / Approve once.
+    fn render_approval_actions(
+        &self,
+        approval: &PendingApproval,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let responding = self.responding.contains(&approval.request_id);
+        let respond = |decision: ProviderApprovalDecision| {
+            let request_id = approval.request_id.clone();
+            cx.listener(move |this: &mut Self, _, _, cx| {
+                this.respond_approval(request_id.clone(), decision.clone(), cx);
+            })
+        };
+        h_flex()
+            .px_3()
+            .pb_3()
+            .gap_2()
+            .items_center()
+            .justify_end()
+            .child(
+                Button::new("approval-cancel")
+                    .label("Cancel turn")
+                    .ghost()
+                    .small()
+                    .disabled(responding)
+                    .on_click(respond(ProviderApprovalDecision::Cancel)),
+            )
+            .child(
+                Button::new("approval-decline")
+                    .label("Decline")
+                    .danger()
+                    .outline()
+                    .small()
+                    .disabled(responding)
+                    .on_click(respond(ProviderApprovalDecision::Decline)),
+            )
+            .child(
+                Button::new("approval-accept-session")
+                    .label("Always allow this session")
+                    .outline()
+                    .small()
+                    .disabled(responding)
+                    .on_click(respond(ProviderApprovalDecision::AcceptForSession)),
+            )
+            .child(
+                Button::new("approval-accept")
+                    .label("Approve once")
+                    .primary()
+                    .small()
+                    .disabled(responding)
+                    .on_click(respond(ProviderApprovalDecision::Accept)),
+            )
+            .into_any_element()
+    }
+
+    /// Composer-top user-input panel (`ComposerPendingUserInputPanel`): one
+    /// question at a time — header eyebrow + n/N chip, question text, option
+    /// rows with selection state and number-key chips.
+    fn render_user_input_panel(
+        &self,
+        pending: &PendingUserInput,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let responding = self.responding.contains(&pending.request_id);
+        let (question_index, selected): (usize, Vec<String>) = match &self.input_draft {
+            Some(draft) if draft.request_id == pending.request_id => {
+                let index = draft.question_index.min(pending.questions.len() - 1);
+                (
+                    index,
+                    draft
+                        .selections
+                        .get(&pending.questions[index].id)
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+            }
+            _ => (0, Vec::new()),
+        };
+        let question = &pending.questions[question_index];
+
+        let mut options = v_flex().mt_3().gap_1p5();
+        for (index, option) in question.options.iter().enumerate() {
+            let is_selected = selected.contains(&option.label);
+            let label = option.label.clone();
+            let mut labels = v_flex().min_w_0().flex_1().gap_0p5().child(
+                div()
+                    .text_sm()
+                    .font_medium()
+                    .child(SharedString::from(option.label.clone())),
+            );
+            if !option.description.is_empty() && option.description != option.label {
+                labels = labels.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(SharedString::from(option.description.clone())),
+                );
+            }
+            let trailing: gpui::AnyElement = if is_selected {
+                Icon::new(IconName::Check)
+                    .size_3p5()
+                    .text_color(cx.theme().primary)
+                    .into_any_element()
+            } else {
+                div()
+                    .size_5()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground.opacity(0.7))
+                    .child(SharedString::from(format!("{}", index + 1)))
+                    .into_any_element()
+            };
+            let mut row = h_flex()
+                .id(("ui-option", index))
+                .w_full()
+                .items_center()
+                .gap_3()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .px_3()
+                .py_2()
+                .child(labels)
+                .child(trailing);
+            row = if is_selected {
+                row.border_color(cx.theme().primary.opacity(0.3))
+                    .bg(cx.theme().primary.opacity(0.08))
+            } else {
+                row.border_color(gpui::transparent_black())
+                    .bg(cx.theme().secondary)
+                    .hover(|style| style.bg(cx.theme().accent))
+            };
+            row = if responding {
+                row.opacity(0.5)
+            } else {
+                row.cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_user_input_option(label.clone(), cx);
+                    }))
+            };
+            options = options.child(row);
+        }
+
+        v_flex()
+            .px_4()
+            .py_3()
+            .child(
+                h_flex()
+                    .mb_2()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .font_semibold()
+                            .text_color(cx.theme().muted_foreground.opacity(0.55))
+                            .child(SharedString::from(question.header.to_uppercase())),
+                    )
+                    .when(pending.questions.len() > 1, |this| {
+                        this.child(
+                            div()
+                                .h_5()
+                                .px_1p5()
+                                .flex()
+                                .items_center()
+                                .rounded(px(6.))
+                                .bg(cx.theme().muted.opacity(0.6))
+                                .text_size(px(10.))
+                                .font_medium()
+                                .text_color(cx.theme().muted_foreground.opacity(0.6))
+                                .child(SharedString::from(format!(
+                                    "{}/{}",
+                                    question_index + 1,
+                                    pending.questions.len()
+                                ))),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().foreground.opacity(0.9))
+                    .child(SharedString::from(question.question.clone())),
+            )
+            .when(question.multi_select, |this| {
+                this.child(
+                    div()
+                        .mt_1()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground.opacity(0.65))
+                        .child("Select one or more options."),
+                )
+            })
+            .child(options)
+            .when(question.multi_select, |this| {
+                let is_last = question_index + 1 >= pending.questions.len();
+                this.child(
+                    h_flex().mt_3().justify_end().child(
+                        Button::new("ui-advance")
+                            .label(if is_last { "Submit" } else { "Continue" })
+                            .primary()
+                            .small()
+                            .disabled(responding || selected.is_empty())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.advance_user_input(cx);
+                            })),
+                    ),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// Right-hand plan panel (`PlanSidebar`): TASKS badge header + the active
+    /// TodoWrite plan's steps with status glyphs.
+    fn render_plan_sidebar(
+        &self,
+        plan: &ActivePlanState,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let mut steps = v_flex().gap_1();
+        for (index, step) in plan.steps.iter().enumerate() {
+            let glyph: gpui::AnyElement = match step.status {
+                PlanStepStatus::Pending => div()
+                    .size_3p5()
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(cx.theme().muted_foreground.opacity(0.4))
+                    .into_any_element(),
+                PlanStepStatus::InProgress => Icon::new(IconName::LoaderCircle)
+                    .size_3p5()
+                    .text_color(cx.theme().info)
+                    .into_any_element(),
+                PlanStepStatus::Completed => Icon::new(IconName::CircleCheck)
+                    .size_3p5()
+                    .text_color(cx.theme().success)
+                    .into_any_element(),
+            };
+            let text = div()
+                .text_size(px(13.))
+                .map(|this| match step.status {
+                    PlanStepStatus::Completed => this
+                        .text_color(cx.theme().muted_foreground.opacity(0.5))
+                        .line_through(),
+                    PlanStepStatus::InProgress => {
+                        this.text_color(cx.theme().foreground.opacity(0.9))
+                    }
+                    PlanStepStatus::Pending => {
+                        this.text_color(cx.theme().muted_foreground.opacity(0.7))
+                    }
+                })
+                .child(SharedString::from(step.step.clone()));
+            let mut row = h_flex()
+                .id(("plan-step", index))
+                .items_center()
+                .gap_2p5()
+                .rounded(cx.theme().radius)
+                .px_2p5()
+                .py_2()
+                .child(glyph)
+                .child(text);
+            row = match step.status {
+                PlanStepStatus::InProgress => row.bg(cx.theme().info.opacity(0.05)),
+                PlanStepStatus::Completed => row.bg(cx.theme().success.opacity(0.05)),
+                PlanStepStatus::Pending => row,
+            };
+            steps = steps.child(row);
+        }
+
+        let mut content = v_flex().p_3().gap_4();
+        if let Some(explanation) = &plan.explanation {
+            content = content.child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(cx.theme().muted_foreground.opacity(0.8))
+                    .child(SharedString::from(explanation.clone())),
+            );
+        }
+        content = content.child(
+            v_flex()
+                .child(
+                    div()
+                        .mb_2()
+                        .text_size(px(10.))
+                        .font_semibold()
+                        .text_color(cx.theme().muted_foreground.opacity(0.4))
+                        .child("STEPS"),
+                )
+                .child(steps),
+        );
+
+        v_flex()
+            .w(px(340.))
+            .h_full()
+            .flex_shrink_0()
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .child(
+                h_flex()
+                    .h(px(48.))
+                    .px_3()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        div()
+                            .px_1p5()
+                            .rounded(px(6.))
+                            .bg(cx.theme().info.opacity(0.15))
+                            .text_size(px(10.))
+                            .font_semibold()
+                            .text_color(cx.theme().info)
+                            .child("TASKS"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground.opacity(0.6))
+                            .children(relative_time(&plan.created_at)),
+                    ),
+            )
+            .child(
+                div()
+                    .id("plan-steps")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .child(content),
+            )
+            .into_any_element()
     }
 
     /// Sidebar mirroring the Electron `SidebarV2`: 256px, sidebar tokens,
@@ -744,6 +1334,39 @@ impl ChatApp {
             );
         }
 
+        // Pending approvals / user-input requests are derived from the
+        // activity log (the reducer deliberately skips their events); the
+        // approval panel takes precedence, like the Electron composer.
+        let pending_approvals = view
+            .map(|view| derive_pending_approvals(&view.activities))
+            .unwrap_or_default();
+        let pending_inputs = view
+            .map(|view| derive_pending_user_inputs(&view.activities))
+            .unwrap_or_default();
+        let active_approval = pending_approvals.first().cloned();
+        let active_input = if active_approval.is_none() {
+            pending_inputs.first().cloned()
+        } else {
+            None
+        };
+        let panel: Option<gpui::AnyElement> = {
+            let inner = if let Some(approval) = &active_approval {
+                Some(self.render_approval_panel(approval, pending_approvals.len(), cx))
+            } else {
+                active_input
+                    .as_ref()
+                    .map(|input| self.render_user_input_panel(input, cx))
+            };
+            inner.map(|inner| {
+                div()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary)
+                    .child(inner)
+                    .into_any_element()
+            })
+        };
+
         // Composer: rounded-22 shell, textarea, footer (model label + send).
         let send_button: gpui::AnyElement = if running {
             div()
@@ -783,6 +1406,26 @@ impl ChatApp {
                 .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
                 .into_any_element()
         };
+        let footer: gpui::AnyElement = if let Some(approval) = &active_approval {
+            // The bottom toolbar is replaced by the approval actions while an
+            // approval is pending (Electron's ChatComposer does the same).
+            self.render_approval_actions(approval, cx)
+        } else {
+            h_flex()
+                .px_3()
+                .pb_3()
+                .pt_1()
+                .justify_between()
+                .items_center()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .children(model_label),
+                )
+                .child(send_button)
+                .into_any_element()
+        };
         let composer = div().px_5().pb_4().child(
             v_flex()
                 .w_full()
@@ -792,27 +1435,15 @@ impl ChatApp {
                 .border_1()
                 .border_color(cx.theme().border)
                 .bg(cx.theme().muted)
+                .overflow_hidden()
+                .children(panel)
                 .child(
                     div()
                         .px_2()
                         .pt_2()
                         .child(Textarea::new(&self.composer).appearance(false)),
                 )
-                .child(
-                    h_flex()
-                        .px_3()
-                        .pb_3()
-                        .pt_1()
-                        .justify_between()
-                        .items_center()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .children(model_label),
-                        )
-                        .child(send_button),
-                ),
+                .child(footer),
         );
 
         let mut main = v_flex()
@@ -873,11 +1504,26 @@ fn describe_status(status: &SupervisorStatus) -> String {
 
 impl Render for ChatApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let active_plan = self
+            .thread
+            .as_ref()
+            .and_then(|open| open.state.view.as_ref())
+            .and_then(|view| {
+                derive_active_plan_state(
+                    &view.activities,
+                    view.latest_turn.as_ref().map(|turn| &turn.turn_id),
+                )
+            });
         h_flex()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(self.render_sidebar(cx))
             .child(self.render_chat(cx))
+            .children(
+                active_plan
+                    .as_ref()
+                    .map(|plan| self.render_plan_sidebar(plan, cx)),
+            )
     }
 }

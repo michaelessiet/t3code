@@ -23,6 +23,7 @@ tokio.workspace = true
 chrono.workspace = true
 vitre-client.workspace = true
 vitre-contracts.workspace = true
+vitre-state.workspace = true
 vitre-rpc.workspace = true
 vitre-sidecar.workspace = true
 wry.workspace = true

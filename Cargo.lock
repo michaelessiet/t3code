@@ -8236,6 +8236,7 @@ dependencies = [
  "vitre-contracts",
  "vitre-rpc",
  "vitre-sidecar",
+ "vitre-state",
 ]
 
 [[package]]
