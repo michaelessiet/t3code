@@ -21,11 +21,14 @@
 //! `"full-access"`, `interactionMode` → `"default"`) get the same defaults
 //! applied here when the reducer reads them.
 
+pub mod file_buffer;
+pub mod file_tree;
 pub mod session_logic;
 pub mod shell;
 pub mod shell_sync;
 pub mod thread;
 pub mod thread_sync;
+pub mod vcs_tree_status;
 pub mod wire_opt;
 
 pub use shell::apply_shell_stream_event;
