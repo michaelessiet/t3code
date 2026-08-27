@@ -1,0 +1,905 @@
+//! M2 files panel: workspace file tree + editor, the Electron
+//! `FilePreviewPanel` layout (editor area left, explorer aside right; the
+//! aside fills the panel while no file is open).
+//!
+//! Data flow per the Electron sources: the tree is a flat
+//! `projects.listEntries` snapshot (manual refresh only — the watcher does
+//! NOT refresh entries, matching `FileBrowserPanel`), VCS decorations refresh
+//! on every workspace-watch event, the open file re-reads on watch events
+//! that name it (clean buffer → reload, dirty buffer → conflict banner), and
+//! saves are debounced writes guarded by `baseRevision` with the
+//! `stale_revision` failure surfacing the same banner.
+
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Duration;
+
+use gpui::{Context, Entity, MouseButton, SharedString, Subscription, Window, div, prelude::*, px};
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
+    input::{Editor, EditorState, InputEvent},
+    v_flex,
+};
+use vitre_client::EnvironmentClient;
+use vitre_contracts::methods::{
+    ProjectsListEntries, ProjectsReadFile, ProjectsSubscribeWorkspaceChanges, ProjectsWriteFile,
+    ProjectsWriteFileError as WriteFileErrorUnion, VcsGetFileStatuses,
+};
+use vitre_contracts::{
+    ProjectFileFailure, ProjectListEntriesInput, ProjectReadFileInput, ProjectWatchInput,
+    ProjectWatchStreamEvent, ProjectWriteFileInput, TrimmedNonEmptyString, VcsFileStatusEntry,
+    VcsFileStatusesInput,
+};
+use vitre_rpc::{TypedError, TypedStreamEvent};
+use vitre_state::file_buffer::{BufferConflict, DiskChange, FileBuffer};
+use vitre_state::file_tree::{FileTreeModel, FileTreeRow};
+use vitre_state::vcs_tree_status::{TreeVcsDecorations, TreeVcsStatus, build_tree_vcs_decorations};
+
+/// Electron default: autosave on, `afterDelay`, 500ms
+/// (`packages/contracts/src/settings.ts` `DEFAULT_AUTO_SAVE_DELAY_MS`).
+const AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// A server-completed watch stream must not resubscribe in a hot loop
+/// (vitre-client's `RESUBSCRIBE_AFTER_COMPLETION`).
+const RESUBSCRIBE_AFTER_COMPLETION: Duration = Duration::from_secs(2);
+
+fn tnes(text: impl Into<String>) -> TrimmedNonEmptyString {
+    TrimmedNonEmptyString(text.into())
+}
+
+/// Highlighter language for a path: the gpui-component registry resolves
+/// extensions and short names itself ("rs" → rust), so pass the extension and
+/// fall back to plain text.
+fn language_for_path(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => extension.to_ascii_lowercase(),
+        _ => match name.to_ascii_lowercase().as_str() {
+            "makefile" => "make".into(),
+            _ => "text".into(),
+        },
+    }
+}
+
+struct OpenFile {
+    relative_path: String,
+    buffer: FileBuffer,
+    /// Server truncated the read (>1MB): shown as a banner, editing disabled.
+    truncated: bool,
+    /// Debounce generation: each edit bumps it; only the latest timer saves.
+    debounce: u64,
+}
+
+pub struct FilesPanel {
+    client: Arc<EnvironmentClient>,
+    cwd: String,
+    tree: Option<FileTreeModel>,
+    tree_truncated: bool,
+    /// Every path listEntries reported (files + dirs) — the "paths the tree
+    /// knows" input to VCS untracked-directory expansion.
+    tree_paths: Vec<String>,
+    expanded: HashSet<String>,
+    vcs_entries: Vec<VcsFileStatusEntry>,
+    vcs: TreeVcsDecorations,
+    open: Option<OpenFile>,
+    editor: Entity<EditorState>,
+    /// Bumped on every open/close; async completions for an older file drop.
+    open_generation: u64,
+    status: Option<SharedString>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl FilesPanel {
+    pub fn new(
+        client: Arc<EnvironmentClient>,
+        cwd: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let editor = cx.new(|cx| EditorState::new(window, cx).line_number(true));
+        let subscriptions = vec![cx.subscribe_in(
+            &editor,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.editor_edited(window, cx);
+                }
+            },
+        )];
+
+        let mut panel = Self {
+            client,
+            cwd,
+            tree: None,
+            tree_truncated: false,
+            tree_paths: Vec::new(),
+            expanded: HashSet::new(),
+            vcs_entries: Vec::new(),
+            vcs: TreeVcsDecorations::default(),
+            open: None,
+            editor,
+            open_generation: 0,
+            status: None,
+            _subscriptions: subscriptions,
+        };
+        panel.refresh_tree(cx);
+        panel.spawn_watch_loop(window, cx);
+        panel
+    }
+
+    /// Which workspace this panel browses (ChatApp recreates on change).
+    pub fn cwd(&self) -> &str {
+        &self.cwd
+    }
+
+    /// Re-list entries; on completion also refresh VCS so untracked-directory
+    /// expansion sees the tree paths.
+    fn refresh_tree(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let payload = ProjectListEntriesInput {
+            cwd: tnes(&self.cwd),
+        };
+        cx.spawn(
+            async move |this, cx| match client.call::<ProjectsListEntries>(&payload).await {
+                Ok(result) => {
+                    let _ = this.update(cx, |panel, cx| {
+                        panel.tree_paths = result
+                            .entries
+                            .iter()
+                            .map(|entry| entry.path.0.clone())
+                            .collect();
+                        panel.tree = Some(FileTreeModel::build(&result.entries));
+                        panel.tree_truncated = result.truncated;
+                        panel.rebuild_decorations();
+                        panel.refresh_vcs(cx);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |panel, cx| {
+                        panel.status = Some(format!("listEntries failed: {error}").into());
+                        cx.notify();
+                    });
+                }
+            },
+        )
+        .detach();
+    }
+
+    fn refresh_vcs(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let payload = VcsFileStatusesInput {
+            cwd: tnes(&self.cwd),
+        };
+        cx.spawn(async move |this, cx| {
+            // No repository / transient failures leave decorations as-is
+            // (Electron's status atom behaves the same on error).
+            let Ok(result) = client.call::<VcsGetFileStatuses>(&payload).await else {
+                return;
+            };
+            let _ = this.update(cx, |panel, cx| {
+                panel.vcs_entries = result.entries;
+                panel.rebuild_decorations();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn rebuild_decorations(&mut self) {
+        self.vcs = build_tree_vcs_decorations(&self.vcs_entries, &self.tree_paths);
+    }
+
+    /// Durable workspace watch: resubscribes on every new session, exactly
+    /// like the vitre-client domain loops (select on the session channel so a
+    /// dead subscription can't wedge the loop).
+    fn spawn_watch_loop(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let payload = ProjectWatchInput {
+            cwd: tnes(&self.cwd),
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let mut sessions = client.sessions();
+            loop {
+                let Some(handle) = sessions.borrow_and_update().clone() else {
+                    if sessions.changed().await.is_err() {
+                        return;
+                    }
+                    continue;
+                };
+                let Ok(mut subscription) = handle
+                    .session
+                    .subscribe_typed::<ProjectsSubscribeWorkspaceChanges>(&payload)
+                else {
+                    // Published session already dead; wait for a replacement.
+                    if sessions.changed().await.is_err() {
+                        return;
+                    }
+                    continue;
+                };
+                let completed = loop {
+                    tokio::select! {
+                        event = subscription.next() => match event {
+                            Some(TypedStreamEvent::Values(events)) => {
+                                if this
+                                    .update_in(cx, |panel, window, cx| {
+                                        panel.workspace_changed(&events, window, cx);
+                                    })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                if subscription.ack().is_err() {
+                                    break false;
+                                }
+                            }
+                            Some(TypedStreamEvent::Completed(result)) => break result.is_ok(),
+                            None => break false,
+                        },
+                        changed = sessions.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                            let replaced = sessions
+                                .borrow()
+                                .as_ref()
+                                .is_none_or(|current| current.generation != handle.generation);
+                            if replaced {
+                                break false;
+                            }
+                        }
+                    }
+                };
+                if completed {
+                    cx.background_executor()
+                        .timer(RESUBSCRIBE_AFTER_COMPLETION)
+                        .await;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Watch events: VCS decorations always refresh; the open file re-reads
+    /// when named (or on overflow, where any path may have changed). The tree
+    /// itself does NOT refresh (Electron parity: manual refresh only).
+    fn workspace_changed(
+        &mut self,
+        events: &[ProjectWatchStreamEvent],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut open_touched = false;
+        for event in events {
+            match event {
+                ProjectWatchStreamEvent::Changes { paths } => {
+                    if let Some(open) = &self.open
+                        && paths.iter().any(|path| path.0 == open.relative_path)
+                    {
+                        open_touched = true;
+                    }
+                }
+                ProjectWatchStreamEvent::Overflow {} => open_touched = self.open.is_some(),
+                ProjectWatchStreamEvent::Unknown(_) => {}
+            }
+        }
+        self.refresh_vcs(cx);
+        if open_touched {
+            self.check_open_file_disk(window, cx);
+        }
+    }
+
+    fn open_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|open| open.relative_path == path)
+        {
+            return;
+        }
+        self.open_generation += 1;
+        let generation = self.open_generation;
+        let client = self.client.clone();
+        let payload = ProjectReadFileInput {
+            cwd: tnes(&self.cwd),
+            relative_path: tnes(&path),
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            match client.call::<ProjectsReadFile>(&payload).await {
+                Ok(result) => {
+                    let _ = this.update_in(cx, |panel, window, cx| {
+                        if panel.open_generation != generation {
+                            return;
+                        }
+                        let revision = result.revision.flatten().map(|revision| revision.0);
+                        panel.editor.update(cx, |state, cx| {
+                            state.set_highlighter(language_for_path(&path), cx);
+                            state.set_value(result.contents.0.clone(), window, cx);
+                        });
+                        panel.open = Some(OpenFile {
+                            relative_path: path,
+                            buffer: FileBuffer::open(revision),
+                            truncated: result.truncated,
+                            debounce: 0,
+                        });
+                        panel.status = None;
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |panel, cx| {
+                        if panel.open_generation != generation {
+                            return;
+                        }
+                        panel.status = Some(format!("open failed: {error}").into());
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn close_file(&mut self, cx: &mut Context<Self>) {
+        self.open_generation += 1;
+        self.open = None;
+        cx.notify();
+    }
+
+    fn editor_edited(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let generation = self.open_generation;
+        let Some(open) = &mut self.open else {
+            return;
+        };
+        if open.truncated {
+            return;
+        }
+        let rearm = open.buffer.edited();
+        cx.notify();
+        if !rearm {
+            return;
+        }
+        open.debounce += 1;
+        let debounce = open.debounce;
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(AUTOSAVE_DEBOUNCE).await;
+            let _ = this.update_in(cx, |panel, window, cx| {
+                if panel.open_generation != generation {
+                    return;
+                }
+                let fresh = panel
+                    .open
+                    .as_ref()
+                    .is_some_and(|open| open.debounce == debounce);
+                if fresh {
+                    panel.flush(window, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Start a write if the buffer wants one (debounce expiry or post-save
+    /// coalesce).
+    fn flush(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(open) = &mut self.open else {
+            return;
+        };
+        let Some(base_revision) = open.buffer.begin_save() else {
+            return;
+        };
+        self.spawn_write(base_revision, window, cx);
+    }
+
+    /// Issue the writeFile RPC for the open file. The buffer must already
+    /// count the write as in flight (`begin_save` or `resolve_keep_mine`).
+    fn spawn_write(
+        &mut self,
+        base_revision: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = self.open_generation;
+        let Some(open) = &self.open else {
+            return;
+        };
+        let payload = ProjectWriteFileInput {
+            base_revision: base_revision.map(|revision| Some(tnes(revision))),
+            contents: tnes(self.editor.read(cx).value().to_string()),
+            cwd: tnes(&self.cwd),
+            relative_path: tnes(&open.relative_path),
+        };
+        let client = self.client.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = client.call::<ProjectsWriteFile>(&payload).await;
+            let _ = this.update_in(cx, |panel, window, cx| {
+                if panel.open_generation != generation {
+                    return;
+                }
+                let Some(open) = &mut panel.open else {
+                    return;
+                };
+                match result {
+                    Ok(result) => {
+                        let outcome = open
+                            .buffer
+                            .save_succeeded(result.revision.flatten().map(|revision| revision.0));
+                        if outcome.resave {
+                            panel.flush(window, cx);
+                        } else if outcome.disk == DiskChange::Reload {
+                            panel.check_open_file_disk(window, cx);
+                        }
+                        // The saved file's git status changed.
+                        panel.refresh_vcs(cx);
+                    }
+                    Err(TypedError::Failed(WriteFileErrorUnion::ProjectWriteFileError(error)))
+                        if error.failure == Some(Some(ProjectFileFailure::StaleRevision)) =>
+                    {
+                        open.buffer.save_failed_stale();
+                    }
+                    Err(error) => {
+                        open.buffer.save_failed();
+                        panel.status = Some(format!("save failed: {error}").into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Re-read the open file and let the buffer judge the disk revision:
+    /// self-written → ignore, clean+foreign → reload in place, dirty+foreign
+    /// → conflict banner.
+    fn check_open_file_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let generation = self.open_generation;
+        let Some(open) = &self.open else {
+            return;
+        };
+        let client = self.client.clone();
+        let payload = ProjectReadFileInput {
+            cwd: tnes(&self.cwd),
+            relative_path: tnes(&open.relative_path),
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(result) = client.call::<ProjectsReadFile>(&payload).await else {
+                return;
+            };
+            let _ = this.update_in(cx, |panel, window, cx| {
+                if panel.open_generation != generation {
+                    return;
+                }
+                let Some(open) = &mut panel.open else {
+                    return;
+                };
+                let revision = result.revision.flatten().map(|revision| revision.0);
+                if open.buffer.disk_changed(revision.clone()) == DiskChange::Reload {
+                    open.buffer.resolve_reload(revision);
+                    open.truncated = result.truncated;
+                    let editor = panel.editor.clone();
+                    editor.update(cx, |state, cx| {
+                        state.set_value(result.contents.0.clone(), window, cx);
+                    });
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Conflict banner "Reload from disk".
+    fn resolve_by_reloading(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let generation = self.open_generation;
+        let Some(open) = &self.open else {
+            return;
+        };
+        let client = self.client.clone();
+        let payload = ProjectReadFileInput {
+            cwd: tnes(&self.cwd),
+            relative_path: tnes(&open.relative_path),
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(result) = client.call::<ProjectsReadFile>(&payload).await else {
+                return;
+            };
+            let _ = this.update_in(cx, |panel, window, cx| {
+                if panel.open_generation != generation {
+                    return;
+                }
+                let Some(open) = &mut panel.open else {
+                    return;
+                };
+                open.buffer
+                    .resolve_reload(result.revision.flatten().map(|revision| revision.0));
+                open.truncated = result.truncated;
+                let editor = panel.editor.clone();
+                editor.update(cx, |state, cx| {
+                    state.set_value(result.contents.0.clone(), window, cx);
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Conflict banner "Keep my version": unconditional write (no
+    /// baseRevision guard). `resolve_keep_mine` already counts the write as
+    /// in flight, so this must NOT route through `begin_save`.
+    fn resolve_by_keeping_mine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(open) = &mut self.open else {
+            return;
+        };
+        if open.buffer.resolve_keep_mine() {
+            self.spawn_write(None, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn toggle_dir(&mut self, path: &str, cx: &mut Context<Self>) {
+        if !self.expanded.remove(path) {
+            self.expanded.insert(path.to_string());
+        }
+        cx.notify();
+    }
+
+    fn row_decoration(
+        &self,
+        row: &FileTreeRow,
+        cx: &Context<Self>,
+    ) -> (Option<gpui::Hsla>, Option<&'static str>) {
+        let Some(status) = self.vcs.statuses.get(&row.path) else {
+            return (None, None);
+        };
+        let theme = cx.theme();
+        let (color, letter) = match status {
+            TreeVcsStatus::Modified => (theme.warning, "M"),
+            TreeVcsStatus::Renamed => (theme.info, "R"),
+            TreeVcsStatus::Deleted => (theme.danger, "D"),
+            TreeVcsStatus::Added => (theme.success, "A"),
+            TreeVcsStatus::Untracked => (theme.success, "U"),
+            TreeVcsStatus::Ignored => return (None, None),
+        };
+        let letter = if self.vcs.conflicted.contains(&row.path) {
+            "!"
+        } else {
+            letter
+        };
+        // Folders tint the name only (Electron hides the folder status letter).
+        (Some(color), (!row.is_dir).then_some(letter))
+    }
+
+    fn render_tree_row(
+        &self,
+        index: usize,
+        row: &FileTreeRow,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let (tint, letter) = self.row_decoration(row, cx);
+        let is_open = self
+            .open
+            .as_ref()
+            .is_some_and(|open| open.relative_path == row.path);
+        let name_color = tint.unwrap_or(cx.theme().foreground);
+        let path = row.path.clone();
+        let is_dir = row.is_dir;
+        h_flex()
+            .id(("file-tree-row", index))
+            .h(px(24.))
+            .w_full()
+            .pl(px(8. + row.depth as f32 * 12.))
+            .pr_2()
+            .gap_1()
+            .items_center()
+            .text_sm()
+            .cursor_pointer()
+            .when(is_open, |this| this.bg(cx.theme().accent))
+            .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    if is_dir {
+                        this.toggle_dir(&path, cx);
+                    } else {
+                        this.open_file(path.clone(), window, cx);
+                    }
+                }),
+            )
+            .child(
+                div()
+                    .w(px(14.))
+                    .flex_shrink_0()
+                    .children(row.is_dir.then(|| {
+                        Icon::new(if row.expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .size_3()
+                        .text_color(cx.theme().muted_foreground)
+                    })),
+            )
+            .child(
+                Icon::new(match (row.is_dir, row.expanded) {
+                    (true, true) => IconName::FolderOpen,
+                    (true, false) => IconName::Folder,
+                    (false, _) => IconName::File,
+                })
+                .size_3p5()
+                .flex_shrink_0()
+                .text_color(cx.theme().muted_foreground),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(name_color)
+                    .when(row.ignored, |this| this.opacity(0.5))
+                    .child(row.display_name.clone()),
+            )
+            .children(letter.map(|letter| {
+                let color = if letter == "!" {
+                    cx.theme().danger
+                } else {
+                    name_color
+                };
+                div()
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(color)
+                    .child(letter)
+            }))
+            .into_any_element()
+    }
+
+    fn render_explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows: Vec<_> = self
+            .tree
+            .as_ref()
+            .map(|tree| tree.visible_rows(&self.expanded))
+            .unwrap_or_default();
+        let empty = rows.is_empty();
+        v_flex()
+            .h_full()
+            .min_h_0()
+            .child(
+                div()
+                    .id("file-tree-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(
+                        v_flex()
+                            .py_1()
+                            .children(
+                                rows.iter()
+                                    .enumerate()
+                                    .map(|(index, row)| self.render_tree_row(index, row, cx)),
+                            )
+                            .when(empty, |this| {
+                                this.child(
+                                    div()
+                                        .p_3()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(if self.tree.is_none() {
+                                            "Loading files…"
+                                        } else {
+                                            "No files"
+                                        }),
+                                )
+                            }),
+                    ),
+            )
+            .children(self.tree_truncated.then(|| {
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child("Listing truncated — some files are not shown")
+            }))
+    }
+
+    fn render_conflict_banner(
+        &self,
+        conflict: BufferConflict,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let message = match conflict {
+            BufferConflict::StaleSave | BufferConflict::ExternalChange => {
+                "This file changed on disk while you were editing. Your edits are not being saved."
+            }
+        };
+        h_flex()
+            .px_3()
+            .py_2()
+            .gap_2()
+            .items_center()
+            .bg(cx.theme().warning.opacity(0.15))
+            .border_b_1()
+            .border_color(cx.theme().warning.opacity(0.4))
+            .child(
+                Icon::new(IconName::TriangleAlert)
+                    .size_4()
+                    .text_color(cx.theme().warning),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .text_color(cx.theme().foreground)
+                    .child(message),
+            )
+            .child(
+                Button::new("conflict-reload")
+                    .small()
+                    .outline()
+                    .label("Reload from disk")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.resolve_by_reloading(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("conflict-keep")
+                    .small()
+                    .outline()
+                    .label("Keep my version")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.resolve_by_keeping_mine(window, cx);
+                    })),
+            )
+    }
+
+    fn render_editor_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let open = self.open.as_ref();
+        let conflict = open.and_then(|open| open.buffer.conflict());
+        let truncated = open.is_some_and(|open| open.truncated);
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .children(conflict.map(|conflict| self.render_conflict_banner(conflict, cx)))
+            .children(truncated.then(|| {
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child("File exceeds 1MB — showing a truncated read-only view")
+            }))
+            .child(
+                div().flex_1().min_h_0().child(
+                    Editor::new(&self.editor)
+                        .readonly(truncated)
+                        .appearance(false)
+                        .size_full(),
+                ),
+            )
+    }
+
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let open_path = self
+            .open
+            .as_ref()
+            .map(|open| open.relative_path.replace('/', " › "));
+        let dirty = self
+            .open
+            .as_ref()
+            .is_some_and(|open| open.buffer.is_dirty());
+        h_flex()
+            .h(px(36.))
+            .px_3()
+            .gap_2()
+            .items_center()
+            .flex_shrink_0()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .text_color(if open_path.is_some() {
+                        cx.theme().foreground
+                    } else {
+                        cx.theme().muted_foreground
+                    })
+                    .child(open_path.unwrap_or_else(|| "Files".into())),
+            )
+            .children(dirty.then(|| {
+                div()
+                    .size(px(7.))
+                    .rounded_full()
+                    .flex_shrink_0()
+                    .bg(cx.theme().muted_foreground)
+            }))
+            .children(self.open.is_some().then(|| {
+                Button::new("files-close-file")
+                    .icon(IconName::Close)
+                    .ghost()
+                    .xsmall()
+                    .tooltip("Close file")
+                    .on_click(cx.listener(|this, _, _, cx| this.close_file(cx)))
+            }))
+            .child(
+                Button::new("files-refresh")
+                    .icon(IconName::Redo)
+                    .ghost()
+                    .xsmall()
+                    .tooltip("Refresh file list")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.refresh_tree(cx);
+                        cx.notify();
+                    })),
+            )
+    }
+}
+
+impl Render for FilesPanel {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let file_open = self.open.is_some();
+        v_flex()
+            .size_full()
+            .bg(cx.theme().background)
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .child(self.render_header(cx))
+            .children(self.status.clone().map(|status| {
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(cx.theme().danger)
+                    .child(status)
+            }))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .items_stretch()
+                    .when(file_open, |this| this.child(self.render_editor_area(cx)))
+                    .child(
+                        // Electron: explorer aside is ~22rem with a left
+                        // border while a file is open, and fills the panel
+                        // when nothing is open.
+                        div()
+                            .h_full()
+                            .min_h_0()
+                            .map(|this| {
+                                if file_open {
+                                    this.w(px(300.))
+                                        .flex_shrink_0()
+                                        .border_l_1()
+                                        .border_color(cx.theme().border)
+                                } else {
+                                    this.flex_1().min_w_0()
+                                }
+                            })
+                            .child(self.render_explorer(cx)),
+                    ),
+            )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::language_for_path;
+
+    #[test]
+    fn language_for_path_uses_extension_and_known_names() {
+        assert_eq!(language_for_path("src/main.rs"), "rs");
+        assert_eq!(language_for_path("a/b/Component.TSX"), "tsx");
+        assert_eq!(language_for_path("Makefile"), "make");
+        assert_eq!(language_for_path("LICENSE"), "text");
+        assert_eq!(language_for_path(".gitignore"), "text");
+    }
+}

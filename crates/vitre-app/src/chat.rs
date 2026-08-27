@@ -46,6 +46,8 @@ use vitre_state::session_logic::{
     derive_pending_user_inputs,
 };
 
+use crate::files::FilesPanel;
+
 pub struct ChatApp {
     client: Option<Arc<EnvironmentClient>>,
     sidecar_status: SharedString,
@@ -75,6 +77,10 @@ pub struct ChatApp {
     stick_to_bottom: bool,
     /// Sidebar ⟷ chat split state (drag-resizable, Electron parity).
     sidebar_resize: Entity<ResizableState>,
+    /// Right-hand files panel (M2). Kept alive while toggled off so tree
+    /// expansion and the open buffer survive, recreated on project switch.
+    files: Option<Entity<FilesPanel>>,
+    files_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -472,7 +478,32 @@ impl ChatApp {
             timeline_scroll: ScrollHandle::new(),
             stick_to_bottom: true,
             sidebar_resize: cx.new(|_| ResizableState::default()),
+            files: None,
+            files_open: false,
             _subscriptions: subscriptions,
+        }
+    }
+
+    fn toggle_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.files_open = !self.files_open;
+        if self.files_open {
+            self.ensure_files_panel(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Create (or recreate, when the open thread's project changed) the files
+    /// panel for the active workspace root.
+    fn ensure_files_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(client), Some(cwd)) = (self.client.clone(), self.open_project_root()) else {
+            return;
+        };
+        let stale = self
+            .files
+            .as_ref()
+            .is_none_or(|panel| panel.read(cx).cwd() != cwd);
+        if stale {
+            self.files = Some(cx.new(|cx| FilesPanel::new(client, cwd, window, cx)));
         }
     }
 
@@ -2344,8 +2375,31 @@ impl ChatApp {
                     .h(px(40.))
                     .px_5()
                     .items_center()
+                    .gap_2()
                     .flex_shrink_0()
-                    .child(div().text_sm().font_medium().truncate().child(title)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .font_medium()
+                            .truncate()
+                            .child(title),
+                    )
+                    .child(
+                        Button::new("toggle-files")
+                            .icon(if self.files_open {
+                                IconName::PanelRightClose
+                            } else {
+                                IconName::PanelRightOpen
+                            })
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Files")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_files(window, cx);
+                            })),
+                    ),
             );
         let banner: Option<SharedString> = self.last_error.clone().or(session_error);
         if let Some(error) = banner {
@@ -2403,7 +2457,23 @@ fn describe_status(status: &SupervisorStatus) -> String {
 }
 
 impl Render for ChatApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Recreate the files panel when the open thread's project changed
+        // while the panel is showing.
+        if self.files_open {
+            self.ensure_files_panel(window, cx);
+        }
+        let files_panel = self
+            .files_open
+            .then(|| self.files.clone())
+            .flatten()
+            .map(|panel| {
+                div()
+                    .w(relative(0.45))
+                    .h_full()
+                    .flex_shrink_0()
+                    .child(panel)
+            });
         let active_plan = self
             .thread
             .as_ref()
@@ -2431,6 +2501,7 @@ impl Render for ChatApp {
                         .child(resizable_panel().child(self.render_chat(cx))),
                 ),
             )
+            .children(files_panel)
             .children(
                 active_plan
                     .as_ref()

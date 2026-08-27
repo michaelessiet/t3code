@@ -2,6 +2,7 @@
 //! M1 chat core ([`chat::ChatApp`]) — thread list, chat view, composer.
 
 mod chat;
+mod files;
 
 use std::path::PathBuf;
 use std::sync::Arc;
