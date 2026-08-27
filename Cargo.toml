@@ -6,6 +6,7 @@ members = [
   "crates/vitre-contracts-gen",
   "crates/vitre-rpc",
   "crates/vitre-sidecar",
+  "crates/vitre-state",
   "third_party/ztracing",
   "third_party/ztracing-macro",
 ]
@@ -30,8 +31,10 @@ gpui_macros = { git = "https://github.com/zed-industries/zed", rev = "f66ed399cd
 gpui_tokio = { git = "https://github.com/zed-industries/zed", rev = "f66ed399cdde86092af8af3dc7b418abf45f37f8" }
 
 # --- vitre crates ---
+vitre-contracts = { path = "crates/vitre-contracts" }
 vitre-rpc = { path = "crates/vitre-rpc" }
 vitre-sidecar = { path = "crates/vitre-sidecar" }
+vitre-state = { path = "crates/vitre-state" }
 
 # --- vendored gpui-component fork (Apache-2.0) ---
 gpui-component = { path = "third_party/gpui-component/crates/ui" }

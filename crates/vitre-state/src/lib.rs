@@ -1,0 +1,31 @@
+//! Pure state reducers over the generated contract types.
+//!
+//! These are line-for-line ports of the shared TypeScript reducers in
+//! `packages/client-runtime/src/state/` (`shellReducer.ts`, `threadReducer.ts`)
+//! and must keep the exact same semantics — both apps reduce the same
+//! orchestration event stream. UI-specific mapping (attachment preview URLs,
+//! model-slug normalisation, scoped fields) is the caller's responsibility,
+//! exactly as in the TS layer.
+//!
+//! ## Wire-Option conventions
+//!
+//! The generated types are wire-faithful, so effect's optional/nullable field
+//! flavours surface as nested `Option`s (see `wire_opt`):
+//! - `Option<Option<T>>` (effect `optional(X)`): absent and wire-`null` BOTH
+//!   decode to TS `undefined` — only `Some(Some(v))` carries a value.
+//! - `Option<Option<Option<T>>>` (effect `optional(NullOr(X))` /
+//!   `optionalKey(NullOr(X))`): `None` = TS `undefined`, `Some(None)` =
+//!   wire-`null` = TS `null` (meaningful!), `Some(Some(Some(v)))` = value.
+//!
+//! Fields the TS contracts decode with `withDecodingDefault` (`runtimeMode` →
+//! `"full-access"`, `interactionMode` → `"default"`) get the same defaults
+//! applied here when the reducer reads them.
+
+pub mod shell;
+pub mod thread;
+pub mod wire_opt;
+
+pub use shell::apply_shell_stream_event;
+pub use thread::{
+    ThreadDetailReducerResult, apply_thread_detail_event, event_sequence, event_thread_id,
+};
