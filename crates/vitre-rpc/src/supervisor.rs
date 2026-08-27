@@ -15,10 +15,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Notify, watch};
+use vitre_contracts::ServerConfig;
+use vitre_contracts::methods::ServerGetConfig;
 
 use crate::error::RpcError;
 use crate::http::EnvironmentHttp;
 use crate::session::RpcSession;
+use crate::typed::TypedError;
 
 /// Consecutive-failure backoff schedule (`RETRY_DELAYS_MS` in supervisor.ts).
 const RETRY_DELAYS: [Duration; 5] = [
@@ -59,6 +62,10 @@ pub struct SessionHandle {
     /// The target the session was built from — same credentials work for the
     /// HTTP snapshot endpoints ([`EnvironmentHttp::shell_snapshot`]).
     pub target: PreparedTarget,
+    /// The initial-sync `server.getConfig` (the TS client performs it before
+    /// any subscription); carries the resume-completion-marker capability
+    /// flags the durable subscriptions key off.
+    pub config: Arc<ServerConfig>,
 }
 
 pub struct EnvironmentSupervisor {
@@ -120,7 +127,7 @@ async fn run(
     let mut generation: u64 = 0;
     loop {
         match connect_once(&mut prepare).await {
-            Ok((session, target)) => {
+            Ok((session, target, config)) => {
                 generation += 1;
                 let connected_at = Instant::now();
                 let session = Arc::new(session);
@@ -128,6 +135,7 @@ async fn run(
                     generation,
                     session: session.clone(),
                     target,
+                    config: Arc::new(config),
                 }));
                 let teardown = keepalive(&session, &retry_now).await;
                 let _ = session_tx.send(None);
@@ -158,12 +166,23 @@ async fn run(
     }
 }
 
-async fn connect_once(prepare: &mut PrepareFn) -> Result<(RpcSession, PreparedTarget), RpcError> {
+async fn connect_once(
+    prepare: &mut PrepareFn,
+) -> Result<(RpcSession, PreparedTarget, ServerConfig), RpcError> {
     let target = prepare().await?;
     let http = EnvironmentHttp::new(target.base_url.clone());
     let ticket = http.websocket_ticket(&target.access_token).await?;
     let session = RpcSession::connect(&http.ws_url(&ticket)).await?;
-    Ok((session, target))
+    let config = session
+        .call_typed::<ServerGetConfig>(&serde_json::Value::Object(Default::default()))
+        .await
+        .map_err(|error| match error {
+            TypedError::Rpc(error) => error,
+            TypedError::Failed(typed) => {
+                RpcError::Transport(format!("server.getConfig failed: {typed:?}"))
+            }
+        })?;
+    Ok((session, target, config))
 }
 
 #[derive(Debug, PartialEq, Eq)]

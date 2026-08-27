@@ -8236,6 +8236,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "vitre-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tokio",
+ "vitre-contracts",
+ "vitre-rpc",
+ "vitre-sidecar",
+ "vitre-state",
+]
+
+[[package]]
 name = "vitre-contracts"
 version = "0.1.0"
 dependencies = [
@@ -8264,7 +8277,9 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
+ "vitre-contracts",
  "vitre-sidecar",
+ "vitre-state",
 ]
 
 [[package]]

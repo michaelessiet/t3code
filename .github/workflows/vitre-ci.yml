@@ -94,6 +94,12 @@ jobs:
       - name: Live-server typed spike
         run: cargo run -p vitre-rpc --example spike_typed
 
+      # Client-layer tripwire: EnvironmentClient shell/thread sync loops
+      # against a supervised sidecar — dispatch, shell-scoped meta events,
+      # and live detail events through the projections.
+      - name: Live-server client spike
+        run: cargo run -p vitre-client --example spike_client
+
   licenses:
     name: cargo-deny (licensing firewall)
     runs-on: blacksmith-8vcpu-ubuntu-2404

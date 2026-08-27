@@ -10,8 +10,8 @@ pub trait RpcMethod {
     const TAG: &'static str;
     const STREAM: bool;
     type Payload: Serialize;
-    type Success: DeserializeOwned;
-    type Error: DeserializeOwned;
+    type Success: DeserializeOwned + std::fmt::Debug;
+    type Error: DeserializeOwned + std::fmt::Debug;
 }
 
 /// Wire encoding of effect's `Schema.Option(T)` under the rpc JSON codec:
