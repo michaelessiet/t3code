@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/vitre-app",
+  "crates/vitre-contracts",
   "crates/vitre-rpc",
   "crates/vitre-sidecar",
   "third_party/ztracing",
