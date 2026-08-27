@@ -14,11 +14,12 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, ResizableState, Sizable as _,
-    StyledExt as _,
+    StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex, h_resizable,
     input::{InputEvent, Textarea, TextareaState},
     menu::{DropdownMenu as _, PopupMenuItem},
+    notification::Notification,
     resizable_panel,
     text::TextView,
     v_flex,
@@ -54,6 +55,8 @@ pub struct ChatApp {
     pending_revert: Option<MessageId>,
     /// A `ThreadCheckpointRevert` is in flight.
     reverting: bool,
+    /// Activity (tool) rows expanded to show their payload detail.
+    expanded_activities: HashSet<String>,
     /// Timeline scroll anchoring: keep pinned to the bottom while streaming
     /// unless the user scrolled away (Electron's `timelineScrollAnchoring`).
     timeline_scroll: ScrollHandle,
@@ -145,6 +148,34 @@ fn activity_icon(kind: &str) -> IconName {
     } else {
         IconName::Settings2
     }
+}
+
+/// Expanded tool-row detail: a well-known string payload field when present
+/// (command/detail/preview/text/path), else the pretty-printed payload.
+fn activity_detail(activity: &OrchestrationThreadActivity) -> Option<String> {
+    const MAX_LEN: usize = 4000;
+    let payload = activity.payload.as_object()?;
+    if payload.is_empty() {
+        return None;
+    }
+    let text = ["command", "detail", "preview", "text", "path"]
+        .iter()
+        .find_map(|key| payload.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .or_else(|| serde_json::to_string_pretty(&activity.payload).ok())?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    let mut text = text;
+    if text.len() > MAX_LEN {
+        let mut end = MAX_LEN;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push('…');
+    }
+    Some(text)
 }
 
 /// A turn's timeline interleaves messages and activity (tool) rows in
@@ -278,6 +309,7 @@ impl ChatApp {
             input_draft: None,
             pending_revert: None,
             reverting: false,
+            expanded_activities: HashSet::new(),
             timeline_scroll: ScrollHandle::new(),
             stick_to_bottom: true,
             sidebar_resize: cx.new(|_| ResizableState::default()),
@@ -285,7 +317,7 @@ impl ChatApp {
         }
     }
 
-    fn new_thread(&mut self, cx: &mut Context<Self>) {
+    fn new_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -295,8 +327,8 @@ impl ChatApp {
             .as_ref()
             .and_then(|snapshot| snapshot.projects.first().cloned())
         else {
-            self.last_error = Some("no project yet — open a folder first".into());
-            cx.notify();
+            // Toast, not banner: the banner only renders with an open thread.
+            window.push_notification(Notification::error("No project yet — open a folder."), cx);
             return;
         };
         let session = client.sessions().borrow().clone();
@@ -308,8 +340,7 @@ impl ChatApp {
             .clone()
             .or_else(|| default_model_selection(&session.config))
         else {
-            self.last_error = Some("no provider configured".into());
-            cx.notify();
+            window.push_notification(Notification::error("No provider configured."), cx);
             return;
         };
         let thread_id = ThreadId(fresh_id("vitre-thread"));
@@ -328,19 +359,23 @@ impl ChatApp {
             worktree_path: None,
         };
         self.last_error = None;
-        cx.spawn(
-            async move |this, cx| match client.dispatch(&command).await {
+        cx.spawn_in(window, async move |this, cx| {
+            match client.dispatch(&command).await {
                 Ok(_) => {
                     let _ = this.update(cx, |app, cx| app.select_thread(thread_id, cx));
                 }
                 Err(error) => {
-                    let _ = this.update(cx, |app, cx| {
-                        app.last_error = Some(format!("new thread failed: {error:?}").into());
-                        cx.notify();
+                    let _ = this.update_in(cx, |_, window, cx| {
+                        window.push_notification(
+                            Notification::error(SharedString::from(format!(
+                                "New thread failed: {error:?}"
+                            ))),
+                            cx,
+                        );
                     });
                 }
-            },
-        )
+            }
+        })
         .detach();
     }
 
@@ -1295,7 +1330,9 @@ impl ChatApp {
                             .text_color(cx.theme().muted_foreground)
                             .hover(|style| style.bg(cx.theme().sidebar_accent))
                             .child(Icon::new(IconName::Plus).size_4())
-                            .on_click(cx.listener(|this, _, _, cx| this.new_thread(cx))),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.new_thread(window, cx)),
+                            ),
                     ),
             )
             .child(
@@ -1521,13 +1558,28 @@ impl ChatApp {
                             OrchestrationThreadActivityTone::Approval => cx.theme().warning,
                             _ => cx.theme().foreground.opacity(0.82),
                         };
-                        rows = rows.child(
+                        let expanded = self.expanded_activities.contains(&activity.id.0);
+                        let detail = activity_detail(activity);
+                        let activity_id = activity.id.0.clone();
+                        let mut block = v_flex().child(
                             h_flex()
+                                .id(SharedString::from(format!("act-{}", activity.id.0)))
                                 .px_0p5()
                                 .py_0p5()
                                 .gap_1p5()
                                 .items_center()
                                 .rounded(cx.theme().radius)
+                                .when(detail.is_some(), |this| {
+                                    this.cursor_pointer()
+                                        .hover(|style| style.bg(cx.theme().secondary))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if !this.expanded_activities.remove(&activity_id) {
+                                                this.expanded_activities
+                                                    .insert(activity_id.clone());
+                                            }
+                                            cx.notify();
+                                        }))
+                                })
                                 .child(
                                     Icon::new(activity_icon(&activity.kind.0))
                                         .size_3p5()
@@ -1542,6 +1594,28 @@ impl ChatApp {
                                         .child(SharedString::from(activity.summary.0.clone())),
                                 ),
                         );
+                        if expanded && let Some(detail) = detail {
+                            // Electron parity: expanded tool detail is 11px
+                            // mono under the row.
+                            block = block.child(
+                                div()
+                                    .id(SharedString::from(format!("act-detail-{}", activity.id.0)))
+                                    .ml_5()
+                                    .mt_0p5()
+                                    .max_h(px(240.))
+                                    .overflow_y_scroll()
+                                    .rounded(cx.theme().radius)
+                                    .bg(cx.theme().secondary)
+                                    .px_2p5()
+                                    .py_2()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .whitespace_normal()
+                                    .child(SharedString::from(detail)),
+                            );
+                        }
+                        rows = rows.child(block);
                     }
                 }
             }
