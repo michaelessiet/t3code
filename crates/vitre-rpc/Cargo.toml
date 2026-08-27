@@ -14,10 +14,15 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
+vitre-contracts.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
 vitre-sidecar.workspace = true
+vitre-state.workspace = true
 
 [[example]]
 name = "spike_rpc"
+
+[[example]]
+name = "spike_typed"

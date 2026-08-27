@@ -41,6 +41,10 @@ impl EnvironmentHttp {
         }
     }
 
+    pub(crate) fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
     /// Exchange the sidecar bootstrap token (delivered to the server via the
     /// stdin envelope) for a bearer access token.
     pub async fn exchange_bootstrap_token(
@@ -88,7 +92,7 @@ impl EnvironmentHttp {
     }
 }
 
-async fn check(response: reqwest::Response) -> Result<reqwest::Response, RpcError> {
+pub(crate) async fn check(response: reqwest::Response) -> Result<reqwest::Response, RpcError> {
     let status = response.status();
     if status.is_success() {
         return Ok(response);

@@ -14,7 +14,12 @@ pub mod envelope;
 pub mod error;
 pub mod http;
 pub mod session;
+pub mod snapshots;
+pub mod supervisor;
+pub mod typed;
 
 pub use error::RpcError;
 pub use http::EnvironmentHttp;
 pub use session::{RpcSession, StreamEvent, Subscription};
+pub use supervisor::{EnvironmentSupervisor, PreparedTarget, SessionHandle, wait_for_session};
+pub use typed::{TypedError, TypedStreamEvent, TypedSubscription};

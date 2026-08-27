@@ -88,6 +88,12 @@ jobs:
       - name: Live-server wire spike
         run: cargo run -p vitre-rpc --example spike_rpc
 
+      # Typed-layer tripwire: generated method table + HTTP snapshot loaders +
+      # reconnect supervisor, including a forced sidecar restart with a
+      # ShellProjection afterSequence resume.
+      - name: Live-server typed spike
+        run: cargo run -p vitre-rpc --example spike_typed
+
   licenses:
     name: cargo-deny (licensing firewall)
     runs-on: blacksmith-8vcpu-ubuntu-2404
