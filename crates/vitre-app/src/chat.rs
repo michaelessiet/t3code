@@ -8,12 +8,18 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use gpui::{Context, Entity, SharedString, Subscription, Window, div, prelude::*, px, relative};
+use gpui::{
+    Context, Entity, ScrollHandle, SharedString, Subscription, Window, div, prelude::*, px,
+    relative,
+};
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, ResizableState, Sizable as _,
+    StyledExt as _,
     button::{Button, ButtonVariants as _},
-    h_flex,
+    h_flex, h_resizable,
     input::{InputEvent, Textarea, TextareaState},
+    menu::{DropdownMenu as _, PopupMenuItem},
+    resizable_panel,
     text::TextView,
     v_flex,
 };
@@ -22,7 +28,7 @@ use tokio::sync::watch;
 use vitre_client::{EnvironmentClient, ShellState, SyncPhase, ThreadHandle, ThreadState};
 use vitre_contracts::{
     ApprovalRequestId, ClientOrchestrationCommand, CommandId, MessageId, ModelSelection,
-    OrchestrationMessage, OrchestrationMessageRole, OrchestrationSessionStatus,
+    NonNegativeInt, OrchestrationMessage, OrchestrationMessageRole, OrchestrationSessionStatus,
     OrchestrationThread, OrchestrationThreadActivity, OrchestrationThreadActivityTone,
     OrchestrationThreadShell, ProviderApprovalDecision, ProviderInteractionMode, RuntimeMode,
     ServerConfig, ThreadId, TrimmedNonEmptyString,
@@ -44,6 +50,16 @@ pub struct ChatApp {
     responding: HashSet<String>,
     /// Local draft state for the active pending user-input request.
     input_draft: Option<InputDraft>,
+    /// Two-step revert confirm: the user message armed for revert.
+    pending_revert: Option<MessageId>,
+    /// A `ThreadCheckpointRevert` is in flight.
+    reverting: bool,
+    /// Timeline scroll anchoring: keep pinned to the bottom while streaming
+    /// unless the user scrolled away (Electron's `timelineScrollAnchoring`).
+    timeline_scroll: ScrollHandle,
+    stick_to_bottom: bool,
+    /// Sidebar ⟷ chat split state (drag-resizable, Electron parity).
+    sidebar_resize: Entity<ResizableState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -260,6 +276,11 @@ impl ChatApp {
             last_error: None,
             responding: HashSet::new(),
             input_draft: None,
+            pending_revert: None,
+            reverting: false,
+            timeline_scroll: ScrollHandle::new(),
+            stick_to_bottom: true,
+            sidebar_resize: cx.new(|_| ResizableState::default()),
             _subscriptions: subscriptions,
         }
     }
@@ -332,6 +353,10 @@ impl ChatApp {
         };
         let handle = client.open_thread(id.clone());
         let mut state_rx = handle.state();
+        self.input_draft = None;
+        self.pending_revert = None;
+        self.stick_to_bottom = true;
+        self.timeline_scroll.scroll_to_bottom();
         self.thread = Some(OpenThread {
             id: id.clone(),
             _handle: handle,
@@ -341,13 +366,20 @@ impl ChatApp {
             loop {
                 let state = state_rx.borrow_and_update().clone();
                 let stop = this
-                    .update(cx, |app, cx| match &mut app.thread {
-                        Some(open) if open.id == id => {
-                            open.state = state;
-                            cx.notify();
-                            false
+                    .update(cx, |app, cx| {
+                        if app.thread.as_ref().is_none_or(|open| open.id != id) {
+                            return true;
                         }
-                        _ => true,
+                        if let Some(open) = &mut app.thread {
+                            open.state = state;
+                        }
+                        // New content keeps the timeline pinned to the bottom
+                        // unless the user scrolled away.
+                        if app.stick_to_bottom {
+                            app.timeline_scroll.scroll_to_bottom();
+                        }
+                        cx.notify();
+                        false
                     })
                     .unwrap_or(true);
                 if stop || state_rx.changed().await.is_err() {
@@ -594,6 +626,65 @@ impl ChatApp {
         self.dispatch_response(pending.request_id, command, cx);
     }
 
+    /// Two-step checkpoint revert: the first click arms the message's button
+    /// ("Revert?"), the second dispatches `ThreadCheckpointRevert` — standing
+    /// in for Electron's native confirm dialog.
+    fn revert_user_message(
+        &mut self,
+        message_id: MessageId,
+        turn_count: i64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reverting {
+            return;
+        }
+        if self.pending_revert.as_ref() != Some(&message_id) {
+            self.pending_revert = Some(message_id);
+            cx.notify();
+            return;
+        }
+        self.pending_revert = None;
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let Some(open) = &self.thread else {
+            return;
+        };
+        let running = open
+            .state
+            .view
+            .as_ref()
+            .and_then(|view| view.session.as_ref())
+            .is_some_and(|session| session.status == OrchestrationSessionStatus::Running);
+        if running {
+            self.last_error =
+                Some("Interrupt the current turn before reverting checkpoints.".into());
+            cx.notify();
+            return;
+        }
+        let command = ClientOrchestrationCommand::ThreadCheckpointRevert {
+            command_id: CommandId(fresh_id("vitre-cmd")),
+            created_at: tnes(now_iso()),
+            thread_id: open.id.clone(),
+            turn_count: NonNegativeInt(turn_count),
+            r#type: Default::default(),
+        };
+        self.reverting = true;
+        self.last_error = None;
+        cx.spawn(async move |this, cx| {
+            let result = client.dispatch(&command).await;
+            let _ = this.update(cx, |app, cx| {
+                app.reverting = false;
+                if let Err(error) = result {
+                    app.last_error = Some(format!("revert failed: {error:?}").into());
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn shell_threads(&self) -> Vec<OrchestrationThreadShell> {
         let Some(snapshot) = &self.shell.snapshot else {
             return Vec::new();
@@ -611,14 +702,53 @@ impl ChatApp {
         threads
     }
 
-    /// Canonical title comes from the SHELL (meta events are shell-scoped).
-    fn thread_title(&self, id: &ThreadId) -> SharedString {
+    /// The SHELL's copy of a thread — canonical for title/meta (meta events
+    /// are shell-scoped, so the detail projection never sees them).
+    fn shell_thread(&self, id: &ThreadId) -> Option<&OrchestrationThreadShell> {
         self.shell
             .snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.threads.iter().find(|thread| thread.id == *id))
+    }
+
+    /// Canonical title comes from the SHELL (meta events are shell-scoped).
+    fn thread_title(&self, id: &ThreadId) -> SharedString {
+        self.shell_thread(id)
             .map(|thread| thread.title.0.clone().into())
             .unwrap_or_else(|| "(untitled)".into())
+    }
+
+    /// Change the open thread's model (`ThreadMetaUpdate`). Electron persists
+    /// lazily on next turn start; persisting immediately is equivalent for the
+    /// thread's stored selection and keeps the picker stateless.
+    fn set_model(&mut self, selection: ModelSelection, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let Some(open) = &self.thread else {
+            return;
+        };
+        let command = ClientOrchestrationCommand::ThreadMetaUpdate {
+            additional_roots: None,
+            branch: None,
+            command_id: CommandId(fresh_id("vitre-cmd")),
+            expected_branch: None,
+            model_selection: Some(Some(selection)),
+            thread_id: open.id.clone(),
+            title: None,
+            r#type: Default::default(),
+            worktree_path: None,
+        };
+        self.last_error = None;
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = client.dispatch(&command).await {
+                let _ = this.update(cx, |app, cx| {
+                    app.last_error = Some(format!("model change failed: {error:?}").into());
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     /// Composer-top approval panel (`ComposerPendingApprovalPanel`): PENDING
@@ -1118,9 +1248,8 @@ impl ChatApp {
         }
 
         v_flex()
-            .w(px(256.))
+            .w_full()
             .h_full()
-            .flex_shrink_0()
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
             .border_r_1()
@@ -1215,12 +1344,72 @@ impl ChatApp {
                 .and_then(|session| session.last_error.as_ref())
                 .map(|error| error.0.clone().into())
         });
-        let model_label: Option<SharedString> = view.and_then(|view| {
-            view.model_selection
-                .model
-                .as_str()
-                .map(|model| SharedString::from(model.to_string()))
-        });
+        // Model picker: current selection comes from the SHELL copy (meta
+        // events are shell-scoped); options come from the server config.
+        let current_selection: Option<ModelSelection> = self
+            .shell_thread(&open.id)
+            .map(|thread| thread.model_selection.clone())
+            .or_else(|| view.map(|view| view.model_selection.clone()));
+        let current_slug: Option<String> = current_selection
+            .as_ref()
+            .and_then(|selection| selection.model.as_str().map(str::to_string));
+        let current_instance: Option<String> = current_selection
+            .as_ref()
+            .and_then(|selection| selection.instance_id.clone().flatten())
+            .and_then(|value| value.as_str().map(str::to_string));
+        let providers = self
+            .client
+            .as_ref()
+            .and_then(|client| client.sessions().borrow().clone())
+            .map(|session| session.config.providers.clone())
+            .unwrap_or_default();
+        let model_label: SharedString = providers
+            .iter()
+            .flat_map(|provider| provider.models.iter().map(move |model| (provider, model)))
+            .find(|(provider, model)| {
+                Some(&model.slug.0) == current_slug.as_ref()
+                    && (current_instance.is_none()
+                        || Some(&provider.instance_id.0) == current_instance.as_ref())
+            })
+            .map(|(_, model)| SharedString::from(model.name.0.clone()))
+            .or_else(|| current_slug.clone().map(SharedString::from))
+            .unwrap_or_else(|| "Model".into());
+
+        // Revert targets: a user message reverts to the checkpoint BEFORE the
+        // next assistant turn's checkpoint (`checkpointTurnCount - 1`) —
+        // ported from ChatView's `revertTurnCountByUserMessageId`.
+        let revert_turn_counts: HashMap<MessageId, i64> = view
+            .map(|view| {
+                let by_assistant: HashMap<&MessageId, i64> = view
+                    .checkpoints
+                    .iter()
+                    .filter_map(|checkpoint| {
+                        checkpoint
+                            .assistant_message_id
+                            .as_ref()
+                            .map(|id| (id, checkpoint.checkpoint_turn_count.0))
+                    })
+                    .collect();
+                let mut messages: Vec<&OrchestrationMessage> = view.messages.iter().collect();
+                messages.sort_by(|a, b| a.created_at.0.cmp(&b.created_at.0));
+                let mut map = HashMap::new();
+                for (index, message) in messages.iter().enumerate() {
+                    if message.role != OrchestrationMessageRole::User {
+                        continue;
+                    }
+                    for next in &messages[index + 1..] {
+                        if next.role == OrchestrationMessageRole::User {
+                            break;
+                        }
+                        if let Some(count) = by_assistant.get(&next.id) {
+                            map.insert(message.id.clone(), (count - 1).max(0));
+                            break;
+                        }
+                    }
+                }
+                map
+            })
+            .unwrap_or_default();
 
         // Timeline rows (centered, max-w-3xl like the web timeline).
         let mut rows = v_flex()
@@ -1236,8 +1425,53 @@ impl ChatApp {
                     TimelineEntry::Message(message) => {
                         let is_user = message.role == OrchestrationMessageRole::User;
                         if is_user {
+                            let mut line = h_flex().w_full().justify_end().items_center().gap_2();
+                            if let Some(turn_count) = revert_turn_counts.get(&message.id).copied() {
+                                let armed = self.pending_revert.as_ref() == Some(&message.id);
+                                let message_id = message.id.clone();
+                                let button: gpui::AnyElement = if armed {
+                                    Button::new(SharedString::from(format!(
+                                        "revert-{}",
+                                        message.id.0
+                                    )))
+                                    .label("Revert?")
+                                    .danger()
+                                    .outline()
+                                    .xsmall()
+                                    .disabled(self.reverting || running)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.revert_user_message(
+                                            message_id.clone(),
+                                            turn_count,
+                                            cx,
+                                        );
+                                    }))
+                                    .into_any_element()
+                                } else {
+                                    div()
+                                        .id(SharedString::from(format!("revert-{}", message.id.0)))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size_6()
+                                        .rounded(cx.theme().radius)
+                                        .cursor_pointer()
+                                        .text_color(cx.theme().muted_foreground.opacity(0.5))
+                                        .hover(|style| style.bg(cx.theme().secondary))
+                                        .child(Icon::new(IconName::Undo2).size_3())
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.revert_user_message(
+                                                message_id.clone(),
+                                                turn_count,
+                                                cx,
+                                            );
+                                        }))
+                                        .into_any_element()
+                                };
+                                line = line.child(button);
+                            }
                             rows = rows.child(
-                                v_flex().items_end().child(
+                                line.child(
                                     div()
                                         .max_w(relative(0.8))
                                         .rounded(px(16.))
@@ -1406,6 +1640,62 @@ impl ChatApp {
                 .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
                 .into_any_element()
         };
+        // The picker lists every enabled+installed provider's models; picking
+        // one dispatches `ThreadMetaUpdate` (see `set_model`).
+        let model_picker: gpui::AnyElement = {
+            let chat = cx.entity().downgrade();
+            let menu_providers: Vec<_> = providers
+                .iter()
+                .filter(|provider| provider.enabled && provider.installed)
+                .cloned()
+                .collect();
+            let multiple_providers = menu_providers.len() > 1;
+            let current_slug = current_slug.clone();
+            let current_instance = current_instance.clone();
+            Button::new("model-picker")
+                .label(model_label)
+                .ghost()
+                .small()
+                .dropdown_menu(move |mut menu, _window, _cx| {
+                    for provider in &menu_providers {
+                        if multiple_providers {
+                            let name = provider
+                                .display_name
+                                .clone()
+                                .flatten()
+                                .map(|name| name.0)
+                                .unwrap_or_else(|| provider.instance_id.0.clone());
+                            menu = menu.item(PopupMenuItem::label(SharedString::from(name)));
+                        }
+                        for model in &provider.models {
+                            let checked = Some(&model.slug.0) == current_slug.as_ref()
+                                && (current_instance.is_none()
+                                    || Some(&provider.instance_id.0) == current_instance.as_ref());
+                            let selection = ModelSelection {
+                                instance_id: Some(Some(serde_json::Value::String(
+                                    provider.instance_id.0.clone(),
+                                ))),
+                                model: serde_json::Value::String(model.slug.0.clone()),
+                                options: None,
+                                provider: None,
+                            };
+                            let chat = chat.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(SharedString::from(model.name.0.clone()))
+                                    .checked(checked)
+                                    .on_click(move |_, _, cx| {
+                                        let selection = selection.clone();
+                                        let _ = chat.update(cx, |this, cx| {
+                                            this.set_model(selection, cx);
+                                        });
+                                    }),
+                            );
+                        }
+                    }
+                    menu
+                })
+                .into_any_element()
+        };
         let footer: gpui::AnyElement = if let Some(approval) = &active_approval {
             // The bottom toolbar is replaced by the approval actions while an
             // approval is pending (Electron's ChatComposer does the same).
@@ -1417,12 +1707,7 @@ impl ChatApp {
                 .pt_1()
                 .justify_between()
                 .items_center()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .children(model_label),
-                )
+                .child(model_picker)
                 .child(send_button)
                 .into_any_element()
         };
@@ -1484,6 +1769,18 @@ impl ChatApp {
                 .id("messages")
                 .flex_1()
                 .overflow_y_scroll()
+                .track_scroll(&self.timeline_scroll)
+                .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                    // Offsets grow negative downward; "at bottom" within 60px
+                    // re-arms anchoring, scrolling further up releases it.
+                    let offset = this.timeline_scroll.offset();
+                    let max = this.timeline_scroll.max_offset();
+                    let at_bottom = offset.y <= -(max.y - px(60.));
+                    if this.stick_to_bottom != at_bottom {
+                        this.stick_to_bottom = at_bottom;
+                        cx.notify();
+                    }
+                }))
                 .child(rows),
         )
         .child(composer)
@@ -1518,8 +1815,19 @@ impl Render for ChatApp {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.render_sidebar(cx))
-            .child(self.render_chat(cx))
+            .child(
+                div().flex_1().min_w_0().h_full().child(
+                    h_resizable("workspace")
+                        .with_state(&self.sidebar_resize)
+                        .child(
+                            resizable_panel()
+                                .size(px(256.))
+                                .size_range(px(208.)..px(480.))
+                                .child(self.render_sidebar(cx).into_any_element()),
+                        )
+                        .child(resizable_panel().child(self.render_chat(cx))),
+                ),
+            )
             .children(
                 active_plan
                     .as_ref()
