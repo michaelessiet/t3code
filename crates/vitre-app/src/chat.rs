@@ -20,6 +20,7 @@ use gpui_component::{
     input::{InputEvent, Textarea, TextareaState},
     menu::{DropdownMenu as _, PopupMenuItem},
     notification::Notification,
+    progress::ProgressCircle,
     resizable_panel,
     text::TextView,
     v_flex,
@@ -39,7 +40,8 @@ use vitre_contracts::{
 use vitre_sidecar::SupervisorStatus;
 use vitre_state::session_logic::{
     ActivePlanState, ApprovalRequestKind, PendingApproval, PendingUserInput, PlanStepStatus,
-    derive_active_plan_state, derive_pending_approvals, derive_pending_user_inputs,
+    derive_active_plan_state, derive_latest_context_window_snapshot, derive_pending_approvals,
+    derive_pending_user_inputs,
 };
 
 pub struct ChatApp {
@@ -170,6 +172,37 @@ fn active_mention_token(text: &str, cursor: usize) -> Option<(usize, String)> {
         return None;
     }
     Some((start, query.to_string()))
+}
+
+/// Compact token counts for the context meter — "842", "8.4k", "84k", "1.2m"
+/// (`formatContextWindowTokens` port).
+fn format_context_tokens(value: f64) -> String {
+    if !value.is_finite() {
+        return "0".into();
+    }
+    let one_decimal = |scaled: f64, suffix: &str| {
+        let text = format!("{scaled:.1}");
+        format!("{}{suffix}", text.strip_suffix(".0").unwrap_or(&text))
+    };
+    if value < 1_000.0 {
+        format!("{}", value.round() as i64)
+    } else if value < 10_000.0 {
+        one_decimal(value / 1_000.0, "k")
+    } else if value < 1_000_000.0 {
+        format!("{}k", (value / 1_000.0).round() as i64)
+    } else {
+        one_decimal(value / 1_000_000.0, "m")
+    }
+}
+
+/// "7.5%" below ten percent, "42%" above (`formatPercentage` port).
+fn format_context_percentage(value: f64) -> String {
+    if value < 10.0 {
+        let text = format!("{value:.1}");
+        format!("{}%", text.strip_suffix(".0").unwrap_or(&text))
+    } else {
+        format!("{}%", value.round() as i64)
+    }
 }
 
 /// Render a path as a composer mention token (quoted when it has spaces).
@@ -1930,6 +1963,52 @@ impl ChatApp {
                 })
                 .into_any_element()
         };
+        // Context meter (ContextWindowMeter port): usage ring beside the send
+        // button, latest `context-window.updated` payload behind it. Electron
+        // shows the detail in a hover popover; a tooltip carries it here.
+        let context_meter: Option<gpui::AnyElement> = view
+            .and_then(|view| derive_latest_context_window_snapshot(&view.activities))
+            .map(|usage| {
+                let percentage = usage.used_percentage.unwrap_or(0.0).clamp(0.0, 100.0);
+                let overloaded = percentage > 90.0;
+                let color = if overloaded {
+                    cx.theme().danger
+                } else {
+                    cx.theme().muted_foreground.opacity(0.72)
+                };
+                let mut tip = match (usage.used_percentage, usage.max_tokens) {
+                    (Some(pct), Some(max)) => format!(
+                        "Context window {} · {}/{}",
+                        format_context_percentage(pct),
+                        format_context_tokens(usage.used_tokens),
+                        format_context_tokens(max),
+                    ),
+                    _ => format!(
+                        "Context window · {} tokens used",
+                        format_context_tokens(usage.used_tokens)
+                    ),
+                };
+                if let Some(total) = usage.total_processed_tokens.filter(|total| *total > 0.0) {
+                    tip.push_str(&format!(
+                        " · {} total processed",
+                        format_context_tokens(total)
+                    ));
+                }
+                if usage.compacts_automatically {
+                    tip.push_str(" · compacts automatically");
+                }
+                Button::new("context-meter")
+                    .ghost()
+                    .small()
+                    .icon(
+                        ProgressCircle::new("context-ring")
+                            .value(percentage as f32)
+                            .color(color)
+                            .large(),
+                    )
+                    .tooltip(SharedString::from(tip))
+                    .into_any_element()
+            });
         let footer: gpui::AnyElement = if let Some(approval) = &active_approval {
             // The bottom toolbar is replaced by the approval actions while an
             // approval is pending (Electron's ChatComposer does the same).
@@ -1942,7 +2021,13 @@ impl ChatApp {
                 .justify_between()
                 .items_center()
                 .child(model_picker)
-                .child(send_button)
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .children(context_meter)
+                        .child(send_button),
+                )
                 .into_any_element()
         };
         // @-mention autocomplete rows (top of the composer shell). Rows are

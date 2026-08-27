@@ -340,6 +340,55 @@ pub fn derive_active_plan_state(
     })
 }
 
+/// Latest context-window usage, from the newest well-formed
+/// `context-window.updated` activity (`lib/contextWindow.ts` port — only the
+/// fields the meter renders; the per-turn `last*`/breakdown numbers are not
+/// displayed anywhere and are left out).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextWindowSnapshot {
+    pub used_tokens: f64,
+    pub max_tokens: Option<f64>,
+    /// `used/max`, capped at 100. `None` without a max.
+    pub used_percentage: Option<f64>,
+    pub total_processed_tokens: Option<f64>,
+    pub compacts_automatically: bool,
+    pub updated_at: String,
+}
+
+pub fn derive_latest_context_window_snapshot(
+    activities: &[OrchestrationThreadActivity],
+) -> Option<ContextWindowSnapshot> {
+    activities
+        .iter()
+        .rev()
+        .filter(|activity| activity.kind.0 == "context-window.updated")
+        .find_map(|activity| {
+            let payload = activity.payload.as_object()?;
+            let finite = |key: &str| {
+                payload
+                    .get(key)
+                    .and_then(Value::as_f64)
+                    .filter(|v| v.is_finite())
+            };
+            let used_tokens = finite("usedTokens").filter(|used| *used >= 0.0)?;
+            let max_tokens = finite("maxTokens");
+            let used_percentage = max_tokens
+                .filter(|max| *max > 0.0)
+                .map(|max| (used_tokens / max * 100.0).min(100.0));
+            Some(ContextWindowSnapshot {
+                used_tokens,
+                max_tokens,
+                used_percentage,
+                total_processed_tokens: finite("totalProcessedTokens"),
+                compacts_automatically: payload
+                    .get("compactsAutomatically")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                updated_at: activity.created_at.0.clone(),
+            })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,5 +575,67 @@ mod tests {
             compare_activities_by_order(&started, &completed),
             std::cmp::Ordering::Less
         );
+    }
+
+    #[test]
+    fn context_window_snapshot_prefers_latest_valid_activity() {
+        let activities = vec![
+            activity(
+                "c1",
+                "context-window.updated",
+                "2026-01-01T00:00:00.000Z",
+                json!({"usedTokens": 1000.0, "maxTokens": 200000.0}),
+            ),
+            activity(
+                "c2",
+                "context-window.updated",
+                "2026-01-01T00:00:01.000Z",
+                json!({
+                    "usedTokens": 50000.0,
+                    "maxTokens": 200000.0,
+                    "totalProcessedTokens": 1200000.0,
+                    "compactsAutomatically": true
+                }),
+            ),
+            // Newest entry is malformed → falls back to the previous one.
+            activity(
+                "c3",
+                "context-window.updated",
+                "2026-01-01T00:00:02.000Z",
+                json!({"usedTokens": -5.0}),
+            ),
+        ];
+        let snapshot = derive_latest_context_window_snapshot(&activities).expect("snapshot");
+        assert_eq!(snapshot.used_tokens, 50000.0);
+        assert_eq!(snapshot.max_tokens, Some(200000.0));
+        assert_eq!(snapshot.used_percentage, Some(25.0));
+        assert_eq!(snapshot.total_processed_tokens, Some(1200000.0));
+        assert!(snapshot.compacts_automatically);
+        assert_eq!(snapshot.updated_at, "2026-01-01T00:00:01.000Z");
+    }
+
+    #[test]
+    fn context_window_snapshot_without_max_has_no_percentage_and_caps_at_100() {
+        let no_max = vec![activity(
+            "c1",
+            "context-window.updated",
+            "2026-01-01T00:00:00.000Z",
+            json!({"usedTokens": 123.0}),
+        )];
+        let snapshot = derive_latest_context_window_snapshot(&no_max).expect("snapshot");
+        assert_eq!(snapshot.max_tokens, None);
+        assert_eq!(snapshot.used_percentage, None);
+        assert!(!snapshot.compacts_automatically);
+
+        let over = vec![activity(
+            "c2",
+            "context-window.updated",
+            "2026-01-01T00:00:00.000Z",
+            json!({"usedTokens": 300.0, "maxTokens": 200.0}),
+        )];
+        let snapshot = derive_latest_context_window_snapshot(&over).expect("snapshot");
+        assert_eq!(snapshot.used_percentage, Some(100.0));
+
+        assert!(derive_latest_context_window_snapshot(&[]).is_none());
     }
 }
