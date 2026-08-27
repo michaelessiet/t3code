@@ -27,12 +27,14 @@ use gpui_component::{
 use gpui_tokio::Tokio;
 use tokio::sync::watch;
 use vitre_client::{EnvironmentClient, ShellState, SyncPhase, ThreadHandle, ThreadState};
+use vitre_contracts::methods::ProjectsSearchEntries;
 use vitre_contracts::{
     ApprovalRequestId, ClientOrchestrationCommand, CommandId, MessageId, ModelSelection,
     NonNegativeInt, OrchestrationMessage, OrchestrationMessageRole, OrchestrationSessionStatus,
     OrchestrationThread, OrchestrationThreadActivity, OrchestrationThreadActivityTone,
-    OrchestrationThreadShell, ProviderApprovalDecision, ProviderInteractionMode, RuntimeMode,
-    ServerConfig, ThreadId, TrimmedNonEmptyString,
+    OrchestrationThreadShell, ProjectEntry, ProjectEntryKind, ProjectSearchEntriesInput,
+    ProviderApprovalDecision, ProviderInteractionMode, RuntimeMode, ServerConfig, ThreadId,
+    TrimmedNonEmptyString,
 };
 use vitre_sidecar::SupervisorStatus;
 use vitre_state::session_logic::{
@@ -51,6 +53,10 @@ pub struct ChatApp {
     responding: HashSet<String>,
     /// Local draft state for the active pending user-input request.
     input_draft: Option<InputDraft>,
+    /// Active `@`-mention autocomplete in the composer, if any.
+    mention: Option<MentionState>,
+    /// Monotonic mention-search counter; stale results are dropped.
+    mention_generation: u64,
     /// Two-step revert confirm: the user message armed for revert.
     pending_revert: Option<MessageId>,
     /// A `ThreadCheckpointRevert` is in flight.
@@ -73,6 +79,19 @@ struct InputDraft {
     request_id: String,
     question_index: usize,
     selections: HashMap<String, Vec<String>>,
+}
+
+/// The composer's active `@token`. Mentions are plain text on the wire
+/// (`@path` / `@"path with spaces"`, parsed server-side from the message
+/// text), so autocomplete only has to insert text at the token.
+struct MentionState {
+    /// Byte offset of the `@` in the composer text.
+    token_start: usize,
+    /// Text typed after the `@`.
+    query: String,
+    /// Generation of the search whose results are shown / awaited.
+    generation: u64,
+    results: Vec<ProjectEntry>,
 }
 
 struct OpenThread {
@@ -134,6 +153,32 @@ fn relative_time(iso: &str) -> Option<String> {
     } else {
         format!("{}d", delta.num_days())
     })
+}
+
+/// The `@token` the cursor sits at the end of, if any: byte offset of the
+/// `@` plus the query typed after it. Mirrors the Electron composer trigger:
+/// `@` at start-of-text or after whitespace, no spaces/quotes/`@` inside the
+/// typed query (`packages/shared/src/composerInlineTokens.ts`).
+fn active_mention_token(text: &str, cursor: usize) -> Option<(usize, String)> {
+    let head = text.get(..cursor)?;
+    let start = head
+        .rfind(char::is_whitespace)
+        .map(|index| index + head[index..].chars().next().map_or(1, char::len_utf8))
+        .unwrap_or(0);
+    let query = head[start..].strip_prefix('@')?;
+    if query.contains('"') || query.contains('@') {
+        return None;
+    }
+    Some((start, query.to_string()))
+}
+
+/// Render a path as a composer mention token (quoted when it has spaces).
+fn format_mention(path: &str) -> String {
+    if path.chars().any(char::is_whitespace) {
+        format!("@\"{path}\" ")
+    } else {
+        format!("@{path} ")
+    }
 }
 
 fn activity_icon(kind: &str) -> IconName {
@@ -220,10 +265,17 @@ impl ChatApp {
         let subscriptions = vec![cx.subscribe_in(
             &composer,
             window,
-            |this: &mut Self, _, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { shift: false, .. } = event {
-                    this.send(window, cx);
+            |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { shift: false, .. } => {
+                    // While the mention popover is open, Enter accepts the
+                    // top result instead of sending.
+                    let accepted_mention = this.apply_mention(0, window, cx);
+                    if !accepted_mention {
+                        this.send(window, cx);
+                    }
                 }
+                InputEvent::Change => this.sync_mention(cx),
+                _ => {}
             },
         )];
 
@@ -307,6 +359,8 @@ impl ChatApp {
             last_error: None,
             responding: HashSet::new(),
             input_draft: None,
+            mention: None,
+            mention_generation: 0,
             pending_revert: None,
             reverting: false,
             expanded_activities: HashSet::new(),
@@ -389,6 +443,7 @@ impl ChatApp {
         let handle = client.open_thread(id.clone());
         let mut state_rx = handle.state();
         self.input_draft = None;
+        self.mention = None;
         self.pending_revert = None;
         self.stick_to_bottom = true;
         self.timeline_scroll.scroll_to_bottom();
@@ -450,6 +505,7 @@ impl ChatApp {
         }
         self.composer
             .update(cx, |input, cx| input.clean(window, cx));
+        self.mention = None;
         self.last_error = None;
 
         let command = ClientOrchestrationCommand::ThreadTurnStart {
@@ -784,6 +840,110 @@ impl ChatApp {
             }
         })
         .detach();
+    }
+
+    /// Workspace root of the open thread's project — the mention-search cwd.
+    fn open_project_root(&self) -> Option<String> {
+        let open = self.thread.as_ref()?;
+        let project_id = self.shell_thread(&open.id)?.project_id.clone();
+        self.shell
+            .snapshot
+            .as_ref()?
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .map(|project| project.workspace_root.0.clone())
+    }
+
+    /// Recompute the composer's active `@token` and (re-)issue the entry
+    /// search. Previous results stay visible while typing; a generation
+    /// counter drops out-of-order responses.
+    fn sync_mention(&mut self, cx: &mut Context<Self>) {
+        let (value, cursor) = {
+            let state = self.composer.read(cx);
+            (state.value(), state.cursor())
+        };
+        let Some((token_start, query)) = active_mention_token(&value, cursor) else {
+            if self.mention.take().is_some() {
+                cx.notify();
+            }
+            return;
+        };
+        let unchanged = self
+            .mention
+            .as_ref()
+            .is_some_and(|mention| mention.token_start == token_start && mention.query == query);
+        if unchanged {
+            return;
+        }
+        self.mention_generation += 1;
+        let generation = self.mention_generation;
+        let results = self
+            .mention
+            .take()
+            .map(|mention| mention.results)
+            .unwrap_or_default();
+        self.mention = Some(MentionState {
+            token_start,
+            query: query.clone(),
+            generation,
+            results: if query.is_empty() { vec![] } else { results },
+        });
+        cx.notify();
+        if query.is_empty() {
+            return;
+        }
+        let (Some(client), Some(cwd)) = (self.client.clone(), self.open_project_root()) else {
+            return;
+        };
+        let payload = ProjectSearchEntriesInput {
+            cwd: tnes(cwd),
+            limit: 8,
+            query: tnes(query),
+        };
+        cx.spawn(async move |this, cx| {
+            // Search failures just leave the popover as-is (Electron shows
+            // nothing on error too).
+            let Ok(result) = client.call::<ProjectsSearchEntries>(&payload).await else {
+                return;
+            };
+            let _ = this.update(cx, |app, cx| {
+                if let Some(mention) = &mut app.mention
+                    && mention.generation == generation
+                {
+                    mention.results = result.entries;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Replace the composer's `@token` with the picked entry's mention text.
+    /// Returns false when no popover result is available at `index`.
+    fn apply_mention(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(mention) = &self.mention else {
+            return false;
+        };
+        let Some(entry) = mention.results.get(index) else {
+            return false;
+        };
+        let token_start = mention.token_start;
+        let formatted = format_mention(&entry.path.0);
+        self.mention = None;
+        self.composer.update(cx, |state, cx| {
+            let value = state.value();
+            let cursor = state.cursor();
+            if token_start > cursor || cursor > value.len() {
+                return;
+            }
+            let text = format!("{}{}{}", &value[..token_start], formatted, &value[cursor..]);
+            let caret = token_start + formatted.len();
+            state.set_value(text, window, cx);
+            state.set_selected_range(caret..caret, cx);
+        });
+        cx.notify();
+        true
     }
 
     /// Composer-top approval panel (`ComposerPendingApprovalPanel`): PENDING
@@ -1785,6 +1945,55 @@ impl ChatApp {
                 .child(send_button)
                 .into_any_element()
         };
+        // @-mention autocomplete rows (top of the composer shell). Rows are
+        // plain-text inserts: `@path ` (quoted when the path has spaces).
+        let mention_list: Option<gpui::AnyElement> = self
+            .mention
+            .as_ref()
+            .filter(|mention| !mention.results.is_empty())
+            .map(|mention| {
+                let mut list = v_flex()
+                    .w_full()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary);
+                for (index, entry) in mention.results.iter().enumerate() {
+                    let icon = if entry.kind == ProjectEntryKind::Directory {
+                        IconName::Folder
+                    } else {
+                        IconName::File
+                    };
+                    list = list.child(
+                        h_flex()
+                            .id(("mention", index))
+                            .px_3()
+                            .py_1()
+                            .gap_2()
+                            .items_center()
+                            .cursor_pointer()
+                            .text_sm()
+                            .when(index == 0, |row| row.bg(cx.theme().accent))
+                            .hover(|style| style.bg(cx.theme().accent))
+                            .child(
+                                Icon::new(icon)
+                                    .size_3p5()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(SharedString::from(entry.path.0.clone())),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.apply_mention(index, window, cx);
+                            })),
+                    );
+                }
+                list.into_any_element()
+            });
         let composer = div().px_5().pb_4().child(
             v_flex()
                 .w_full()
@@ -1796,6 +2005,7 @@ impl ChatApp {
                 .bg(cx.theme().muted)
                 .overflow_hidden()
                 .children(panel)
+                .children(mention_list)
                 .child(
                     div()
                         .px_2()
@@ -1907,5 +2117,51 @@ impl Render for ChatApp {
                     .as_ref()
                     .map(|plan| self.render_plan_sidebar(plan, cx)),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{active_mention_token, format_mention};
+
+    #[test]
+    fn mention_token_at_start_and_after_whitespace() {
+        assert_eq!(
+            active_mention_token("@src", 4),
+            Some((0, "src".to_string()))
+        );
+        assert_eq!(
+            active_mention_token("fix @cra", 8),
+            Some((4, "cra".to_string()))
+        );
+        assert_eq!(active_mention_token("fix @cra", 4), None);
+        // Cursor mid-token completes the typed prefix only.
+        assert_eq!(active_mention_token("@src tail", 2), Some((0, "s".into())));
+    }
+
+    #[test]
+    fn mention_token_rejects_non_tokens() {
+        assert_eq!(active_mention_token("plain text", 5), None);
+        assert_eq!(active_mention_token("user@host", 9), None);
+        assert_eq!(active_mention_token("@\"quoted", 8), None);
+        assert_eq!(active_mention_token("", 0), None);
+        // Whitespace right before the cursor ends the token.
+        assert_eq!(active_mention_token("@src ", 5), None);
+    }
+
+    #[test]
+    fn mention_token_survives_multibyte_boundaries() {
+        // "日本 @é" — token after a multibyte space-separated word.
+        let text = "日本 @é";
+        assert_eq!(
+            active_mention_token(text, text.len()),
+            Some((7, "é".to_string()))
+        );
+    }
+
+    #[test]
+    fn mention_formatting_quotes_spaces() {
+        assert_eq!(format_mention("src/app.ts"), "@src/app.ts ");
+        assert_eq!(format_mention("My Docs/a.md"), "@\"My Docs/a.md\" ");
     }
 }

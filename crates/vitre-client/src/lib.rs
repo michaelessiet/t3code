@@ -168,6 +168,18 @@ impl EnvironmentClient {
             .call_typed::<OrchestrationDispatchCommand>(command)
             .await
     }
+
+    /// Call any typed (non-stream) RPC method on the current session.
+    pub async fn call<M: RpcMethod>(
+        &self,
+        payload: &M::Payload,
+    ) -> Result<M::Success, TypedError<M::Error>> {
+        let handle = self.supervisor.sessions().borrow().clone();
+        let Some(handle) = handle else {
+            return Err(TypedError::Rpc(RpcError::ConnectionClosed));
+        };
+        handle.session.call_typed::<M>(payload).await
+    }
 }
 
 impl Drop for EnvironmentClient {
