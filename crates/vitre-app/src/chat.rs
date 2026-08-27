@@ -11,6 +11,7 @@ use gpui::{Context, Entity, SharedString, Subscription, Window, div, prelude::*,
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex,
     input::{InputEvent, Textarea, TextareaState},
+    text::TextView,
     v_flex,
 };
 use gpui_tokio::Tokio;
@@ -671,7 +672,20 @@ impl ChatApp {
                                             this.text_color(cx.theme().muted_foreground)
                                                 .child("(empty response)")
                                         } else {
-                                            this.child(SharedString::from(text))
+                                            // Keyed per message: the free
+                                            // `markdown()` helper keys by call
+                                            // site and would collide in this
+                                            // loop.
+                                            this.child(
+                                                TextView::markdown(
+                                                    SharedString::from(format!(
+                                                        "md-{}",
+                                                        message.id.0
+                                                    )),
+                                                    SharedString::from(text),
+                                                )
+                                                .selectable(true),
+                                            )
                                         }
                                     }),
                             );
