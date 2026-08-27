@@ -180,6 +180,20 @@ impl EnvironmentClient {
         };
         handle.session.call_typed::<M>(payload).await
     }
+
+    /// Open a typed stream on the current session. The subscription ends when
+    /// the session drops (reconnect resubscription is the caller's concern —
+    /// domain loops resubscribe by watching [`Self::sessions`]).
+    pub fn subscribe<M: RpcMethod>(
+        &self,
+        payload: &M::Payload,
+    ) -> Result<vitre_rpc::TypedSubscription<M>, RpcError> {
+        let handle = self.supervisor.sessions().borrow().clone();
+        let Some(handle) = handle else {
+            return Err(RpcError::ConnectionClosed);
+        };
+        handle.session.subscribe_typed::<M>(payload)
+    }
 }
 
 impl Drop for EnvironmentClient {
