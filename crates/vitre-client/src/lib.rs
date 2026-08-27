@@ -66,6 +66,9 @@ const RESUBSCRIBE_AFTER_COMPLETION: Duration = Duration::from_secs(2);
 pub struct EnvironmentClient {
     supervisor: Arc<EnvironmentSupervisor>,
     shell_rx: watch::Receiver<ShellState>,
+    /// Sync tasks spawn through this handle so [`Self::open_thread`] works
+    /// from non-runtime threads (e.g. the gpui main thread).
+    runtime: tokio::runtime::Handle,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -73,7 +76,11 @@ impl EnvironmentClient {
     /// Start against a supervised local sidecar. Credentials re-resolve from
     /// the sidecar's status channel on every connection attempt, so restarts
     /// (new port and/or bootstrap token) reconnect automatically.
+    ///
+    /// Must be called within a tokio runtime context (panics otherwise); the
+    /// returned client itself may then be used from any thread.
     pub fn start(sidecar_status: watch::Receiver<SupervisorStatus>) -> Self {
+        let runtime = tokio::runtime::Handle::current();
         let prepare: PrepareFn = Box::new({
             let status = sidecar_status.clone();
             move || {
@@ -104,7 +111,7 @@ impl EnvironmentClient {
 
         // Sidecar status transitions (crash, restart) invalidate the live
         // session immediately instead of waiting for keepalive to notice.
-        let nudge = tokio::spawn({
+        let nudge = runtime.spawn({
             let supervisor = supervisor.clone();
             let mut status = sidecar_status;
             async move {
@@ -118,11 +125,12 @@ impl EnvironmentClient {
         });
 
         let (shell_tx, shell_rx) = watch::channel(ShellState::default());
-        let shell = tokio::spawn(run_shell(supervisor.sessions(), shell_tx));
+        let shell = runtime.spawn(run_shell(supervisor.sessions(), shell_tx));
 
         Self {
             supervisor,
             shell_rx,
+            runtime,
             tasks: vec![nudge, shell],
         }
     }
@@ -140,7 +148,9 @@ impl EnvironmentClient {
     /// Open a durable subscription to one thread. Dropping the handle ends it.
     pub fn open_thread(&self, thread_id: ThreadId) -> ThreadHandle {
         let (tx, rx) = watch::channel(ThreadState::default());
-        let task = tokio::spawn(run_thread(self.supervisor.sessions(), thread_id, tx));
+        let task = self
+            .runtime
+            .spawn(run_thread(self.supervisor.sessions(), thread_id, tx));
         ThreadHandle { state: rx, task }
     }
 

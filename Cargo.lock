@@ -8221,6 +8221,7 @@ name = "vitre-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
@@ -8231,6 +8232,8 @@ dependencies = [
  "raw-window-handle",
  "serde_json",
  "tokio",
+ "vitre-client",
+ "vitre-contracts",
  "vitre-rpc",
  "vitre-sidecar",
 ]
