@@ -7,8 +7,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
-use gpui_component::Root;
+use gpui::{
+    App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, px, size,
+};
+use gpui_component::{Root, Theme, ThemeRegistry};
 use serde_json::Value;
 use vitre_rpc::{EnvironmentHttp, RpcSession};
 use vitre_sidecar::{BackendInfo, SidecarConfig, Supervisor};
@@ -127,6 +129,35 @@ fn main() {
         gpui_tokio::init(cx);
         gpui_component::init(cx);
 
+        // T3 parity: the Electron app renders in DM Sans (OFL, vendored).
+        if let Err(error) = cx.text_system().add_fonts(vec![
+            include_bytes!("../fonts/DMSans_400Regular.ttf").into(),
+            include_bytes!("../fonts/DMSans_400Regular_Italic.ttf").into(),
+            include_bytes!("../fonts/DMSans_500Medium.ttf").into(),
+            include_bytes!("../fonts/DMSans_600SemiBold.ttf").into(),
+            include_bytes!("../fonts/DMSans_700Bold.ttf").into(),
+        ]) {
+            eprintln!("[vitre] failed to load bundled fonts: {error:#}");
+        }
+        // Vitre themes transcribe the Electron app's design tokens
+        // (apps/web/src/index.css); the dark palette is the pure-black
+        // `data-sidebar-version` variant the shell actually runs with.
+        ThemeRegistry::global_mut(cx)
+            .load_themes_from_str(include_str!("../themes/vitre.json"))
+            .expect("vitre.json parses");
+        {
+            let registry = ThemeRegistry::global(cx);
+            let light = registry.themes().get("Vitre Light").cloned();
+            let dark = registry.themes().get("Vitre Dark").cloned();
+            let theme = Theme::global_mut(cx);
+            if let Some(light) = light {
+                theme.light_theme = light;
+            }
+            if let Some(dark) = dark {
+                theme.dark_theme = dark;
+            }
+        }
+
         let supervisor = Arc::new(Supervisor::start(config));
         let status_rx = supervisor.status();
         cx.on_app_quit(move |_| {
@@ -139,6 +170,13 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // Electron parity: hiddenInset titlebar, traffic lights at
+                // (16, 18) (apps/desktop/src/window/DesktopWindow.ts).
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Vitre".into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(16.), px(18.))),
+                }),
                 ..Default::default()
             },
             |window, cx| {
