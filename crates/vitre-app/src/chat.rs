@@ -8,9 +8,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use base64::Engine as _;
 use gpui::{
-    Context, Entity, ScrollHandle, SharedString, Subscription, Window, div, prelude::*, px,
-    relative,
+    Context, Entity, PathPromptOptions, ScrollHandle, SharedString, Subscription, Window, div,
+    prelude::*, px, relative,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, ResizableState, Sizable as _,
@@ -28,6 +29,7 @@ use gpui_component::{
 use gpui_tokio::Tokio;
 use tokio::sync::watch;
 use vitre_client::{EnvironmentClient, ShellState, SyncPhase, ThreadHandle, ThreadState};
+use vitre_contracts::ClientOrchestrationCommandThreadTurnStartMessageAttachments as TurnAttachment;
 use vitre_contracts::methods::ProjectsSearchEntries;
 use vitre_contracts::{
     ApprovalRequestId, ClientOrchestrationCommand, CommandId, MessageId, ModelSelection,
@@ -55,6 +57,8 @@ pub struct ChatApp {
     responding: HashSet<String>,
     /// Local draft state for the active pending user-input request.
     input_draft: Option<InputDraft>,
+    /// Files staged to send with the next turn (data-URL attachments).
+    pending_attachments: Vec<PendingAttachment>,
     /// Active `@`-mention autocomplete in the composer, if any.
     mention: Option<MentionState>,
     /// Monotonic mention-search counter; stale results are dropped.
@@ -81,6 +85,16 @@ struct InputDraft {
     request_id: String,
     question_index: usize,
     selections: HashMap<String, Vec<String>>,
+}
+
+/// A file staged in the composer, already encoded as the wire's data-URL
+/// attachment shape (attachments are inlined into `ThreadTurnStart`).
+struct PendingAttachment {
+    name: String,
+    mime_type: String,
+    size_bytes: i64,
+    data_url: String,
+    is_image: bool,
 }
 
 /// The composer's active `@token`. Mentions are plain text on the wire
@@ -172,6 +186,63 @@ fn active_mention_token(text: &str, cursor: usize) -> Option<(usize, String)> {
         return None;
     }
     Some((start, query.to_string()))
+}
+
+/// Attachment limits, from `packages/contracts/src/orchestration.ts`.
+const MAX_ATTACHMENTS: usize = 8;
+const MAX_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Extension-keyed MIME inference (`inferAttachmentMimeType` port — with no
+/// browser-reported type in a native app, the extension map is the whole
+/// story; unknown extensions fall back to octet-stream).
+fn infer_attachment_mime_type(name: &str) -> &'static str {
+    let extension = name.rsplit_once('.').map(|(_, ext)| ext.to_lowercase());
+    match extension.as_deref() {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("bmp") => "image/bmp",
+        Some("c") | Some("h") => "text/x-c",
+        Some("cjs") | Some("js") | Some("mjs") => "text/javascript",
+        Some("cpp") | Some("hpp") => "text/x-c++",
+        Some("cs") => "text/x-csharp",
+        Some("css") => "text/css",
+        Some("csv") => "text/csv",
+        Some("go") => "text/x-go",
+        Some("html") => "text/html",
+        Some("java") => "text/x-java",
+        Some("json") => "application/json",
+        Some("jsx") => "text/jsx",
+        Some("kt") => "text/x-kotlin",
+        Some("log") | Some("txt") | Some("svelte") | Some("vue") => "text/plain",
+        Some("md") | Some("markdown") => "text/markdown",
+        Some("pdf") => "application/pdf",
+        Some("php") => "text/x-php",
+        Some("py") => "text/x-python",
+        Some("rb") => "text/x-ruby",
+        Some("rs") => "text/x-rust",
+        Some("sh") => "text/x-shellscript",
+        Some("sql") => "application/sql",
+        Some("swift") => "text/x-swift",
+        Some("toml") => "application/toml",
+        Some("ts") | Some("tsx") => "application/typescript",
+        Some("xml") => "application/xml",
+        Some("yaml") | Some("yml") => "application/yaml",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Compact "512 B" / "84 KB" / "9.6 MB" for attachment chips.
+fn format_attachment_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
 }
 
 /// Compact token counts for the context meter — "842", "8.4k", "84k", "1.2m"
@@ -392,6 +463,7 @@ impl ChatApp {
             last_error: None,
             responding: HashSet::new(),
             input_draft: None,
+            pending_attachments: Vec::new(),
             mention: None,
             mention_generation: 0,
             pending_revert: None,
@@ -477,6 +549,7 @@ impl ChatApp {
         let mut state_rx = handle.state();
         self.input_draft = None;
         self.mention = None;
+        self.pending_attachments.clear();
         self.pending_revert = None;
         self.stick_to_bottom = true;
         self.timeline_scroll.scroll_to_bottom();
@@ -540,6 +613,29 @@ impl ChatApp {
             .update(cx, |input, cx| input.clean(window, cx));
         self.mention = None;
         self.last_error = None;
+        let attachments = std::mem::take(&mut self.pending_attachments)
+            .into_iter()
+            .map(|attachment| {
+                let data_url = tnes(attachment.data_url);
+                let mime_type = tnes(attachment.mime_type);
+                let name = tnes(attachment.name);
+                if attachment.is_image {
+                    TurnAttachment::Image {
+                        data_url,
+                        mime_type,
+                        name,
+                        size_bytes: attachment.size_bytes,
+                    }
+                } else {
+                    TurnAttachment::File {
+                        data_url,
+                        mime_type,
+                        name,
+                        size_bytes: attachment.size_bytes,
+                    }
+                }
+            })
+            .collect();
 
         let command = ClientOrchestrationCommand::ThreadTurnStart {
             bootstrap: None,
@@ -551,7 +647,7 @@ impl ChatApp {
                 .flatten()
                 .unwrap_or(ProviderInteractionMode::Default),
             message: vitre_contracts::ClientOrchestrationCommandThreadTurnStartMessage {
-                attachments: vec![],
+                attachments,
                 message_id: MessageId(fresh_id("vitre-msg")),
                 role: Default::default(),
                 text: tnes(text),
@@ -977,6 +1073,68 @@ impl ChatApp {
         });
         cx.notify();
         true
+    }
+
+    /// Stage files via the native open dialog. Files are read immediately and
+    /// held as data URLs (the wire inlines attachments into `ThreadTurnStart`),
+    /// with Electron's caps: 8 per message, 10MB each.
+    fn attach_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread.is_none() {
+            return;
+        }
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let _ = this.update_in(cx, |app, window, cx| {
+                let mut error: Option<String> = None;
+                for path in paths {
+                    if app.pending_attachments.len() >= MAX_ATTACHMENTS {
+                        error = Some(format!(
+                            "You can attach up to {MAX_ATTACHMENTS} files per message."
+                        ));
+                        break;
+                    }
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "file".to_string());
+                    let bytes = match std::fs::read(&path) {
+                        Ok(bytes) => bytes,
+                        Err(read_error) => {
+                            error = Some(format!("Could not read '{name}': {read_error}"));
+                            continue;
+                        }
+                    };
+                    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
+                        error = Some(format!("'{name}' exceeds the 10MB attachment limit."));
+                        continue;
+                    }
+                    let mime_type = infer_attachment_mime_type(&name);
+                    app.pending_attachments.push(PendingAttachment {
+                        data_url: format!(
+                            "data:{mime_type};base64,{}",
+                            base64::engine::general_purpose::STANDARD.encode(&bytes)
+                        ),
+                        name,
+                        mime_type: mime_type.to_string(),
+                        size_bytes: bytes.len() as i64,
+                        is_image: mime_type.starts_with("image/"),
+                    });
+                }
+                if let Some(error) = error {
+                    window.push_notification(Notification::error(SharedString::from(error)), cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Composer-top approval panel (`ComposerPendingApprovalPanel`): PENDING
@@ -2020,7 +2178,22 @@ impl ChatApp {
                 .pt_1()
                 .justify_between()
                 .items_center()
-                .child(model_picker)
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(
+                            Button::new("attach")
+                                .ghost()
+                                .small()
+                                .icon(Icon::new(IconName::Plus))
+                                .tooltip("Attach files")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.attach_files(window, cx);
+                                })),
+                        )
+                        .child(model_picker),
+                )
                 .child(
                     h_flex()
                         .gap_1()
@@ -2079,6 +2252,66 @@ impl ChatApp {
                 }
                 list.into_any_element()
             });
+        // Staged attachment chips (name + size + remove), Electron's chip row
+        // above the textarea.
+        let attachment_chips: Option<gpui::AnyElement> = (!self.pending_attachments.is_empty())
+            .then(|| {
+                let mut chips = h_flex().flex_wrap().gap_1p5().px_3().pt_2();
+                for (index, attachment) in self.pending_attachments.iter().enumerate() {
+                    let icon = if attachment.is_image {
+                        IconName::Eye
+                    } else {
+                        IconName::File
+                    };
+                    chips = chips.child(
+                        h_flex()
+                            .id(("attachment", index))
+                            .gap_1p5()
+                            .items_center()
+                            .pl_2()
+                            .pr_1()
+                            .py_1()
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().secondary)
+                            .text_xs()
+                            .child(
+                                Icon::new(icon)
+                                    .size_3()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .child(
+                                div()
+                                    .max_w(px(180.))
+                                    .truncate()
+                                    .child(SharedString::from(attachment.name.clone())),
+                            )
+                            .child(div().text_color(cx.theme().muted_foreground).child(
+                                SharedString::from(format_attachment_size(
+                                    attachment.size_bytes.max(0) as u64,
+                                )),
+                            ))
+                            .child(
+                                div()
+                                    .id(("attachment-remove", index))
+                                    .cursor_pointer()
+                                    .rounded(px(4.))
+                                    .p_0p5()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .hover(|style| style.bg(cx.theme().accent))
+                                    .child(Icon::new(IconName::Close).size_3())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if index < this.pending_attachments.len() {
+                                            this.pending_attachments.remove(index);
+                                            cx.notify();
+                                        }
+                                    })),
+                            ),
+                    );
+                }
+                chips.into_any_element()
+            });
         let composer = div().px_5().pb_4().child(
             v_flex()
                 .w_full()
@@ -2091,6 +2324,7 @@ impl ChatApp {
                 .overflow_hidden()
                 .children(panel)
                 .children(mention_list)
+                .children(attachment_chips)
                 .child(
                     div()
                         .px_2()
