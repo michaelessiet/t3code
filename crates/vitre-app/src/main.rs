@@ -267,6 +267,12 @@ fn main() {
                 ..Default::default()
             },
             |window, cx| {
+                gpui_component::Theme::sync_system_appearance(Some(window), cx);
+                window
+                    .observe_window_appearance(|window, cx| {
+                        gpui_component::Theme::sync_system_appearance(Some(window), cx);
+                    })
+                    .detach();
                 let shell = cx.new(|cx| VitreShell::new(status_rx, cx));
                 cx.new(|cx| Root::new(shell, window, cx))
             },
