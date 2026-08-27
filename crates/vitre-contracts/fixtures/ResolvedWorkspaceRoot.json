@@ -1,0 +1,11 @@
+{
+  "encoded": {
+    "ref": {
+      "kind": "path",
+      "path": "/tmp/vitre-fixture"
+    },
+    "repositoryIdentity": null,
+    "status": "ok"
+  },
+  "schema": "ResolvedWorkspaceRoot"
+}

@@ -1,0 +1,8 @@
+{
+  "encoded": {
+    "fromTurnCount": 1,
+    "threadId": "thread-fixture-01",
+    "toTurnCount": 3
+  },
+  "schema": "OrchestrationTurnDiffRange"
+}

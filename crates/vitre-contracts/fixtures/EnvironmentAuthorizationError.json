@@ -1,0 +1,8 @@
+{
+  "encoded": {
+    "_tag": "EnvironmentAuthorizationError",
+    "message": "missing scope",
+    "requiredScope": "orchestration:read"
+  },
+  "schema": "EnvironmentAuthorizationError"
+}

@@ -1,0 +1,12 @@
+{
+  "encoded": {
+    "message": {
+      "_tag": "Some",
+      "value": "delivered"
+    },
+    "pid": 1234,
+    "signal": "SIGINT",
+    "signaled": true
+  },
+  "schema": "ServerSignalProcessResult"
+}
