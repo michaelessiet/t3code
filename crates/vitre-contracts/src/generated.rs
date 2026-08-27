@@ -49,9 +49,6 @@ pub enum AssetAttachmentNotFoundErrorTag {
     #[default]
     #[serde(rename = "AssetAttachmentNotFoundError")]
     AssetAttachmentNotFoundError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,9 +76,6 @@ pub enum AssetPreviewTypeValidationErrorTag {
     #[default]
     #[serde(rename = "AssetPreviewTypeValidationError")]
     AssetPreviewTypeValidationError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,9 +91,6 @@ pub enum AssetProjectFaviconInspectionErrorTag {
     #[default]
     #[serde(rename = "AssetProjectFaviconInspectionError")]
     AssetProjectFaviconInspectionError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,9 +105,6 @@ pub enum AssetProjectFaviconNotFoundErrorTag {
     #[default]
     #[serde(rename = "AssetProjectFaviconNotFoundError")]
     AssetProjectFaviconNotFoundError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -132,9 +120,6 @@ pub enum AssetProjectFaviconResolutionErrorTag {
     #[default]
     #[serde(rename = "AssetProjectFaviconResolutionError")]
     AssetProjectFaviconResolutionError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -171,9 +156,6 @@ pub enum AssetSigningKeyLoadErrorTag {
     #[default]
     #[serde(rename = "AssetSigningKeyLoadError")]
     AssetSigningKeyLoadError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -189,9 +171,6 @@ pub enum AssetWorkspaceAssetInspectionErrorTag {
     #[default]
     #[serde(rename = "AssetWorkspaceAssetInspectionError")]
     AssetWorkspaceAssetInspectionError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -206,9 +185,6 @@ pub enum AssetWorkspaceAssetNotFoundErrorTag {
     #[default]
     #[serde(rename = "AssetWorkspaceAssetNotFoundError")]
     AssetWorkspaceAssetNotFoundError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -223,9 +199,6 @@ pub enum AssetWorkspaceContextNotFoundErrorTag {
     #[default]
     #[serde(rename = "AssetWorkspaceContextNotFoundError")]
     AssetWorkspaceContextNotFoundError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -241,9 +214,6 @@ pub enum AssetWorkspaceContextResolutionErrorTag {
     #[default]
     #[serde(rename = "AssetWorkspaceContextResolutionError")]
     AssetWorkspaceContextResolutionError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -259,9 +229,6 @@ pub enum AssetWorkspacePathValidationErrorTag {
     #[default]
     #[serde(rename = "AssetWorkspacePathValidationError")]
     AssetWorkspacePathValidationError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -277,9 +244,6 @@ pub enum AssetWorkspaceResolutionErrorTag {
     #[default]
     #[serde(rename = "AssetWorkspaceResolutionError")]
     AssetWorkspaceResolutionError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -295,9 +259,6 @@ pub enum AssetWorkspaceRootNormalizationErrorTag {
     #[default]
     #[serde(rename = "AssetWorkspaceRootNormalizationError")]
     AssetWorkspaceRootNormalizationError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -327,9 +288,6 @@ pub enum AuthAccessStreamClientRemovedEventType {
     #[default]
     #[serde(rename = "clientRemoved")]
     ClientRemoved,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -345,9 +303,6 @@ pub enum AuthAccessStreamClientUpsertedEventType {
     #[default]
     #[serde(rename = "clientUpserted")]
     ClientUpserted,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -362,9 +317,6 @@ pub enum AuthAccessStreamErrorTag {
     #[default]
     #[serde(rename = "AuthAccessStreamError")]
     AuthAccessStreamError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -397,9 +349,6 @@ pub enum AuthAccessStreamPairingLinkRemovedEventType {
     #[default]
     #[serde(rename = "pairingLinkRemoved")]
     PairingLinkRemoved,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -415,9 +364,6 @@ pub enum AuthAccessStreamPairingLinkUpsertedEventType {
     #[default]
     #[serde(rename = "pairingLinkUpserted")]
     PairingLinkUpserted,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -433,9 +379,6 @@ pub enum AuthAccessStreamSnapshotEventType {
     #[default]
     #[serde(rename = "snapshot")]
     Snapshot,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -569,9 +512,6 @@ pub enum BooleanProviderOptionDescriptorType {
     #[default]
     #[serde(rename = "boolean")]
     Boolean,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -599,9 +539,6 @@ pub enum ChatFileAttachmentType {
     #[default]
     #[serde(rename = "file")]
     File,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -620,9 +557,6 @@ pub enum ChatImageAttachmentType {
     #[default]
     #[serde(rename = "image")]
     Image,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -642,9 +576,6 @@ pub enum ClaudeBinaryInstallFailedErrorTag {
     #[default]
     #[serde(rename = "ClaudeBinaryInstallFailedError")]
     ClaudeBinaryInstallFailedError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1088,9 +1019,6 @@ pub enum ClientOrchestrationCommandProjectMetaUpdateType {
     #[default]
     #[serde(rename = "project.meta.update")]
     ProjectMetaUpdate,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1098,9 +1026,6 @@ pub enum ClientOrchestrationCommandProjectDeleteType {
     #[default]
     #[serde(rename = "project.delete")]
     ProjectDelete,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1108,9 +1033,6 @@ pub enum ClientOrchestrationCommandThreadCreateType {
     #[default]
     #[serde(rename = "thread.create")]
     ThreadCreate,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1118,9 +1040,6 @@ pub enum ClientOrchestrationCommandThreadDeleteType {
     #[default]
     #[serde(rename = "thread.delete")]
     ThreadDelete,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1128,9 +1047,6 @@ pub enum ClientOrchestrationCommandThreadArchiveType {
     #[default]
     #[serde(rename = "thread.archive")]
     ThreadArchive,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1138,9 +1054,6 @@ pub enum ClientOrchestrationCommandThreadUnarchiveType {
     #[default]
     #[serde(rename = "thread.unarchive")]
     ThreadUnarchive,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1148,9 +1061,6 @@ pub enum ClientOrchestrationCommandThreadSettleType {
     #[default]
     #[serde(rename = "thread.settle")]
     ThreadSettle,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1158,9 +1068,6 @@ pub enum ClientOrchestrationCommandThreadUnsettleReason {
     #[default]
     #[serde(rename = "user")]
     User,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1168,9 +1075,6 @@ pub enum ClientOrchestrationCommandThreadUnsettleType {
     #[default]
     #[serde(rename = "thread.unsettle")]
     ThreadUnsettle,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1178,9 +1082,6 @@ pub enum ClientOrchestrationCommandThreadSnoozeType {
     #[default]
     #[serde(rename = "thread.snooze")]
     ThreadSnooze,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1188,9 +1089,6 @@ pub enum ClientOrchestrationCommandThreadUnsnoozeReason {
     #[default]
     #[serde(rename = "user")]
     User,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1198,9 +1096,6 @@ pub enum ClientOrchestrationCommandThreadUnsnoozeType {
     #[default]
     #[serde(rename = "thread.unsnooze")]
     ThreadUnsnooze,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1208,9 +1103,6 @@ pub enum ClientOrchestrationCommandThreadMetaUpdateType {
     #[default]
     #[serde(rename = "thread.meta.update")]
     ThreadMetaUpdate,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1218,9 +1110,6 @@ pub enum ClientOrchestrationCommandThreadRuntimeModeSetType {
     #[default]
     #[serde(rename = "thread.runtime-mode.set")]
     ThreadRuntimeModeSet,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1228,9 +1117,6 @@ pub enum ClientOrchestrationCommandThreadInteractionModeSetType {
     #[default]
     #[serde(rename = "thread.interaction-mode.set")]
     ThreadInteractionModeSet,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1339,9 +1225,6 @@ pub enum ClientOrchestrationCommandThreadTurnStartMessageRole {
     #[default]
     #[serde(rename = "user")]
     User,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1366,9 +1249,6 @@ pub enum ClientOrchestrationCommandThreadTurnStartType {
     #[default]
     #[serde(rename = "thread.turn.start")]
     ThreadTurnStart,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1376,9 +1256,6 @@ pub enum ClientOrchestrationCommandThreadTurnInterruptType {
     #[default]
     #[serde(rename = "thread.turn.interrupt")]
     ThreadTurnInterrupt,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1386,9 +1263,6 @@ pub enum ClientOrchestrationCommandThreadApprovalRespondType {
     #[default]
     #[serde(rename = "thread.approval.respond")]
     ThreadApprovalRespond,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1396,9 +1270,6 @@ pub enum ClientOrchestrationCommandThreadUserInputRespondType {
     #[default]
     #[serde(rename = "thread.user-input.respond")]
     ThreadUserInputRespond,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1406,9 +1277,6 @@ pub enum ClientOrchestrationCommandThreadCheckpointRevertType {
     #[default]
     #[serde(rename = "thread.checkpoint.revert")]
     ThreadCheckpointRevert,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -1416,9 +1284,6 @@ pub enum ClientOrchestrationCommandThreadSessionStopType {
     #[default]
     #[serde(rename = "thread.session.stop")]
     ThreadSessionStop,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 /// Void payload — send `{}` on the wire.
@@ -1543,9 +1408,6 @@ pub enum EnvironmentAuthorizationErrorTag {
     #[default]
     #[serde(rename = "EnvironmentAuthorizationError")]
     EnvironmentAuthorizationError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1652,9 +1514,6 @@ pub enum ExternalLauncherBrowserSpawnErrorTag {
     #[default]
     #[serde(rename = "ExternalLauncherBrowserSpawnError")]
     ExternalLauncherBrowserSpawnError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1670,9 +1529,6 @@ pub enum ExternalLauncherCommandNotFoundErrorTag {
     #[default]
     #[serde(rename = "ExternalLauncherCommandNotFoundError")]
     ExternalLauncherCommandNotFoundError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1691,9 +1547,6 @@ pub enum ExternalLauncherEditorSpawnErrorTag {
     #[default]
     #[serde(rename = "ExternalLauncherEditorSpawnError")]
     ExternalLauncherEditorSpawnError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1720,9 +1573,6 @@ pub enum ExternalLauncherUnknownEditorErrorTag {
     #[default]
     #[serde(rename = "ExternalLauncherUnknownEditorError")]
     ExternalLauncherUnknownEditorError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1737,9 +1587,6 @@ pub enum ExternalLauncherUnsupportedEditorErrorTag {
     #[default]
     #[serde(rename = "ExternalLauncherUnsupportedEditorError")]
     ExternalLauncherUnsupportedEditorError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1799,9 +1646,6 @@ pub enum FilesystemBrowseErrorTag {
     #[default]
     #[serde(rename = "FilesystemBrowseError")]
     FilesystemBrowseError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1993,9 +1837,6 @@ pub enum GitCommandErrorTag {
     #[default]
     #[serde(rename = "GitCommandError")]
     GitCommandError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2018,9 +1859,6 @@ pub enum GitManagerErrorTag {
     #[default]
     #[serde(rename = "GitManagerError")]
     GitManagerError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2115,9 +1953,6 @@ pub enum GitPullRequestMaterializationErrorTag {
     #[default]
     #[serde(rename = "GitPullRequestMaterializationError")]
     GitPullRequestMaterializationError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2454,9 +2289,6 @@ pub enum GraphCommandFailedErrorTag {
     #[default]
     #[serde(rename = "GraphCommandFailedError")]
     GraphCommandFailedError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2492,9 +2324,6 @@ pub enum GraphDisabledErrorTag {
     #[default]
     #[serde(rename = "GraphDisabledError")]
     GraphDisabledError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2617,9 +2446,6 @@ pub enum GraphNodeNotFoundErrorTag {
     #[default]
     #[serde(rename = "GraphNodeNotFoundError")]
     GraphNodeNotFoundError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2640,9 +2466,6 @@ pub enum GraphNotBuiltErrorTag {
     #[default]
     #[serde(rename = "GraphNotBuiltError")]
     GraphNotBuiltError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2721,9 +2544,6 @@ pub enum GraphRuntimeUnavailableErrorTag {
     #[default]
     #[serde(rename = "GraphRuntimeUnavailableError")]
     GraphRuntimeUnavailableError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2770,9 +2590,6 @@ pub enum GraphStorePathErrorTag {
     #[default]
     #[serde(rename = "GraphStorePathError")]
     GraphStorePathError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2810,9 +2627,6 @@ pub enum GraphWorkspaceUnknownErrorTag {
     #[default]
     #[serde(rename = "GraphWorkspaceUnknownError")]
     GraphWorkspaceUnknownError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -2997,9 +2811,6 @@ pub enum KeybindingsConfigParseErrorTag {
     #[default]
     #[serde(rename = "KeybindingsConfigParseError")]
     KeybindingsConfigParseError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3185,9 +2996,6 @@ pub enum LspErrorTag {
     #[default]
     #[serde(rename = "LspError")]
     LspError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -3521,9 +3329,6 @@ pub enum OrchestrationDispatchCommandErrorTag {
     #[default]
     #[serde(rename = "OrchestrationDispatchCommandError")]
     OrchestrationDispatchCommandError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4359,9 +4164,6 @@ pub enum OrchestrationGetFullThreadDiffErrorTag {
     #[default]
     #[serde(rename = "OrchestrationGetFullThreadDiffError")]
     OrchestrationGetFullThreadDiffError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4393,9 +4195,6 @@ pub enum OrchestrationGetSnapshotErrorTag {
     #[default]
     #[serde(rename = "OrchestrationGetSnapshotError")]
     OrchestrationGetSnapshotError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4416,9 +4215,6 @@ pub enum OrchestrationGetTurnDiffErrorTag {
     #[default]
     #[serde(rename = "OrchestrationGetTurnDiffError")]
     OrchestrationGetTurnDiffError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4609,9 +4405,6 @@ pub enum OrchestrationReplayEventsErrorTag {
     #[default]
     #[serde(rename = "OrchestrationReplayEventsError")]
     OrchestrationReplayEventsError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4640,9 +4433,6 @@ pub enum OrchestrationSearchMessagesErrorTag {
     #[default]
     #[serde(rename = "OrchestrationSearchMessagesError")]
     OrchestrationSearchMessagesError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4767,9 +4557,6 @@ pub enum OrchestrationShellStreamItemSynchronizedKind {
     #[default]
     #[serde(rename = "synchronized")]
     Synchronized,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -4777,9 +4564,6 @@ pub enum OrchestrationShellStreamItemSnapshotKind {
     #[default]
     #[serde(rename = "snapshot")]
     Snapshot,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5192,9 +4976,6 @@ pub enum PreviewAutomationClientDisconnectedErrorTag {
     #[default]
     #[serde(rename = "PreviewAutomationClientDisconnectedError")]
     PreviewAutomationClientDisconnectedError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -5253,9 +5034,6 @@ pub enum PreviewAutomationControlInterruptedErrorTag {
     #[default]
     #[serde(rename = "PreviewAutomationControlInterruptedError")]
     PreviewAutomationControlInterruptedError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -5345,9 +5123,6 @@ pub enum PreviewAutomationExecutionErrorTag {
     #[default]
     #[serde(rename = "PreviewAutomationExecutionError")]
     PreviewAutomationExecutionError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -5458,9 +5233,6 @@ pub enum PreviewAutomationInvalidSelectorErrorTag {
     #[default]
     #[serde(rename = "PreviewAutomationInvalidSelectorError")]
     PreviewAutomationInvalidSelectorError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -5528,9 +5300,6 @@ pub enum PreviewAutomationMalformedResponseErrorTag {
     #[default]
     #[serde(rename = "PreviewAutomationMalformedResponseError")]
     PreviewAutomationMalformedResponseError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5615,9 +5384,6 @@ pub enum PreviewAutomationNoAvailableHostErrorTag {
     #[default]
     #[serde(rename = "PreviewAutomationNoAvailableHostError")]
     PreviewAutomationNoAvailableHostError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -5721,9 +5487,6 @@ pub enum PreviewAutomationRemoteUnavailableErrorTag {
     #[default]
     #[serde(rename = "PreviewAutomationRemoteUnavailableError")]
     PreviewAutomationRemoteUnavailableError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -5806,9 +5569,6 @@ pub enum PreviewAutomationRequestQueueClosedErrorTag {
     #[default]
     #[serde(rename = "PreviewAutomationRequestQueueClosedError")]
     PreviewAutomationRequestQueueClosedError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 pub type PreviewAutomationRespondSuccess = ();
@@ -5903,9 +5663,6 @@ pub enum PreviewAutomationResultTooLargeErrorTag {
     #[default]
     #[serde(rename = "PreviewAutomationResultTooLargeError")]
     PreviewAutomationResultTooLargeError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -5993,9 +5750,6 @@ pub enum PreviewAutomationTabNotFoundErrorTag {
     #[default]
     #[serde(rename = "PreviewAutomationTabNotFoundError")]
     PreviewAutomationTabNotFoundError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -6078,9 +5832,6 @@ pub enum PreviewAutomationTargetNotEditableErrorTag {
     #[default]
     #[serde(rename = "PreviewAutomationTargetNotEditableError")]
     PreviewAutomationTargetNotEditableError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -6177,9 +5928,6 @@ pub enum PreviewAutomationTimeoutErrorTag {
     #[default]
     #[serde(rename = "PreviewAutomationTimeoutError")]
     PreviewAutomationTimeoutError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -6221,9 +5969,6 @@ pub enum PreviewAutomationUnavailableErrorTag {
     #[default]
     #[serde(rename = "PreviewAutomationUnavailableError")]
     PreviewAutomationUnavailableError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -6231,9 +5976,6 @@ pub enum PreviewAutomationUnavailableErrorCapability {
     #[default]
     #[serde(rename = "preview")]
     Preview,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6283,9 +6025,6 @@ pub enum PreviewAutomationUnsupportedClientErrorTag {
     #[default]
     #[serde(rename = "PreviewAutomationUnsupportedClientError")]
     PreviewAutomationUnsupportedClientError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -6427,9 +6166,6 @@ pub enum PreviewInvalidUrlErrorTag {
     #[default]
     #[serde(rename = "PreviewInvalidUrlError")]
     PreviewInvalidUrlError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -6566,9 +6302,6 @@ pub enum PreviewSessionLookupErrorTag {
     #[default]
     #[serde(rename = "PreviewSessionLookupError")]
     PreviewSessionLookupError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6615,9 +6348,6 @@ pub enum PreviewViewportSettingFillTag {
     #[default]
     #[serde(rename = "fill")]
     Fill,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6633,9 +6363,6 @@ pub enum PreviewViewportSizeTag {
     #[default]
     #[serde(rename = "freeform")]
     Freeform,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6653,9 +6380,6 @@ pub enum PreviewViewportSize1Tag {
     #[default]
     #[serde(rename = "preset")]
     Preset,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -6794,9 +6518,6 @@ pub enum ProjectCopyEntryErrorTag {
     #[default]
     #[serde(rename = "ProjectCopyEntryError")]
     ProjectCopyEntryError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6863,9 +6584,6 @@ pub enum ProjectCreateCommandType {
     #[default]
     #[serde(rename = "project.create")]
     ProjectCreate,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7072,9 +6790,6 @@ pub enum ProjectListEntriesErrorTag {
     #[default]
     #[serde(rename = "ProjectListEntriesError")]
     ProjectListEntriesError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7207,9 +6922,6 @@ pub enum ProjectMutateEntryErrorTag {
     #[default]
     #[serde(rename = "ProjectMutateEntryError")]
     ProjectMutateEntryError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7322,9 +7034,6 @@ pub enum ProjectReadFileErrorTag {
     #[default]
     #[serde(rename = "ProjectReadFileError")]
     ProjectReadFileError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7429,9 +7138,6 @@ pub enum ProjectSearchContentErrorTag {
     #[default]
     #[serde(rename = "ProjectSearchContentError")]
     ProjectSearchContentError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -7580,9 +7286,6 @@ pub enum ProjectSearchEntriesErrorTag {
     #[default]
     #[serde(rename = "ProjectSearchEntriesError")]
     ProjectSearchEntriesError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7628,9 +7331,6 @@ pub enum ProjectWatchErrorTag {
     #[default]
     #[serde(rename = "ProjectWatchError")]
     ProjectWatchError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -7739,9 +7439,6 @@ pub enum ProjectWriteFileErrorTag {
     #[default]
     #[serde(rename = "ProjectWriteFileError")]
     ProjectWriteFileError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7916,9 +7613,6 @@ pub enum RelayClientInstallFailedErrorTag {
     #[default]
     #[serde(rename = "RelayClientInstallFailedError")]
     RelayClientInstallFailedError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -8046,9 +7740,6 @@ pub enum RepositoryIdentityLocatorSource {
     #[default]
     #[serde(rename = "git-remote")]
     GitRemote,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -8206,9 +7897,6 @@ pub enum SelectProviderOptionDescriptorType {
     #[default]
     #[serde(rename = "select")]
     Select,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -8337,9 +8025,6 @@ pub enum ServerConfigStreamKeybindingsUpdatedEventType {
     #[default]
     #[serde(rename = "keybindingsUpdated")]
     KeybindingsUpdated,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -8354,9 +8039,6 @@ pub enum ServerConfigStreamProviderStatusesEventType {
     #[default]
     #[serde(rename = "providerStatuses")]
     ProviderStatuses,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -8371,9 +8053,6 @@ pub enum ServerConfigStreamSettingsUpdatedEventType {
     #[default]
     #[serde(rename = "settingsUpdated")]
     SettingsUpdated,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -8388,9 +8067,6 @@ pub enum ServerConfigStreamSnapshotEventType {
     #[default]
     #[serde(rename = "snapshot")]
     Snapshot,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 /// Void payload — send `{}` on the wire.
@@ -8436,9 +8112,6 @@ pub enum ServerLifecycleStreamReadyEventType {
     #[default]
     #[serde(rename = "ready")]
     Ready,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -8454,9 +8127,6 @@ pub enum ServerLifecycleStreamWelcomeEventType {
     #[default]
     #[serde(rename = "welcome")]
     Welcome,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -8958,9 +8628,6 @@ pub enum ServerProviderUpdateErrorTag {
     #[default]
     #[serde(rename = "ServerProviderUpdateError")]
     ServerProviderUpdateError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -9057,9 +8724,6 @@ pub enum ServerSelfUpdateErrorTag {
     #[default]
     #[serde(rename = "ServerSelfUpdateError")]
     ServerSelfUpdateError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -9568,9 +9232,6 @@ pub enum ServerSettingsErrorTag {
     #[default]
     #[serde(rename = "ServerSettingsError")]
     ServerSettingsError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -10108,9 +9769,6 @@ pub enum SourceControlProviderErrorTag {
     #[default]
     #[serde(rename = "SourceControlProviderError")]
     SourceControlProviderError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -10208,9 +9866,6 @@ pub enum SourceControlRepositoryErrorTag {
     #[default]
     #[serde(rename = "SourceControlRepositoryError")]
     SourceControlRepositoryError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -10478,9 +10133,6 @@ pub enum TerminalCwdNotDirectoryErrorTag {
     #[default]
     #[serde(rename = "TerminalCwdNotDirectoryError")]
     TerminalCwdNotDirectoryError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -10495,9 +10147,6 @@ pub enum TerminalCwdNotFoundErrorTag {
     #[default]
     #[serde(rename = "TerminalCwdNotFoundError")]
     TerminalCwdNotFoundError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -10513,9 +10162,6 @@ pub enum TerminalCwdStatErrorTag {
     #[default]
     #[serde(rename = "TerminalCwdStatError")]
     TerminalCwdStatError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -10676,9 +10322,6 @@ pub enum TerminalHistoryErrorTag {
     #[default]
     #[serde(rename = "TerminalHistoryError")]
     TerminalHistoryError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -10728,9 +10371,6 @@ pub enum TerminalNotRunningErrorTag {
     #[default]
     #[serde(rename = "TerminalNotRunningError")]
     TerminalNotRunningError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -10787,9 +10427,6 @@ pub enum TerminalResizeErrorTag {
     #[default]
     #[serde(rename = "TerminalResizeError")]
     TerminalResizeError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -10843,9 +10480,6 @@ pub enum TerminalSessionLookupErrorTag {
     #[default]
     #[serde(rename = "TerminalSessionLookupError")]
     TerminalSessionLookupError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -10930,9 +10564,6 @@ pub enum TerminalWriteErrorTag {
     #[default]
     #[serde(rename = "TerminalWriteError")]
     TerminalWriteError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -10965,9 +10596,6 @@ pub enum TextGenerationErrorTag {
     #[default]
     #[serde(rename = "TextGenerationError")]
     TextGenerationError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -11699,9 +11327,6 @@ pub enum VcsProcessExitErrorTag {
     #[default]
     #[serde(rename = "VcsProcessExitError")]
     VcsProcessExitError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -11738,9 +11363,6 @@ pub enum VcsProcessMissingExitCodeErrorTag {
     #[default]
     #[serde(rename = "VcsProcessMissingExitCodeError")]
     VcsProcessMissingExitCodeError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -11769,9 +11391,6 @@ pub enum VcsProcessOutputLimitErrorTag {
     #[default]
     #[serde(rename = "VcsProcessOutputLimitError")]
     VcsProcessOutputLimitError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -11808,9 +11427,6 @@ pub enum VcsProcessOutputReadErrorTag {
     #[default]
     #[serde(rename = "VcsProcessOutputReadError")]
     VcsProcessOutputReadError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -11848,9 +11464,6 @@ pub enum VcsProcessSpawnErrorTag {
     #[default]
     #[serde(rename = "VcsProcessSpawnError")]
     VcsProcessSpawnError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -11877,9 +11490,6 @@ pub enum VcsProcessStdinWriteErrorTag {
     #[default]
     #[serde(rename = "VcsProcessStdinWriteError")]
     VcsProcessStdinWriteError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -11905,9 +11515,6 @@ pub enum VcsProcessTimeoutErrorTag {
     #[default]
     #[serde(rename = "VcsProcessTimeoutError")]
     VcsProcessTimeoutError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -11993,9 +11600,6 @@ pub enum VcsRepositoryDetectionErrorTag {
     #[default]
     #[serde(rename = "VcsRepositoryDetectionError")]
     VcsRepositoryDetectionError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -12205,9 +11809,6 @@ pub enum VcsUnsupportedOperationErrorTag {
     #[default]
     #[serde(rename = "VcsUnsupportedOperationError")]
     VcsUnsupportedOperationError,
-    /// Forward compatibility: a literal this build does not know.
-    #[serde(untagged)]
-    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -14090,6 +13691,20 @@ mod fixture_tests {
     fn orchestration_shell_stream_event() {
         assert_fixture_roundtrip::<super::OrchestrationShellStreamEvent>(include_str!(
             "../fixtures/OrchestrationShellStreamEvent.json"
+        ));
+    }
+
+    #[test]
+    fn orchestration_shell_stream_item_event() {
+        assert_fixture_roundtrip::<super::OrchestrationShellStreamItem>(include_str!(
+            "../fixtures/OrchestrationShellStreamItem.event.json"
+        ));
+    }
+
+    #[test]
+    fn orchestration_shell_stream_item_synchronized() {
+        assert_fixture_roundtrip::<super::OrchestrationShellStreamItem>(include_str!(
+            "../fixtures/OrchestrationShellStreamItem.synchronized.json"
         ));
     }
 

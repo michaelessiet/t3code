@@ -396,10 +396,19 @@ impl Generator {
             }
             writeln!(out, "    #[serde(rename = \"{}\")]\n    {variant},", esc(v))?;
         }
-        writeln!(
-            out,
-            "    /// Forward compatibility: a literal this build does not know.\n    #[serde(untagged)]\n    Unknown(String),\n}}\n"
-        )?;
+        // Single-value literals are structural discriminants (effect's
+        // `Schema.Literal` decodes them strictly); an `Unknown` fallback here
+        // would let a variant inside an untagged union match ANY string and
+        // swallow its sibling variants (e.g. every shell stream item decoding
+        // as `Synchronized`). Multi-value enums keep the forward-compat
+        // fallback: they carry data, not structure.
+        if values.len() > 1 {
+            writeln!(
+                out,
+                "    /// Forward compatibility: a literal this build does not know.\n    #[serde(untagged)]\n    Unknown(String),"
+            )?;
+        }
+        writeln!(out, "}}\n")?;
         Ok(out)
     }
 
@@ -754,7 +763,14 @@ impl Generator {
                 bail!("fixture {file_name} references unknown def {schema_name}");
             }
             let ident = self.ident(schema_name);
-            let fn_name = snake(schema_name);
+            // Name the test after the file stem, not the schema: one schema
+            // may have several fixtures (suffixed `<Name>.<variant>.json`).
+            let fn_name = snake(
+                file_name
+                    .trim_end_matches(".json")
+                    .replace('.', "_")
+                    .as_str(),
+            );
             writeln!(
                 out,
                 "    #[test]\n    fn {fn_name}() {{\n        assert_fixture_roundtrip::<super::{ident}>(include_str!(\"../fixtures/{file_name}\"));\n    }}\n"

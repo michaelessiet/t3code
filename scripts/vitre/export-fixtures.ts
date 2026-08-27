@@ -37,7 +37,7 @@ function defNameOf(schema: unknown): string {
 }
 
 let count = 0;
-function fixture(schema: unknown, wire: unknown): void {
+function fixture(schema: unknown, wire: unknown, variant?: string): void {
   const name = defNameOf(schema);
   assertOk(name in generated.$defs, `$defs.${name} exists in contracts.gen.json`);
   // The rpc transport wraps every schema in toCodecJson before encode/decode
@@ -51,9 +51,10 @@ function fixture(schema: unknown, wire: unknown): void {
     `${name}: decode → encode is a fixed point\n  wire: ${JSON.stringify(wire)}\n  got:  ${JSON.stringify(reEncoded)}`,
   );
   const out = sortKeysDeep({ schema: name, encoded: wire });
-  writeFileSync(join(fixturesDir, `${name}.json`), `${JSON.stringify(out, null, 2)}\n`);
+  const fileName = variant === undefined ? `${name}.json` : `${name}.${variant}.json`;
+  writeFileSync(join(fixturesDir, fileName), `${JSON.stringify(out, null, 2)}\n`);
   count += 1;
-  console.log(`ok ${name}`);
+  console.log(`ok ${fileName}`);
 }
 
 mkdirSync(fixturesDir, { recursive: true });
@@ -125,6 +126,22 @@ fixture(c.OrchestrationShellStreamEvent, {
 
 // 9. Branded ID — plain string on the wire.
 fixture(c.ThreadId, "thread-fixture-01");
+
+// 11. subscribeShell stream ITEM (untagged-in-Rust union): an event member
+// must NOT be swallowed by the `synchronized`/`snapshot` members — a
+// mis-decode drops `sequence`/`threadId` and fails the fixed-point assert.
+fixture(
+  c.OrchestrationShellStreamItem,
+  {
+    kind: "thread-removed",
+    sequence: 7,
+    threadId: "thread-fixture-01",
+  },
+  "event",
+);
+
+// 12. ...and the completion-marker member of the same union.
+fixture(c.OrchestrationShellStreamItem, { kind: "synchronized" }, "synchronized");
 
 // 10. Cross-field filter (fromTurnCount <= toTurnCount); def name comes from
 // the filter identifier "OrchestrationTurnDiffRange".

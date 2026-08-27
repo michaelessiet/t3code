@@ -22,10 +22,14 @@
 //! applied here when the reducer reads them.
 
 pub mod shell;
+pub mod shell_sync;
 pub mod thread;
+pub mod thread_sync;
 pub mod wire_opt;
 
 pub use shell::apply_shell_stream_event;
+pub use shell_sync::{ShellApplyOutcome, ShellProjection};
 pub use thread::{
     ThreadDetailReducerResult, apply_thread_detail_event, event_sequence, event_thread_id,
 };
+pub use thread_sync::{ThreadApplyOutcome, ThreadProjection};
