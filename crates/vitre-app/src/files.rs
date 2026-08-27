@@ -14,21 +14,26 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{Context, Entity, MouseButton, SharedString, Subscription, Window, div, prelude::*, px};
+use gpui::{
+    Context, Entity, MouseButton, PromptLevel, SharedString, Subscription, WeakEntity, Window, div,
+    prelude::*, px,
+};
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Editor, EditorState, InputEvent},
+    input::{Editor, EditorState, Input, InputEvent, InputState},
+    menu::{ContextMenuExt as _, PopupMenuItem},
     v_flex,
 };
 use vitre_client::EnvironmentClient;
 use vitre_contracts::methods::{
-    ProjectsListEntries, ProjectsReadFile, ProjectsSubscribeWorkspaceChanges, ProjectsWriteFile,
-    ProjectsWriteFileError as WriteFileErrorUnion, VcsGetFileStatuses,
+    ProjectsListEntries, ProjectsMutateEntry, ProjectsReadFile, ProjectsSubscribeWorkspaceChanges,
+    ProjectsWriteFile, ProjectsWriteFileError as WriteFileErrorUnion, VcsGetFileStatuses,
 };
 use vitre_contracts::{
-    ProjectFileFailure, ProjectListEntriesInput, ProjectReadFileInput, ProjectWatchInput,
+    ProjectFileFailure, ProjectListEntriesInput, ProjectMutateEntryInput,
+    ProjectMutateEntryInputCreateKind, ProjectReadFileInput, ProjectWatchInput,
     ProjectWatchStreamEvent, ProjectWriteFileInput, TrimmedNonEmptyString, VcsFileStatusEntry,
     VcsFileStatusesInput,
 };
@@ -72,6 +77,41 @@ struct OpenFile {
     debounce: u64,
 }
 
+/// Where an in-tree inline edit commits to.
+#[derive(Clone)]
+enum TreeEditTarget {
+    /// New entry under `parent` ("" = workspace root).
+    Create {
+        parent: String,
+        kind: ProjectMutateEntryInputCreateKind,
+    },
+    Rename {
+        path: String,
+    },
+}
+
+/// Inline name editor rendered inside the tree (create placeholder row or a
+/// row's name swapped for an input), the Electron `startRenaming` flow.
+struct TreeEdit {
+    target: TreeEditTarget,
+    input: Entity<InputState>,
+    _subscription: Subscription,
+}
+
+fn parent_dir(path: &str) -> &str {
+    path.rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or("")
+}
+
+fn join_path(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
 pub struct FilesPanel {
     client: Arc<EnvironmentClient>,
     cwd: String,
@@ -84,6 +124,7 @@ pub struct FilesPanel {
     vcs_entries: Vec<VcsFileStatusEntry>,
     vcs: TreeVcsDecorations,
     open: Option<OpenFile>,
+    edit: Option<TreeEdit>,
     editor: Entity<EditorState>,
     /// Bumped on every open/close; async completions for an older file drop.
     open_generation: u64,
@@ -119,6 +160,7 @@ impl FilesPanel {
             vcs_entries: Vec::new(),
             vcs: TreeVcsDecorations::default(),
             open: None,
+            edit: None,
             editor,
             open_generation: 0,
             status: None,
@@ -544,6 +586,206 @@ impl FilesPanel {
         cx.notify();
     }
 
+    /// Begin an inline create/rename edit in the tree (Electron's
+    /// `startRenaming` flow: commit on Enter, cancel on blur).
+    fn start_edit(&mut self, target: TreeEditTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let initial = match &target {
+            TreeEditTarget::Rename { path } => path.rsplit('/').next().unwrap_or(path).to_string(),
+            TreeEditTarget::Create { parent, .. } => {
+                if !parent.is_empty() {
+                    self.expanded.insert(parent.clone());
+                }
+                String::new()
+            }
+        };
+        let input = cx.new(|cx| {
+            let state = InputState::new(window, cx).placeholder("name…");
+            if initial.is_empty() {
+                state
+            } else {
+                state.default_value(initial)
+            }
+        });
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.commit_edit(window, cx),
+                InputEvent::Blur => this.cancel_edit(cx),
+                _ => {}
+            },
+        );
+        input.update(cx, |state, cx| state.focus(window, cx));
+        self.edit = Some(TreeEdit {
+            target,
+            input,
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        if self.edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = self.edit.take() else {
+            return;
+        };
+        cx.notify();
+        let name = edit.input.read(cx).value().trim().to_string();
+        // Same guard the wire enforces: no empty names, no path separators.
+        if name.is_empty() || name.contains('/') {
+            return;
+        }
+        let input = match &edit.target {
+            TreeEditTarget::Create { parent, kind } => ProjectMutateEntryInput::Create {
+                cwd: tnes(&self.cwd),
+                kind: kind.clone(),
+                relative_path: tnes(join_path(parent, &name)),
+            },
+            TreeEditTarget::Rename { path } => {
+                let to = join_path(parent_dir(path), &name);
+                if to == *path {
+                    return;
+                }
+                ProjectMutateEntryInput::Rename {
+                    cwd: tnes(&self.cwd),
+                    from_relative_path: tnes(path),
+                    to_relative_path: tnes(to),
+                }
+            }
+        };
+        self.mutate(input, window, cx);
+    }
+
+    /// Native confirm then delete (Electron uses `window.confirm`).
+    fn confirm_delete(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let receiver = window.prompt(
+            PromptLevel::Warning,
+            &format!("Delete \"{path}\"?"),
+            Some("This cannot be undone."),
+            &["Delete", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if receiver.await != Ok(0) {
+                return;
+            }
+            let _ = this.update_in(cx, |panel, window, cx| {
+                let input = ProjectMutateEntryInput::Delete {
+                    cwd: tnes(&panel.cwd),
+                    relative_path: tnes(&path),
+                };
+                panel.mutate(input, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Dispatch a structural mutation; on success apply the follow-up (open
+    /// created file / follow rename / close deleted) and re-list. Electron
+    /// mutates optimistically and refreshes on failure; refreshing on success
+    /// keeps the same end state with less machinery.
+    fn mutate(
+        &mut self,
+        input: ProjectMutateEntryInput,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let client = self.client.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            match client.call::<ProjectsMutateEntry>(&input).await {
+                Ok(_) => {
+                    let _ = this.update_in(cx, |panel, window, cx| {
+                        match &input {
+                            ProjectMutateEntryInput::Create {
+                                kind,
+                                relative_path,
+                                ..
+                            } => match kind {
+                                ProjectMutateEntryInputCreateKind::File => {
+                                    panel.open_file(relative_path.0.clone(), window, cx);
+                                }
+                                _ => {
+                                    panel.expanded.insert(relative_path.0.clone());
+                                }
+                            },
+                            ProjectMutateEntryInput::Rename {
+                                from_relative_path,
+                                to_relative_path,
+                                ..
+                            } => {
+                                panel.follow_rename(&from_relative_path.0, &to_relative_path.0, cx);
+                            }
+                            ProjectMutateEntryInput::Delete { relative_path, .. } => {
+                                panel.close_if_within(&relative_path.0, cx);
+                            }
+                            ProjectMutateEntryInput::Unknown(_) => {}
+                        }
+                        panel.refresh_tree(cx);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |panel, cx| {
+                        panel.status = Some(format!("operation failed: {error}").into());
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Keep the open buffer attached across a rename of itself or an
+    /// ancestor directory.
+    fn follow_rename(&mut self, from: &str, to: &str, cx: &mut Context<Self>) {
+        let Some(open) = &mut self.open else {
+            return;
+        };
+        let new_path = if open.relative_path == from {
+            Some(to.to_string())
+        } else {
+            open.relative_path
+                .strip_prefix(&format!("{from}/"))
+                .map(|rest| format!("{to}/{rest}"))
+        };
+        if let Some(new_path) = new_path {
+            open.relative_path = new_path.clone();
+            self.editor.update(cx, |state, cx| {
+                state.set_highlighter(language_for_path(&new_path), cx);
+            });
+        }
+        // Expansion keys under the old name are stale; move them over.
+        let moved: Vec<String> = self
+            .expanded
+            .iter()
+            .filter(|dir| *dir == from || dir.starts_with(&format!("{from}/")))
+            .cloned()
+            .collect();
+        for dir in moved {
+            self.expanded.remove(&dir);
+            let renamed = if dir == from {
+                to.to_string()
+            } else {
+                format!("{to}{}", &dir[from.len()..])
+            };
+            self.expanded.insert(renamed);
+        }
+    }
+
+    fn close_if_within(&mut self, path: &str, cx: &mut Context<Self>) {
+        let within = self.open.as_ref().is_some_and(|open| {
+            open.relative_path == path || open.relative_path.starts_with(&format!("{path}/"))
+        });
+        if within {
+            self.close_file(cx);
+        }
+    }
+
     fn row_decoration(
         &self,
         row: &FileTreeRow,
@@ -584,6 +826,14 @@ impl FilesPanel {
         let name_color = tint.unwrap_or(cx.theme().foreground);
         let path = row.path.clone();
         let is_dir = row.is_dir;
+        let panel: WeakEntity<Self> = cx.entity().downgrade();
+        let menu_path = row.path.clone();
+        // New entries land inside a directory row, next to a file row.
+        let create_parent = if is_dir {
+            row.path.clone()
+        } else {
+            parent_dir(&row.path).to_string()
+        };
         h_flex()
             .id(("file-tree-row", index))
             .h(px(24.))
@@ -651,6 +901,83 @@ impl FilesPanel {
                     .text_color(color)
                     .child(letter)
             }))
+            .context_menu(move |menu, _, _| {
+                let new_file = (panel.clone(), create_parent.clone());
+                let new_folder = (panel.clone(), create_parent.clone());
+                let rename = (panel.clone(), menu_path.clone());
+                let delete = (panel.clone(), menu_path.clone());
+                menu.item(
+                    PopupMenuItem::new("New File…").on_click(move |_, window, cx| {
+                        let (panel, parent) = &new_file;
+                        let target = TreeEditTarget::Create {
+                            parent: parent.clone(),
+                            kind: ProjectMutateEntryInputCreateKind::File,
+                        };
+                        let _ = panel.update(cx, |panel, cx| panel.start_edit(target, window, cx));
+                    }),
+                )
+                .item(
+                    PopupMenuItem::new("New Folder…").on_click(move |_, window, cx| {
+                        let (panel, parent) = &new_folder;
+                        let target = TreeEditTarget::Create {
+                            parent: parent.clone(),
+                            kind: ProjectMutateEntryInputCreateKind::Directory,
+                        };
+                        let _ = panel.update(cx, |panel, cx| panel.start_edit(target, window, cx));
+                    }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
+                        let (panel, path) = &rename;
+                        let target = TreeEditTarget::Rename { path: path.clone() };
+                        let _ = panel.update(cx, |panel, cx| panel.start_edit(target, window, cx));
+                    }),
+                )
+                .item(PopupMenuItem::new("Delete").on_click(move |_, window, cx| {
+                    let (panel, path) = &delete;
+                    let path = path.clone();
+                    let _ = panel.update(cx, |panel, cx| panel.confirm_delete(path, window, cx));
+                }))
+            })
+            .into_any_element()
+    }
+
+    /// The inline create/rename row: same geometry as a tree row with the
+    /// name swapped for a single-line input.
+    fn render_edit_row(
+        &self,
+        depth: usize,
+        is_dir: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some(edit) = &self.edit else {
+            return div().into_any_element();
+        };
+        h_flex()
+            .h(px(26.))
+            .w_full()
+            .pl(px(8. + depth as f32 * 12.))
+            .pr_2()
+            .gap_1()
+            .items_center()
+            .child(div().w(px(14.)).flex_shrink_0())
+            .child(
+                Icon::new(if is_dir {
+                    IconName::Folder
+                } else {
+                    IconName::File
+                })
+                .size_3p5()
+                .flex_shrink_0()
+                .text_color(cx.theme().muted_foreground),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Input::new(&edit.input).xsmall()),
+            )
             .into_any_element()
     }
 
@@ -661,6 +988,33 @@ impl FilesPanel {
             .map(|tree| tree.visible_rows(&self.expanded))
             .unwrap_or_default();
         let empty = rows.is_empty();
+        // Interleave the inline edit row: root-level creates render at the
+        // top, in-directory creates directly under the parent row, renames
+        // replace the row in place.
+        let mut items: Vec<gpui::AnyElement> = Vec::new();
+        if let Some(TreeEditTarget::Create { parent, kind }) =
+            self.edit.as_ref().map(|edit| edit.target.clone())
+            && parent.is_empty()
+        {
+            let is_dir = matches!(kind, ProjectMutateEntryInputCreateKind::Directory);
+            items.push(self.render_edit_row(0, is_dir, cx));
+        }
+        for (index, row) in rows.iter().enumerate() {
+            let target = self.edit.as_ref().map(|edit| edit.target.clone());
+            if matches!(&target, Some(TreeEditTarget::Rename { path }) if *path == row.path) {
+                items.push(self.render_edit_row(row.depth, row.is_dir, cx));
+                continue;
+            }
+            items.push(self.render_tree_row(index, row, cx));
+            if let Some(TreeEditTarget::Create { parent, kind }) = target
+                && parent == row.path
+                && row.is_dir
+                && row.expanded
+            {
+                let is_dir = matches!(kind, ProjectMutateEntryInputCreateKind::Directory);
+                items.push(self.render_edit_row(row.depth + 1, is_dir, cx));
+            }
+        }
         v_flex()
             .h_full()
             .min_h_0()
@@ -670,28 +1024,19 @@ impl FilesPanel {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(
-                        v_flex()
-                            .py_1()
-                            .children(
-                                rows.iter()
-                                    .enumerate()
-                                    .map(|(index, row)| self.render_tree_row(index, row, cx)),
-                            )
-                            .when(empty, |this| {
-                                this.child(
-                                    div()
-                                        .p_3()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(if self.tree.is_none() {
-                                            "Loading files…"
-                                        } else {
-                                            "No files"
-                                        }),
-                                )
-                            }),
-                    ),
+                    .child(v_flex().py_1().children(items).when(empty, |this| {
+                        this.child(
+                            div()
+                                .p_3()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(if self.tree.is_none() {
+                                    "Loading files…"
+                                } else {
+                                    "No files"
+                                }),
+                        )
+                    })),
             )
             .children(self.tree_truncated.then(|| {
                 div()
@@ -830,6 +1175,34 @@ impl FilesPanel {
                     .tooltip("Close file")
                     .on_click(cx.listener(|this, _, _, cx| this.close_file(cx)))
             }))
+            .child(
+                Button::new("files-new-file")
+                    .icon(IconName::Plus)
+                    .ghost()
+                    .xsmall()
+                    .tooltip("New file")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let target = TreeEditTarget::Create {
+                            parent: String::new(),
+                            kind: ProjectMutateEntryInputCreateKind::File,
+                        };
+                        this.start_edit(target, window, cx);
+                    })),
+            )
+            .child(
+                Button::new("files-new-folder")
+                    .icon(IconName::Folder)
+                    .ghost()
+                    .xsmall()
+                    .tooltip("New folder")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let target = TreeEditTarget::Create {
+                            parent: String::new(),
+                            kind: ProjectMutateEntryInputCreateKind::Directory,
+                        };
+                        this.start_edit(target, window, cx);
+                    })),
+            )
             .child(
                 Button::new("files-refresh")
                     .icon(IconName::Redo)
