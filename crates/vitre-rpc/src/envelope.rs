@@ -46,9 +46,13 @@ pub enum FromServer {
         exit: ExitEncoded,
     },
     /// Connection-level defect; poisons every in-flight request.
-    Defect { defect: Value },
+    Defect {
+        defect: Value,
+    },
     Pong,
-    ClientProtocolError { error: Value },
+    ClientProtocolError {
+        error: Value,
+    },
     /// Forward compatibility with envelope kinds newer sidecars may add.
     #[serde(other)]
     Unknown,

@@ -10,7 +10,8 @@ use crate::error::RpcError;
 
 const TOKEN_EXCHANGE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
-const ENVIRONMENT_BOOTSTRAP_TOKEN_TYPE: &str = "urn:t3:params:oauth:token-type:environment-bootstrap";
+const ENVIRONMENT_BOOTSTRAP_TOKEN_TYPE: &str =
+    "urn:t3:params:oauth:token-type:environment-bootstrap";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AccessToken {

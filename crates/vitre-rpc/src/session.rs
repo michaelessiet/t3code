@@ -131,7 +131,9 @@ impl RpcSession {
                     });
                 }
                 Some(ServerEvent::Exit(exit)) => break exit.into_result(),
-                Some(ServerEvent::ConnectionLost(reason)) => break Err(RpcError::Transport(reason)),
+                Some(ServerEvent::ConnectionLost(reason)) => {
+                    break Err(RpcError::Transport(reason));
+                }
                 None => break Err(RpcError::ConnectionClosed),
             }
         };

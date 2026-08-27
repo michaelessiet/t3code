@@ -1,0 +1,85 @@
+name: Vitre CI
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "deny.toml"
+      - "crates/**"
+      - "third_party/**"
+      - "apps/vitre/**"
+      - ".github/workflows/vitre-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "deny.toml"
+      - "crates/**"
+      - "third_party/**"
+      - "apps/vitre/**"
+      - ".github/workflows/vitre-ci.yml"
+
+jobs:
+  rust:
+    name: Rust + live-server wire check (macOS)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+      # The licensing firewall's structural guarantee: exactly one gpui, ours.
+      - name: Single gpui instance
+        run: |
+          COUNT=$(cargo tree -i gpui --prefix none | grep -c "^gpui v")
+          echo "gpui instances: $COUNT"
+          test "$COUNT" -eq 1
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Build server bundle
+        run: pnpm --filter t3 run build:bundle
+
+      # Effect-RPC wire tripwire: boots a real sidecar and validates the full
+      # client path (token exchange, ticket, /ws, unary, Ping/Pong, Ack-paced
+      # stream, Interrupt). Must be green on every `effect` bump.
+      - name: Live-server wire spike
+        run: cargo run -p vitre-rpc --example spike_rpc
+
+  licenses:
+    name: cargo-deny (licensing firewall)
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources

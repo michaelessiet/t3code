@@ -4,8 +4,9 @@ use crate::envelope::CauseEncoded;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RpcError {
+    /// Boxed: tungstenite's error is large and would bloat every Result.
     #[error("websocket: {0}")]
-    Ws(#[from] tokio_tungstenite::tungstenite::Error),
+    Ws(Box<tokio_tungstenite::tungstenite::Error>),
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
     #[error("http status {status}: {body}")]
@@ -18,6 +19,12 @@ pub enum RpcError {
     Transport(String),
     #[error("rpc exit failure: {}", summarize_cause(cause))]
     Failed { cause: Vec<CauseEncoded> },
+}
+
+impl From<tokio_tungstenite::tungstenite::Error> for RpcError {
+    fn from(error: tokio_tungstenite::tungstenite::Error) -> Self {
+        RpcError::Ws(Box::new(error))
+    }
 }
 
 fn summarize_cause(cause: &[CauseEncoded]) -> String {

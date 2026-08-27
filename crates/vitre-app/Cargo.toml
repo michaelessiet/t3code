@@ -10,5 +10,16 @@ name = "vitre"
 path = "src/main.rs"
 
 [dependencies]
+anyhow.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
+gpui_tokio.workspace = true
+gpui-component.workspace = true
+gpui-component-assets.workspace = true
+gpui-wry.workspace = true
+raw-window-handle.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+vitre-rpc.workspace = true
+vitre-sidecar.workspace = true
+wry.workspace = true

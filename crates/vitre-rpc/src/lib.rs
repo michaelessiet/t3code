@@ -14,9 +14,7 @@ pub mod envelope;
 pub mod error;
 pub mod http;
 pub mod session;
-pub mod sidecar;
 
 pub use error::RpcError;
 pub use http::EnvironmentHttp;
 pub use session::{RpcSession, StreamEvent, Subscription};
-pub use sidecar::{Sidecar, SidecarConfig};

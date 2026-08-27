@@ -3,10 +3,14 @@ resolver = "2"
 members = [
   "crates/vitre-app",
   "crates/vitre-rpc",
+  "crates/vitre-sidecar",
   "third_party/ztracing",
   "third_party/ztracing-macro",
 ]
 default-members = ["crates/vitre-app"]
+# Vendored fork with its own inner workspace (see third_party/gpui-component/VENDOR.md);
+# its crates are consumed via path deps, sharing our resolution + [patch].
+exclude = ["third_party/gpui-component"]
 
 [workspace.package]
 edition = "2024"
@@ -25,6 +29,15 @@ gpui_tokio = { git = "https://github.com/zed-industries/zed", rev = "f66ed399cdd
 
 # --- vitre crates ---
 vitre-rpc = { path = "crates/vitre-rpc" }
+vitre-sidecar = { path = "crates/vitre-sidecar" }
+
+# --- vendored gpui-component fork (Apache-2.0) ---
+gpui-component = { path = "third_party/gpui-component/crates/ui" }
+gpui-wry = { path = "third_party/gpui-component/crates/webview" }
+gpui-component-assets = { path = "third_party/gpui-component/crates/assets" }
+raw-window-handle = "0.6.2"
+# Same wry fork gpui-wry builds against; needed to construct the child webview.
+wry = { version = "0.53.3", package = "lb-wry" }
 
 # --- third-party ---
 anyhow = "1"

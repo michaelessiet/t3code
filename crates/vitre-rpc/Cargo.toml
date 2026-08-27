@@ -7,8 +7,6 @@ publish = false
 
 [dependencies]
 futures.workspace = true
-getrandom.workspace = true
-libc.workspace = true
 percent-encoding.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -19,6 +17,7 @@ tokio-tungstenite.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+vitre-sidecar.workspace = true
 
 [[example]]
 name = "spike_rpc"

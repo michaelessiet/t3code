@@ -4,7 +4,7 @@
 //! Apache-2.0 zed crates (sum_tree, gpui) compile against, with profiling
 //! disabled: spans and events vanish, `#[instrument]` strips to the bare item.
 
-pub use tracing::{Level, field};
+pub use tracing::{field, Level};
 pub use ztracing_macro::instrument;
 
 /// Zero-size span handle; every operation is a no-op.
