@@ -23,6 +23,7 @@
 
 pub mod file_buffer;
 pub mod file_tree;
+pub mod lsp_gating;
 pub mod session_logic;
 pub mod shell;
 pub mod shell_sync;

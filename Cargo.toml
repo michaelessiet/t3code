@@ -42,7 +42,49 @@ vitre-sidecar = { path = "crates/vitre-sidecar" }
 vitre-state = { path = "crates/vitre-state" }
 
 # --- vendored gpui-component fork (Apache-2.0) ---
-gpui-component = { path = "third_party/gpui-component/crates/ui" }
+# The grammar set the editor highlights with. Not optional polish: without a
+# grammar the editor's highlight pass returns early and drops LSP diagnostics
+# with it (element.rs `highlight_lines`), so squiggles depend on it too.
+# This is the upstream `tree-sitter-languages` set minus two grammars:
+# `tree-sitter-sql`, whose `tree-sitter-sequel` pins `cc ~1.2` and cannot
+# resolve against the `cc 1.4` gpui's `embed-resource` requires; and
+# `tree-sitter-graphql`, which states its (MIT) terms only in a LICENSE file,
+# so cargo-deny cannot classify it and the firewall can't audit it.
+gpui-component = { path = "third_party/gpui-component/crates/ui", features = [
+  "tree-sitter-astro",
+  "tree-sitter-bash",
+  "tree-sitter-c",
+  "tree-sitter-cmake",
+  "tree-sitter-cpp",
+  "tree-sitter-csharp",
+  "tree-sitter-css",
+  "tree-sitter-diff",
+  "tree-sitter-ejs",
+  "tree-sitter-elixir",
+  "tree-sitter-erb",
+  "tree-sitter-go",
+  "tree-sitter-html",
+  "tree-sitter-java",
+  "tree-sitter-javascript",
+  "tree-sitter-jsdoc",
+  "tree-sitter-kotlin",
+  "tree-sitter-lua",
+  "tree-sitter-make",
+  "tree-sitter-markdown",
+  "tree-sitter-php",
+  "tree-sitter-proto",
+  "tree-sitter-python",
+  "tree-sitter-ruby",
+  "tree-sitter-rust",
+  "tree-sitter-scala",
+  "tree-sitter-svelte",
+  "tree-sitter-swift",
+  "tree-sitter-toml",
+  "tree-sitter-tsx",
+  "tree-sitter-typescript",
+  "tree-sitter-yaml",
+  "tree-sitter-zig",
+] }
 gpui-wry = { path = "third_party/gpui-component/crates/webview" }
 gpui-component-assets = { path = "third_party/gpui-component/crates/assets" }
 raw-window-handle = "0.6.2"
@@ -54,7 +96,16 @@ anyhow = "1"
 futures = "0.3"
 getrandom = "0.3"
 libc = "0.2"
+# Same pin as the vendored gpui-component fork, so our LSP providers and the
+# editor's provider traits speak one resolved crate.
+lsp-types = { version = "0.97.0", features = ["proposed"] }
 percent-encoding = "2"
+# Same pin as the vendored gpui-component fork's rope, so the editor buffers
+# and the LSP wire-position math share one resolved crate.
+ropey = { version = "=2.0.0-beta.1", features = [
+  "metric_lines_lf",
+  "metric_utf16",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

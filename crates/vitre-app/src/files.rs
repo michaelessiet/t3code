@@ -10,7 +10,8 @@
 //! saves are debounced writes guarded by `baseRevision` with the
 //! `stale_revision` failure surfacing the same banner.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,19 +29,23 @@ use gpui_component::{
 };
 use vitre_client::EnvironmentClient;
 use vitre_contracts::methods::{
-    ProjectsListEntries, ProjectsMutateEntry, ProjectsReadFile, ProjectsSubscribeWorkspaceChanges,
-    ProjectsWriteFile, ProjectsWriteFileError as WriteFileErrorUnion, VcsGetFileStatuses,
+    LspSubscribeDiagnostics, ProjectsListEntries, ProjectsMutateEntry, ProjectsReadFile,
+    ProjectsSubscribeWorkspaceChanges, ProjectsWriteFile,
+    ProjectsWriteFileError as WriteFileErrorUnion, VcsGetFileStatuses,
 };
 use vitre_contracts::{
-    ProjectFileFailure, ProjectListEntriesInput, ProjectMutateEntryInput,
-    ProjectMutateEntryInputCreateKind, ProjectReadFileInput, ProjectWatchInput,
-    ProjectWatchStreamEvent, ProjectWriteFileInput, TrimmedNonEmptyString, VcsFileStatusEntry,
-    VcsFileStatusesInput,
+    LspDiagnostic, LspDiagnosticsStreamEvent, LspSubscribeDiagnosticsInput, ProjectFileFailure,
+    ProjectListEntriesInput, ProjectMutateEntryInput, ProjectMutateEntryInputCreateKind,
+    ProjectReadFileInput, ProjectWatchInput, ProjectWatchStreamEvent, ProjectWriteFileInput,
+    TrimmedNonEmptyString, VcsFileStatusEntry, VcsFileStatusesInput,
 };
 use vitre_rpc::{TypedError, TypedStreamEvent};
 use vitre_state::file_buffer::{BufferConflict, DiskChange, FileBuffer};
 use vitre_state::file_tree::{FileTreeModel, FileTreeRow};
 use vitre_state::vcs_tree_status::{TreeVcsDecorations, TreeVcsStatus, build_tree_vcs_decorations};
+
+use crate::lsp::bridge::{self, LspBridge};
+use crate::lsp::positions::{WirePosition, wire_to_offset};
 
 /// Electron default: autosave on, `afterDelay`, 500ms
 /// (`packages/contracts/src/settings.ts` `DEFAULT_AUTO_SAVE_DELAY_MS`).
@@ -126,6 +131,12 @@ pub struct FilesPanel {
     open: Option<OpenFile>,
     edit: Option<TreeEdit>,
     editor: Entity<EditorState>,
+    lsp: Rc<LspBridge>,
+    /// Latest diagnostics per relative path (latest event wins, empty
+    /// clears — the Electron per-file replacement semantics).
+    diagnostics: HashMap<String, Vec<LspDiagnostic>>,
+    /// Cross-file go-to-definition target, applied once that file loads.
+    pending_reveal: Option<(String, WirePosition)>,
     /// Bumped on every open/close; async completions for an older file drop.
     open_generation: u64,
     status: Option<SharedString>,
@@ -150,6 +161,43 @@ impl FilesPanel {
             },
         )];
 
+        let lsp = LspBridge::new(client.clone(), cwd.clone(), editor.downgrade());
+        let panel_for_show: WeakEntity<Self> = cx.weak_entity();
+        let show_lsp = lsp.clone();
+        let show_cwd = cwd.clone();
+        editor.update(cx, |state, _| {
+            let editor_lsp = state.lsp_mut();
+            editor_lsp.completion_provider = Some(lsp.clone());
+            editor_lsp.hover_provider = Some(lsp.clone());
+            editor_lsp.definition_provider = Some(lsp.clone());
+            // Cross-file go-to-definition: locations carry WIRE (UTF-16)
+            // positions (see lsp::bridge module docs); converted against the
+            // target file after it loads. Same-document targets fall through
+            // to the editor's built-in jump; out-of-workspace targets are
+            // swallowed (Electron drops them).
+            editor_lsp.show_document = Some(Rc::new(move |params, window, cx| {
+                let Some(target) = bridge::relative_path_from_uri(&show_cwd, &params.uri) else {
+                    return true;
+                };
+                if show_lsp.current_document().as_deref() == Some(target.as_str()) {
+                    return false;
+                }
+                let Some(panel) = panel_for_show.upgrade() else {
+                    return true;
+                };
+                let reveal = params.selection.map(|range| WirePosition {
+                    line: range.start.line,
+                    character: range.start.character,
+                });
+                panel.update(cx, |panel, cx| {
+                    panel.pending_reveal = reveal.map(|position| (target.clone(), position));
+                    panel.open_file(target.clone(), window, cx);
+                });
+                true
+            }));
+        });
+        lsp.refresh_server_status(cx);
+
         let mut panel = Self {
             client,
             cwd,
@@ -162,12 +210,16 @@ impl FilesPanel {
             open: None,
             edit: None,
             editor,
+            lsp,
+            diagnostics: HashMap::new(),
+            pending_reveal: None,
             open_generation: 0,
             status: None,
             _subscriptions: subscriptions,
         };
         panel.refresh_tree(cx);
         panel.spawn_watch_loop(window, cx);
+        panel.spawn_diagnostics_loop(cx);
         panel
     }
 
@@ -333,6 +385,127 @@ impl FilesPanel {
         }
     }
 
+    /// Durable diagnostics subscription, same session-watch shape as the
+    /// workspace loop. The stream is live-only (no snapshot replay), so it
+    /// starts at panel creation — before any didOpen can produce events.
+    fn spawn_diagnostics_loop(&self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let payload = LspSubscribeDiagnosticsInput {
+            cwd: tnes(&self.cwd),
+        };
+        cx.spawn(async move |this, cx| {
+            let mut sessions = client.sessions();
+            loop {
+                let Some(handle) = sessions.borrow_and_update().clone() else {
+                    if sessions.changed().await.is_err() {
+                        return;
+                    }
+                    continue;
+                };
+                let Ok(mut subscription) = handle
+                    .session
+                    .subscribe_typed::<LspSubscribeDiagnostics>(&payload)
+                else {
+                    if sessions.changed().await.is_err() {
+                        return;
+                    }
+                    continue;
+                };
+                let completed = loop {
+                    tokio::select! {
+                        event = subscription.next() => match event {
+                            Some(TypedStreamEvent::Values(events)) => {
+                                if this
+                                    .update(cx, |panel, cx| {
+                                        panel.diagnostics_changed(&events, cx);
+                                    })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                if subscription.ack().is_err() {
+                                    break false;
+                                }
+                            }
+                            Some(TypedStreamEvent::Completed(result)) => break result.is_ok(),
+                            None => break false,
+                        },
+                        changed = sessions.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                            let replaced = sessions
+                                .borrow()
+                                .as_ref()
+                                .is_none_or(|current| current.generation != handle.generation);
+                            if replaced {
+                                break false;
+                            }
+                        }
+                    }
+                };
+                if completed {
+                    cx.background_executor()
+                        .timer(RESUBSCRIBE_AFTER_COMPLETION)
+                        .await;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Latest event per file wins; an empty list clears the file (the
+    /// Electron `subscribeDiagnostics` consumer semantics).
+    fn diagnostics_changed(
+        &mut self,
+        events: &[LspDiagnosticsStreamEvent],
+        cx: &mut Context<Self>,
+    ) {
+        let mut open_touched = false;
+        for event in events {
+            let path = &event.relative_path.0;
+            if self
+                .open
+                .as_ref()
+                .is_some_and(|open| open.relative_path == *path)
+            {
+                open_touched = true;
+            }
+            if event.diagnostics.is_empty() {
+                self.diagnostics.remove(path);
+            } else {
+                self.diagnostics
+                    .insert(path.clone(), event.diagnostics.clone());
+            }
+        }
+        if open_touched {
+            self.apply_diagnostics_to_editor(cx);
+        }
+    }
+
+    /// Full-replacement projection of the open file's stored diagnostics into
+    /// the editor, ranges converted against the current text.
+    fn apply_diagnostics_to_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = &self.open else {
+            return;
+        };
+        let wire = self
+            .diagnostics
+            .get(&open.relative_path)
+            .cloned()
+            .unwrap_or_default();
+        self.editor.update(cx, |state, cx| {
+            let text = state.text().clone();
+            let mapped = bridge::editor_diagnostics(&text, &wire);
+            let Some(diagnostics) = state.diagnostics_mut() else {
+                return;
+            };
+            diagnostics.reset(&text);
+            diagnostics.extend(mapped);
+            cx.notify();
+        });
+    }
+
     fn open_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         if self
             .open
@@ -360,12 +533,34 @@ impl FilesPanel {
                             state.set_highlighter(language_for_path(&path), cx);
                             state.set_value(result.contents.0.clone(), window, cx);
                         });
+                        // Truncated reads never attach LSP: the server holds
+                        // partial text and the buffer is read-only anyway.
+                        if result.truncated {
+                            panel.lsp.close_document(cx);
+                        } else {
+                            panel
+                                .lsp
+                                .open_document(&path, result.contents.0.clone(), cx);
+                            panel.lsp.refresh_server_status(cx);
+                        }
                         panel.open = Some(OpenFile {
-                            relative_path: path,
+                            relative_path: path.clone(),
                             buffer: FileBuffer::open(revision),
                             truncated: result.truncated,
                             debounce: 0,
                         });
+                        panel.apply_diagnostics_to_editor(cx);
+                        // Cross-file definition target: convert the WIRE
+                        // position against the loaded text and move there.
+                        if let Some((target, position)) = panel.pending_reveal.take()
+                            && target == path
+                        {
+                            panel.editor.update(cx, |state, cx| {
+                                let offset = wire_to_offset(state.text(), position);
+                                let position = bridge::editor_position(state.text(), offset);
+                                state.set_cursor_position(position, window, cx);
+                            });
+                        }
                         panel.status = None;
                         cx.notify();
                     });
@@ -387,10 +582,12 @@ impl FilesPanel {
     fn close_file(&mut self, cx: &mut Context<Self>) {
         self.open_generation += 1;
         self.open = None;
+        self.lsp.close_document(cx);
         cx.notify();
     }
 
     fn editor_edited(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.lsp.document_edited(cx);
         let generation = self.open_generation;
         let Some(open) = &mut self.open else {
             return;
@@ -524,6 +721,10 @@ impl FilesPanel {
                     editor.update(cx, |state, cx| {
                         state.set_value(result.contents.0.clone(), window, cx);
                     });
+                    // The buffer changed under the LSP doc; sync it and
+                    // restore diagnostics that set_value cleared.
+                    panel.lsp.document_edited(cx);
+                    panel.apply_diagnostics_to_editor(cx);
                 }
                 cx.notify();
             });
@@ -560,6 +761,8 @@ impl FilesPanel {
                 editor.update(cx, |state, cx| {
                     state.set_value(result.contents.0.clone(), window, cx);
                 });
+                panel.lsp.document_edited(cx);
+                panel.apply_diagnostics_to_editor(cx);
                 cx.notify();
             });
         })
@@ -755,9 +958,17 @@ impl FilesPanel {
         };
         if let Some(new_path) = new_path {
             open.relative_path = new_path.clone();
+            let truncated = open.truncated;
             self.editor.update(cx, |state, cx| {
                 state.set_highlighter(language_for_path(&new_path), cx);
             });
+            // Rebind the LSP doc under its new name (the Electron editor
+            // remounts on rename: didClose old, didOpen new).
+            if !truncated {
+                let contents = self.editor.read(cx).text().to_string();
+                self.lsp.open_document(&new_path, contents, cx);
+                self.apply_diagnostics_to_editor(cx);
+            }
         }
         // Expansion keys under the old name are stale; move them over.
         let moved: Vec<String> = self

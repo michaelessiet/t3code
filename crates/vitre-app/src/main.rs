@@ -3,6 +3,7 @@
 
 mod chat;
 mod files;
+mod lsp;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -142,7 +143,10 @@ fn main() {
         }
         // Vitre themes transcribe the Electron app's design tokens
         // (apps/web/src/index.css); the dark palette is the pure-black
-        // `data-sidebar-version` variant the shell actually runs with.
+        // `data-sidebar-version` variant the shell actually runs with. Their
+        // `highlight` block is the editor half, transcribed from the
+        // CodeMirror theme (codemirror/theme.ts) — without it the editor keeps
+        // gpui-component's default *light* highlight theme in both modes.
         ThemeRegistry::global_mut(cx)
             .load_themes_from_str(include_str!("../themes/vitre.json"))
             .expect("vitre.json parses");
