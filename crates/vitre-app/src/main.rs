@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, px, size,
+    App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, point,
+    px, size,
 };
 use gpui_component::{Root, Theme, ThemeRegistry};
 use serde_json::Value;
@@ -162,6 +163,17 @@ fn main() {
                 theme.dark_theme = dark;
             }
         }
+
+        // Editor commands. `file.save` is `mod+s` in Electron's
+        // DEFAULT_KEYBINDINGS; formatting is a fixed editor chord there
+        // (`Shift-Alt-f`), not a rebindable command. Both dispatch up the
+        // focus path, so they reach the files panel from the editor and the
+        // tree alike and do nothing when no file is open.
+        cx.bind_keys([
+            KeyBinding::new("cmd-s", files::SaveFile, None),
+            KeyBinding::new("ctrl-s", files::SaveFile, None),
+            KeyBinding::new("shift-alt-f", files::FormatDocument, None),
+        ]);
 
         let supervisor = Arc::new(Supervisor::start(config));
         let status_rx = supervisor.status();

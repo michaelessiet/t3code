@@ -262,6 +262,12 @@ impl LspBridge {
         })
     }
 
+    /// [`Self::flush`] for callers outside this module — the format command,
+    /// which must not ask the server to format text it has not seen.
+    pub fn flush_document(&self, text: &Rope, cx: &mut App) -> Task<()> {
+        self.flush(text, cx)
+    }
+
     /// The debounce timer's flush, which runs outside any editor update and so
     /// may read the buffer back from the editor entity.
     fn flush_from_editor(&self, cx: &mut App) -> Task<()> {
@@ -531,7 +537,7 @@ pub fn wire_position(position: &WireLspPosition) -> WirePosition {
     }
 }
 
-fn editor_text_edit(text: &Rope, edit: &LspTextEdit) -> TextEdit {
+pub fn editor_text_edit(text: &Rope, edit: &LspTextEdit) -> TextEdit {
     TextEdit {
         range: editor_range(text, &edit.range),
         new_text: edit.new_text.0.clone(),

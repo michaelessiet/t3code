@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Context, Entity, MouseButton, PromptLevel, SharedString, Subscription, WeakEntity, Window, div,
-    prelude::*, px,
+    Context, Entity, MouseButton, PromptLevel, SharedString, Subscription, WeakEntity, Window,
+    actions, div, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
@@ -29,15 +29,16 @@ use gpui_component::{
 };
 use vitre_client::EnvironmentClient;
 use vitre_contracts::methods::{
-    LspSubscribeDiagnostics, ProjectsListEntries, ProjectsMutateEntry, ProjectsReadFile,
+    LspFormat, LspSubscribeDiagnostics, ProjectsListEntries, ProjectsMutateEntry, ProjectsReadFile,
     ProjectsSubscribeWorkspaceChanges, ProjectsWriteFile,
     ProjectsWriteFileError as WriteFileErrorUnion, VcsGetFileStatuses,
 };
 use vitre_contracts::{
-    LspDiagnostic, LspDiagnosticsStreamEvent, LspSubscribeDiagnosticsInput, ProjectFileFailure,
-    ProjectListEntriesInput, ProjectMutateEntryInput, ProjectMutateEntryInputCreateKind,
-    ProjectReadFileInput, ProjectWatchInput, ProjectWatchStreamEvent, ProjectWriteFileInput,
-    TrimmedNonEmptyString, VcsFileStatusEntry, VcsFileStatusesInput,
+    LspDiagnostic, LspDiagnosticsStreamEvent, LspFormattingInput, LspSubscribeDiagnosticsInput,
+    ProjectFileFailure, ProjectListEntriesInput, ProjectMutateEntryInput,
+    ProjectMutateEntryInputCreateKind, ProjectReadFileInput, ProjectWatchInput,
+    ProjectWatchStreamEvent, ProjectWriteFileInput, TrimmedNonEmptyString, VcsFileStatusEntry,
+    VcsFileStatusesInput,
 };
 use vitre_rpc::{TypedError, TypedStreamEvent};
 use vitre_state::file_buffer::{BufferConflict, DiskChange, FileBuffer};
@@ -54,6 +55,20 @@ const AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 /// A server-completed watch stream must not resubscribe in a hot loop
 /// (vitre-client's `RESUBSCRIBE_AFTER_COMPLETION`).
 const RESUBSCRIBE_AFTER_COMPLETION: Duration = Duration::from_secs(2);
+
+actions!(
+    vitre,
+    [
+        /// Write the open file now, ahead of the autosave debounce. The
+        /// Electron `file.save` command (`mod+s`), which likewise routes to
+        /// the one mounted save coordinator.
+        SaveFile,
+        /// Format the open file through the language server. Electron binds
+        /// this on the editor itself (`Shift-Alt-f` in `useLspBridge.ts`), not
+        /// as a rebindable command.
+        FormatDocument,
+    ]
+);
 
 fn tnes(text: impl Into<String>) -> TrimmedNonEmptyString {
     TrimmedNonEmptyString(text.into())
@@ -630,6 +645,62 @@ impl FilesPanel {
             return;
         };
         self.spawn_write(base_revision, window, cx);
+    }
+
+    /// ⌘S: write now instead of waiting out the autosave debounce. A clean
+    /// buffer (or one whose write is already in flight) is a no-op, as it is
+    /// in Electron — `flush` asks the buffer, which owns that decision.
+    pub fn save_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.flush(window, cx);
+    }
+
+    /// Shift-Alt-F: `textDocument/formatting` through the sidecar, applied as
+    /// one edit batch. Electron leaves the result unsaved — the edits mark the
+    /// buffer dirty and autosave (or ⌘S) persists it — so this does the same.
+    pub fn format_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(relative_path) = self.lsp.current_document() else {
+            return;
+        };
+        let generation = self.open_generation;
+        // Formatting reads the server's copy of the document, so the pending
+        // didChange has to land first.
+        let text = self.editor.read(cx).text().clone();
+        let flush = self.lsp.flush_document(&text, cx);
+        let payload = LspFormattingInput {
+            cwd: tnes(&self.cwd),
+            insert_spaces: None,
+            relative_path: tnes(relative_path),
+            tab_size: None,
+        };
+        let client = self.client.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            flush.await;
+            let Ok(result) = client.call::<LspFormat>(&payload).await else {
+                return;
+            };
+            if result.edits.is_empty() {
+                return;
+            }
+            let _ = this.update_in(cx, |panel, window, cx| {
+                if panel.open_generation != generation {
+                    return;
+                }
+                panel.editor.update(cx, |state, cx| {
+                    let text = state.text().clone();
+                    let edits = result
+                        .edits
+                        .iter()
+                        .map(|edit| bridge::editor_text_edit(&text, edit))
+                        .collect();
+                    state.apply_lsp_edits(&edits, window, cx);
+                });
+                // `apply_lsp_edits` replaces text silently, so the editor
+                // emits no change event: tell the buffer and the LSP document
+                // about the edit by hand.
+                panel.editor_edited(window, cx);
+            });
+        })
+        .detach();
     }
 
     /// Issue the writeFile RPC for the open file. The buffer must already
@@ -1433,6 +1504,12 @@ impl Render for FilesPanel {
         let file_open = self.open.is_some();
         v_flex()
             .size_full()
+            .on_action(cx.listener(|panel, _: &SaveFile, window, cx| {
+                panel.save_now(window, cx);
+            }))
+            .on_action(cx.listener(|panel, _: &FormatDocument, window, cx| {
+                panel.format_document(window, cx);
+            }))
             .bg(cx.theme().background)
             .border_l_1()
             .border_color(cx.theme().border)
