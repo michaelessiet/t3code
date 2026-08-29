@@ -192,6 +192,12 @@ impl InputBaseState<EditorMode> {
         self.completion_inserting = true;
         let range = self.range_to_utf16(&range);
         self.replace_text_in_range_silent(Some(range), &new_text, window, cx);
+        // Items resolved before insertion carry their auto-import edits
+        // already; apply them in the same breath (the unresolved path applies
+        // them after `resolve_completion` returns — see the completion menu).
+        if let Some(edits) = item.additional_text_edits.as_ref() {
+            self.apply_completion_additional_edits(edits, window, cx);
+        }
         self.completion_inserting = false;
         self.focus(window, cx);
     }

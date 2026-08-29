@@ -46,6 +46,23 @@ fn diagnostic_highlight_style(
     }
 }
 
+/// Wavy underlines for the diagnostics overlapping `visible_byte_range`.
+fn diagnostic_styles(
+    diagnostics: &crate::input::DiagnosticSet,
+    visible_byte_range: Range<usize>,
+    colors: crate::input::DiagnosticColors,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    diagnostics
+        .range(visible_byte_range)
+        .map(|entry| {
+            (
+                entry.range.clone(),
+                diagnostic_highlight_style(entry.severity, colors),
+            )
+        })
+        .collect()
+}
+
 const BOTTOM_MARGIN_ROWS: usize = 3;
 pub(super) const RIGHT_MARGIN: Pixels = px(10.);
 pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(10.);
@@ -1431,15 +1448,27 @@ impl<M: InputModeKind> TextElement<M> {
             }
         };
         let Some(highlighter) = highlighter.as_mut() else {
-            return (!state.masked)
-                .then(|| {
-                    compose_decoration_collections(
-                        Vec::new(),
-                        state.extras.decoration_layers().into_iter(),
-                        visible_byte_range,
-                    )
-                })
-                .flatten();
+            // No grammar for this language: there are no syntax styles, but
+            // diagnostics don't come from the grammar and must still underline.
+            if state.masked {
+                return None;
+            }
+            let decorations = compose_decoration_collections(
+                Vec::new(),
+                state.extras.decoration_layers().into_iter(),
+                visible_byte_range.clone(),
+            );
+            let diagnostics = diagnostic_styles(
+                diagnostics,
+                visible_byte_range,
+                state.editor_style.diagnostics,
+            );
+            if diagnostics.is_empty() {
+                return decorations;
+            }
+            return Some(
+                gpui::combine_highlights(diagnostics, decorations.unwrap_or_default()).collect(),
+            );
         };
 
         let mut styles = Vec::with_capacity(visible_buffer_lines.len());
@@ -1505,15 +1534,11 @@ impl<M: InputModeKind> TextElement<M> {
             flush_range(start_line, line, false, &mut styles);
         }
 
-        let diagnostic_styles: Vec<_> = diagnostics
-            .range(visible_byte_range.clone())
-            .map(|entry| {
-                (
-                    entry.range.clone(),
-                    diagnostic_highlight_style(entry.severity, state.editor_style.diagnostics),
-                )
-            })
-            .collect();
+        let diagnostic_styles = diagnostic_styles(
+            diagnostics,
+            visible_byte_range.clone(),
+            state.editor_style.diagnostics,
+        );
 
         // Range semantic tokens, resolved from the LSP provider's cached
         // result through the active highlight theme so it shares the same

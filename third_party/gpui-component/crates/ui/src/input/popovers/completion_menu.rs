@@ -231,9 +231,33 @@ impl CompletionMenu {
         let editor = self.editor.clone();
 
         cx.spawn_in(window, async move |_, cx| {
-            editor.update_in(cx, |editor, window, cx| {
+            // Insert the main edit immediately for responsiveness. When the
+            // item still needs `completionItem/resolve` (it carries opaque
+            // `data` and no `additional_text_edits` yet), resolve afterwards
+            // and apply the auto-import edits as a second transaction — they
+            // never overlap the completion range.
+            let needs_resolve = item.additional_text_edits.is_none() && item.data.is_some();
+            let resolve = editor.update_in(cx, |editor, window, cx| {
                 editor.insert_completion(&item, range, window, cx);
-            })
+                if needs_resolve {
+                    editor
+                        .lsp()
+                        .completion_provider
+                        .clone()
+                        .map(|provider| provider.resolve_completion(item.clone(), window, cx))
+                } else {
+                    None
+                }
+            })?;
+            if let Some(task) = resolve
+                && let Ok(resolved) = task.await
+                && let Some(edits) = resolved.additional_text_edits.as_ref()
+            {
+                editor.update_in(cx, |editor, window, cx| {
+                    editor.apply_completion_additional_edits(edits, window, cx);
+                })?;
+            }
+            anyhow::Ok(())
         })
         .detach();
 

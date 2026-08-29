@@ -112,18 +112,51 @@ impl Lsp {
 
 impl InputBaseState<EditorMode> {
     /// Apply a list of [`lsp_types::TextEdit`] to mutate the text.
+    ///
+    /// LSP edit arrays are non-overlapping but arrive in any order; edits are
+    /// applied bottom-up so each application leaves the positions of the
+    /// not-yet-applied edits valid.
     pub fn apply_lsp_edits(
         &mut self,
         text_edits: &Vec<lsp_types::TextEdit>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        for edit in text_edits {
+        let mut ordered: Vec<&lsp_types::TextEdit> = text_edits.iter().collect();
+        ordered.sort_by(|a, b| b.range.start.cmp(&a.range.start));
+        for edit in ordered {
             let start = self.text.position_to_offset(&edit.range.start);
             let end = self.text.position_to_offset(&edit.range.end);
 
             let range_utf16 = self.range_to_utf16(&(start..end));
             self.replace_text_in_range_silent(Some(range_utf16), &edit.new_text, window, cx);
         }
+    }
+
+    /// Apply a completion item's `additional_text_edits` (auto-imports and
+    /// the like) without disturbing the cursor the main completion edit just
+    /// placed. LSP guarantees these edits do not overlap the completion
+    /// range; edits landing before the cursor shift it by their byte delta.
+    pub fn apply_completion_additional_edits(
+        &mut self,
+        text_edits: &Vec<lsp_types::TextEdit>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if text_edits.is_empty() {
+            return;
+        }
+        let cursor = self.cursor();
+        let mut delta = 0isize;
+        for edit in text_edits {
+            let start = self.text.position_to_offset(&edit.range.start);
+            let end = self.text.position_to_offset(&edit.range.end);
+            if end <= cursor {
+                delta += edit.new_text.len() as isize - (end - start) as isize;
+            }
+        }
+        self.apply_lsp_edits(text_edits, window, cx);
+        let restored = cursor.saturating_add_signed(delta).min(self.text.len());
+        self.move_to(restored, None, cx);
     }
 }
