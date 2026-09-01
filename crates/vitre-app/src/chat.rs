@@ -5,13 +5,15 @@
 //! only carries the six detail event kinds, so title/meta always come from
 //! the thread shell (the TS client's `mergeEnvironmentThread` split).
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash as _, Hasher as _};
 use std::sync::Arc;
 
 use base64::Engine as _;
 use gpui::{
-    Context, Entity, PathPromptOptions, ScrollHandle, SharedString, Subscription, Window, div,
-    prelude::*, px, relative,
+    AnyElement, Context, Entity, FollowMode, ListAlignment, ListState, PathPromptOptions,
+    SharedString, Subscription, Window, div, list, prelude::*, px, relative,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, ResizableState, Sizable as _,
@@ -71,10 +73,20 @@ pub struct ChatApp {
     reverting: bool,
     /// Activity (tool) rows expanded to show their payload detail.
     expanded_activities: HashSet<String>,
-    /// Timeline scroll anchoring: keep pinned to the bottom while streaming
-    /// unless the user scrolled away (Electron's `timelineScrollAnchoring`).
-    timeline_scroll: ScrollHandle,
-    stick_to_bottom: bool,
+    /// The virtualized timeline. Rows vary wildly in height (markdown bodies,
+    /// expandable tool detail), so this is gpui's `list`, which measures rows
+    /// lazily as they scroll in — not `uniform_list` or gpui-component's
+    /// `VirtualList`, both of which need every row's height up front.
+    /// `FollowMode::Tail` supplies the stick-to-bottom-while-streaming
+    /// behaviour Electron hand-rolls in `timelineScrollAnchoring.ts`.
+    timeline_list: ListState,
+    /// Row descriptors backing `timeline_list`, rebuilt when the thread view
+    /// changes rather than on every frame.
+    timeline: Vec<TimelineRow>,
+    /// Height fingerprint per timeline row, parallel to `timeline`.
+    timeline_hashes: Vec<u64>,
+    /// Revert target per user message, rebuilt alongside `timeline`.
+    revert_turn_counts: HashMap<MessageId, i64>,
     /// Sidebar ⟷ chat split state (drag-resizable, Electron parity).
     sidebar_resize: Entity<ResizableState>,
     /// Right-hand files panel (M2). Kept alive while toggled off so tree
@@ -333,32 +345,95 @@ fn activity_detail(activity: &OrchestrationThreadActivity) -> Option<String> {
     Some(text)
 }
 
+/// One row of the virtualized timeline: a position in the thread view's
+/// `messages` or `activities`, or the trailing typing indicator.
+///
+/// Rows hold indices rather than borrows so the order can be cached on the
+/// entity across frames; they are rebuilt whenever the view changes, which is
+/// the only time the underlying vectors can move.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TimelineRow {
+    Message(usize),
+    Activity(usize),
+    Running,
+}
+
+/// Overdraw roughly a viewport of rows so scrolling doesn't pop.
+fn new_timeline_list() -> ListState {
+    let state = ListState::new(0, ListAlignment::Bottom, px(800.));
+    state.set_follow_mode(FollowMode::Tail);
+    state
+}
+
 /// A turn's timeline interleaves messages and activity (tool) rows in
-/// creation order, exactly like the Electron `MessagesTimeline`.
-enum TimelineEntry<'a> {
-    Message(&'a OrchestrationMessage),
-    Activity(&'a OrchestrationThreadActivity),
-}
-
-impl TimelineEntry<'_> {
-    fn created_at(&self) -> &str {
-        match self {
-            TimelineEntry::Message(message) => &message.created_at.0,
-            TimelineEntry::Activity(activity) => &activity.created_at.0,
-        }
-    }
-}
-
-fn timeline_entries(view: &OrchestrationThread) -> Vec<TimelineEntry<'_>> {
-    let mut entries: Vec<TimelineEntry> = view
+/// creation order, exactly like the Electron `MessagesTimeline`, with the
+/// typing indicator as a trailing row so it participates in virtualization.
+fn timeline_rows(view: &OrchestrationThread, running: bool) -> Vec<TimelineRow> {
+    let mut entries: Vec<(&str, TimelineRow)> = view
         .messages
         .iter()
-        .map(TimelineEntry::Message)
-        .chain(view.activities.iter().map(TimelineEntry::Activity))
+        .enumerate()
+        .map(|(index, message)| (message.created_at.0.as_str(), TimelineRow::Message(index)))
+        .chain(view.activities.iter().enumerate().map(|(index, activity)| {
+            (activity.created_at.0.as_str(), TimelineRow::Activity(index))
+        }))
         .collect();
-    // RFC3339 timestamps with fixed millisecond precision sort lexically.
-    entries.sort_by(|a, b| a.created_at().cmp(b.created_at()));
-    entries
+    // RFC3339 timestamps with fixed millisecond precision sort lexically. The
+    // sort is stable, so messages keep their lead over same-instant activities.
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut rows: Vec<TimelineRow> = entries.into_iter().map(|(_, row)| row).collect();
+    if running {
+        rows.push(TimelineRow::Running);
+    }
+    rows
+}
+
+/// Fingerprint of everything in a row that changes its rendered height.
+///
+/// `ListState` caches the height it measured for each row, so a row whose
+/// content grew — a streaming message, a tool result arriving, a detail block
+/// expanding — keeps its stale height until it is explicitly remeasured.
+/// Comparing fingerprints is how [`ChatApp::rebuild_timeline`] finds those
+/// rows without remeasuring (and so re-laying-out) the whole thread.
+fn row_content_hash(
+    view: &OrchestrationThread,
+    row: TimelineRow,
+    revert_turn_counts: &HashMap<MessageId, i64>,
+    expanded_activities: &HashSet<String>,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    match row {
+        TimelineRow::Message(index) => {
+            let Some(message) = view.messages.get(index) else {
+                return 0;
+            };
+            0u8.hash(&mut hasher);
+            message.id.0.hash(&mut hasher);
+            message.role.hash(&mut hasher);
+            message.text.0.hash(&mut hasher);
+            message.streaming.hash(&mut hasher);
+            revert_turn_counts
+                .contains_key(&message.id)
+                .hash(&mut hasher);
+        }
+        TimelineRow::Activity(index) => {
+            let Some(activity) = view.activities.get(index) else {
+                return 0;
+            };
+            1u8.hash(&mut hasher);
+            activity.id.0.hash(&mut hasher);
+            activity.summary.0.hash(&mut hasher);
+            let expanded = expanded_activities.contains(&activity.id.0);
+            expanded.hash(&mut hasher);
+            if expanded {
+                activity_detail(activity).hash(&mut hasher);
+            } else {
+                activity_detail(activity).is_some().hash(&mut hasher);
+            }
+        }
+        TimelineRow::Running => 2u8.hash(&mut hasher),
+    }
+    hasher.finish()
 }
 
 impl ChatApp {
@@ -475,8 +550,10 @@ impl ChatApp {
             pending_revert: None,
             reverting: false,
             expanded_activities: HashSet::new(),
-            timeline_scroll: ScrollHandle::new(),
-            stick_to_bottom: true,
+            timeline_list: new_timeline_list(),
+            timeline: Vec::new(),
+            timeline_hashes: Vec::new(),
+            revert_turn_counts: HashMap::new(),
             sidebar_resize: cx.new(|_| ResizableState::default()),
             files: None,
             files_open: false,
@@ -582,8 +659,12 @@ impl ChatApp {
         self.mention = None;
         self.pending_attachments.clear();
         self.pending_revert = None;
-        self.stick_to_bottom = true;
-        self.timeline_scroll.scroll_to_bottom();
+        // A different thread is a different list: drop every measured row and
+        // re-arm tail following so the new thread opens at its newest message.
+        self.timeline = Vec::new();
+        self.timeline_hashes = Vec::new();
+        self.revert_turn_counts = HashMap::new();
+        self.timeline_list = new_timeline_list();
         self.thread = Some(OpenThread {
             id: id.clone(),
             _handle: handle,
@@ -600,12 +681,10 @@ impl ChatApp {
                         if let Some(open) = &mut app.thread {
                             open.state = state;
                         }
-                        // New content keeps the timeline pinned to the bottom
-                        // unless the user scrolled away.
-                        if app.stick_to_bottom {
-                            app.timeline_scroll.scroll_to_bottom();
-                        }
-                        cx.notify();
+                        // The list follows the tail on its own
+                        // (`FollowMode::Tail`) and re-engages when the user
+                        // scrolls back down, so this only has to resync rows.
+                        app.rebuild_timeline(cx);
                         false
                     })
                     .unwrap_or(true);
@@ -1735,10 +1814,348 @@ impl ChatApp {
             )
     }
 
+    /// Recompute the cached timeline order, revert targets and list length.
+    ///
+    /// Called when the thread view changes — never from `render`, which is the
+    /// point: this walks every message and activity, and doing that per frame
+    /// is what made scrolling a long thread stutter.
+    fn rebuild_timeline(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self
+            .thread
+            .as_ref()
+            .and_then(|open| open.state.view.as_ref())
+        else {
+            self.timeline = Vec::new();
+            self.timeline_hashes = Vec::new();
+            self.revert_turn_counts = HashMap::new();
+            self.timeline_list.reset(0);
+            cx.notify();
+            return;
+        };
+
+        let running = view
+            .session
+            .as_ref()
+            .is_some_and(|session| session.status == OrchestrationSessionStatus::Running);
+        let rows = timeline_rows(view, running);
+
+        // Revert targets: a user message reverts to the checkpoint BEFORE the
+        // next assistant turn's checkpoint (`checkpointTurnCount - 1`) —
+        // ported from ChatView's `revertTurnCountByUserMessageId`.
+        let by_assistant: HashMap<&MessageId, i64> = view
+            .checkpoints
+            .iter()
+            .filter_map(|checkpoint| {
+                checkpoint
+                    .assistant_message_id
+                    .as_ref()
+                    .map(|id| (id, checkpoint.checkpoint_turn_count.0))
+            })
+            .collect();
+        let mut messages: Vec<&OrchestrationMessage> = view.messages.iter().collect();
+        messages.sort_by(|a, b| a.created_at.0.cmp(&b.created_at.0));
+        let mut counts = HashMap::new();
+        for (index, message) in messages.iter().enumerate() {
+            if message.role != OrchestrationMessageRole::User {
+                continue;
+            }
+            for next in &messages[index + 1..] {
+                if next.role == OrchestrationMessageRole::User {
+                    break;
+                }
+                if let Some(count) = by_assistant.get(&next.id) {
+                    counts.insert(message.id.clone(), (count - 1).max(0));
+                    break;
+                }
+            }
+        }
+        self.revert_turn_counts = counts;
+
+        let hashes = rows
+            .iter()
+            .map(|row| {
+                row_content_hash(
+                    view,
+                    *row,
+                    &self.revert_turn_counts,
+                    &self.expanded_activities,
+                )
+            })
+            .collect();
+        let previous = std::mem::replace(&mut self.timeline, rows);
+        let previous_hashes: Vec<u64> = std::mem::replace(&mut self.timeline_hashes, hashes);
+
+        // The common shapes are "rows appended" and "same rows, tail grew"
+        // (a streaming message). Splice the identity difference rather than
+        // resetting, which would throw away the user's place in the history.
+        let shared = previous
+            .iter()
+            .zip(self.timeline.iter())
+            .take_while(|(before, after)| before == after)
+            .count();
+        if shared != previous.len() || shared != self.timeline.len() {
+            self.timeline_list
+                .splice(shared..previous.len(), self.timeline.len() - shared);
+        }
+        // Rows that survived the splice keep their cached height, so remeasure
+        // the ones whose content moved. In a streaming turn that is one row.
+        let mut index = 0;
+        while index < shared {
+            if previous_hashes.get(index) == self.timeline_hashes.get(index) {
+                index += 1;
+                continue;
+            }
+            let start = index;
+            while index < shared && previous_hashes.get(index) != self.timeline_hashes.get(index) {
+                index += 1;
+            }
+            self.timeline_list.remeasure_items(start..index);
+        }
+        cx.notify();
+    }
+
+    /// Invalidate one row's cached height after a purely local change.
+    fn remeasure_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(row) = self.timeline.get(index).copied() else {
+            return;
+        };
+        // Keep the fingerprint in step, or the next rebuild remeasures again.
+        let hash = self
+            .thread
+            .as_ref()
+            .and_then(|open| open.state.view.as_ref())
+            .map(|view| {
+                row_content_hash(
+                    view,
+                    row,
+                    &self.revert_turn_counts,
+                    &self.expanded_activities,
+                )
+            });
+        if let Some(hash) = hash {
+            self.timeline_hashes[index] = hash;
+        }
+        self.timeline_list.remeasure_items(index..index + 1);
+        cx.notify();
+    }
+
+    /// Render one virtualized timeline row.
+    ///
+    /// Only rows near the viewport are built, so this runs a handful of times
+    /// per frame instead of once per message in the thread.
+    fn render_timeline_row(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(row) = self.timeline.get(index).copied() else {
+            return div().into_any_element();
+        };
+        let Some(view) = self
+            .thread
+            .as_ref()
+            .and_then(|open| open.state.view.as_ref())
+        else {
+            return div().into_any_element();
+        };
+        let running = view
+            .session
+            .as_ref()
+            .is_some_and(|session| session.status == OrchestrationSessionStatus::Running);
+        let revert_turn_counts = &self.revert_turn_counts;
+        let body: AnyElement = (|| -> AnyElement {
+            match row {
+                TimelineRow::Message(message_index) => {
+                    let Some(message) = view.messages.get(message_index) else {
+                        return div().into_any_element();
+                    };
+                    let is_user = message.role == OrchestrationMessageRole::User;
+                    if is_user {
+                        let mut line = h_flex().w_full().justify_end().items_center().gap_2();
+                        if let Some(turn_count) = revert_turn_counts.get(&message.id).copied() {
+                            let armed = self.pending_revert.as_ref() == Some(&message.id);
+                            let message_id = message.id.clone();
+                            let button: gpui::AnyElement = if armed {
+                                Button::new(SharedString::from(format!("revert-{}", message.id.0)))
+                                    .label("Revert?")
+                                    .danger()
+                                    .outline()
+                                    .xsmall()
+                                    .disabled(self.reverting || running)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.revert_user_message(
+                                            message_id.clone(),
+                                            turn_count,
+                                            cx,
+                                        );
+                                    }))
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .id(SharedString::from(format!("revert-{}", message.id.0)))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size_6()
+                                    .rounded(cx.theme().radius)
+                                    .cursor_pointer()
+                                    .text_color(cx.theme().muted_foreground.opacity(0.5))
+                                    .hover(|style| style.bg(cx.theme().secondary))
+                                    .child(Icon::new(IconName::Undo2).size_3())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.revert_user_message(
+                                            message_id.clone(),
+                                            turn_count,
+                                            cx,
+                                        );
+                                    }))
+                                    .into_any_element()
+                            };
+                            line = line.child(button);
+                        }
+                        (line.child(
+                            div()
+                                .max_w(relative(0.8))
+                                .rounded(px(16.))
+                                .bg(cx.theme().accent)
+                                .p_3()
+                                .text_sm()
+                                .text_color(cx.theme().foreground)
+                                .child(SharedString::from(message.text.0.clone())),
+                        ))
+                        .into_any_element()
+                    } else {
+                        let text = message.text.0.clone();
+                        let streaming = message.streaming;
+                        (div()
+                            .px_1()
+                            .py_0p5()
+                            .text_sm()
+                            .text_color(cx.theme().foreground)
+                            .map(|this| {
+                                if text.is_empty() && streaming {
+                                    this.text_color(cx.theme().muted_foreground)
+                                        .child("(empty response)")
+                                } else {
+                                    // Keyed per message: the free
+                                    // `markdown()` helper keys by call
+                                    // site and would collide in this
+                                    // loop.
+                                    this.child(
+                                        TextView::markdown(
+                                            SharedString::from(format!("md-{}", message.id.0)),
+                                            SharedString::from(text),
+                                        )
+                                        .selectable(true),
+                                    )
+                                }
+                            }))
+                        .into_any_element()
+                    }
+                }
+                TimelineRow::Activity(activity_index) => {
+                    let Some(activity) = view.activities.get(activity_index) else {
+                        return div().into_any_element();
+                    };
+                    let tone_color = match activity.tone {
+                        OrchestrationThreadActivityTone::Error => cx.theme().danger,
+                        OrchestrationThreadActivityTone::Approval => cx.theme().warning,
+                        _ => cx.theme().foreground.opacity(0.82),
+                    };
+                    let expanded = self.expanded_activities.contains(&activity.id.0);
+                    let detail = activity_detail(activity);
+                    let activity_id = activity.id.0.clone();
+                    let mut block = v_flex().child(
+                        h_flex()
+                            .id(SharedString::from(format!("act-{}", activity.id.0)))
+                            .px_0p5()
+                            .py_0p5()
+                            .gap_1p5()
+                            .items_center()
+                            .rounded(cx.theme().radius)
+                            .when(detail.is_some(), |this| {
+                                this.cursor_pointer()
+                                    .hover(|style| style.bg(cx.theme().secondary))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if !this.expanded_activities.remove(&activity_id) {
+                                            this.expanded_activities.insert(activity_id.clone());
+                                        }
+                                        // Local UI state, so `rebuild_timeline`
+                                        // never runs — remeasure by hand or the
+                                        // detail block renders into the collapsed
+                                        // row's cached height.
+                                        this.remeasure_row(index, cx);
+                                    }))
+                            })
+                            .child(
+                                Icon::new(activity_icon(&activity.kind.0))
+                                    .size_3p5()
+                                    .text_color(cx.theme().muted_foreground.opacity(0.8)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .font_medium()
+                                    .text_color(tone_color)
+                                    .truncate()
+                                    .child(SharedString::from(activity.summary.0.clone())),
+                            ),
+                    );
+                    if expanded && let Some(detail) = detail {
+                        // Electron parity: expanded tool detail is 11px
+                        // mono under the row.
+                        block = block.child(
+                            div()
+                                .id(SharedString::from(format!("act-detail-{}", activity.id.0)))
+                                .ml_5()
+                                .mt_0p5()
+                                .max_h(px(240.))
+                                .overflow_y_scroll()
+                                .rounded(cx.theme().radius)
+                                .bg(cx.theme().secondary)
+                                .px_2p5()
+                                .py_2()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .whitespace_normal()
+                                .child(SharedString::from(detail)),
+                        );
+                    }
+                    block.into_any_element()
+                }
+                TimelineRow::Running => (h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .px_0p5()
+                    .py_1()
+                    .child(h_flex().gap_1().children((0..3).map(|_| {
+                        div()
+                            .size(px(4.))
+                            .rounded_full()
+                            .bg(cx.theme().muted_foreground.opacity(0.3))
+                    })))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground.opacity(0.7))
+                            .child("Working…"),
+                    ))
+                .into_any_element(),
+            }
+        })();
+        // The old column's `gap_2` becomes per-row padding now that rows are
+        // independent elements; `max_w` keeps the web timeline's centred measure.
+        div()
+            .w_full()
+            .max_w(px(768.))
+            .mx_auto()
+            .px_5()
+            .py_1()
+            .child(body)
+            .into_any_element()
+    }
+
     /// Chat column mirroring the Electron `ChatView`: header, error banner,
     /// centered max-w-3xl timeline (user bubbles right, assistant plain,
     /// low-weight activity rows), rounded-22 composer with circular send.
-    fn render_chat(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_chat(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(open) = &self.thread else {
             return v_flex()
                 .flex_1()
@@ -1793,236 +2210,6 @@ impl ChatApp {
             .map(|(_, model)| SharedString::from(model.name.0.clone()))
             .or_else(|| current_slug.clone().map(SharedString::from))
             .unwrap_or_else(|| "Model".into());
-
-        // Revert targets: a user message reverts to the checkpoint BEFORE the
-        // next assistant turn's checkpoint (`checkpointTurnCount - 1`) —
-        // ported from ChatView's `revertTurnCountByUserMessageId`.
-        let revert_turn_counts: HashMap<MessageId, i64> = view
-            .map(|view| {
-                let by_assistant: HashMap<&MessageId, i64> = view
-                    .checkpoints
-                    .iter()
-                    .filter_map(|checkpoint| {
-                        checkpoint
-                            .assistant_message_id
-                            .as_ref()
-                            .map(|id| (id, checkpoint.checkpoint_turn_count.0))
-                    })
-                    .collect();
-                let mut messages: Vec<&OrchestrationMessage> = view.messages.iter().collect();
-                messages.sort_by(|a, b| a.created_at.0.cmp(&b.created_at.0));
-                let mut map = HashMap::new();
-                for (index, message) in messages.iter().enumerate() {
-                    if message.role != OrchestrationMessageRole::User {
-                        continue;
-                    }
-                    for next in &messages[index + 1..] {
-                        if next.role == OrchestrationMessageRole::User {
-                            break;
-                        }
-                        if let Some(count) = by_assistant.get(&next.id) {
-                            map.insert(message.id.clone(), (count - 1).max(0));
-                            break;
-                        }
-                    }
-                }
-                map
-            })
-            .unwrap_or_default();
-
-        // Timeline rows (centered, max-w-3xl like the web timeline).
-        let mut rows = v_flex()
-            .w_full()
-            .max_w(px(768.))
-            .mx_auto()
-            .px_5()
-            .py_4()
-            .gap_2();
-        if let Some(view) = view {
-            for entry in timeline_entries(view) {
-                match entry {
-                    TimelineEntry::Message(message) => {
-                        let is_user = message.role == OrchestrationMessageRole::User;
-                        if is_user {
-                            let mut line = h_flex().w_full().justify_end().items_center().gap_2();
-                            if let Some(turn_count) = revert_turn_counts.get(&message.id).copied() {
-                                let armed = self.pending_revert.as_ref() == Some(&message.id);
-                                let message_id = message.id.clone();
-                                let button: gpui::AnyElement = if armed {
-                                    Button::new(SharedString::from(format!(
-                                        "revert-{}",
-                                        message.id.0
-                                    )))
-                                    .label("Revert?")
-                                    .danger()
-                                    .outline()
-                                    .xsmall()
-                                    .disabled(self.reverting || running)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.revert_user_message(
-                                            message_id.clone(),
-                                            turn_count,
-                                            cx,
-                                        );
-                                    }))
-                                    .into_any_element()
-                                } else {
-                                    div()
-                                        .id(SharedString::from(format!("revert-{}", message.id.0)))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .size_6()
-                                        .rounded(cx.theme().radius)
-                                        .cursor_pointer()
-                                        .text_color(cx.theme().muted_foreground.opacity(0.5))
-                                        .hover(|style| style.bg(cx.theme().secondary))
-                                        .child(Icon::new(IconName::Undo2).size_3())
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.revert_user_message(
-                                                message_id.clone(),
-                                                turn_count,
-                                                cx,
-                                            );
-                                        }))
-                                        .into_any_element()
-                                };
-                                line = line.child(button);
-                            }
-                            rows = rows.child(
-                                line.child(
-                                    div()
-                                        .max_w(relative(0.8))
-                                        .rounded(px(16.))
-                                        .bg(cx.theme().accent)
-                                        .p_3()
-                                        .text_sm()
-                                        .text_color(cx.theme().foreground)
-                                        .child(SharedString::from(message.text.0.clone())),
-                                ),
-                            );
-                        } else {
-                            let text = message.text.0.clone();
-                            let streaming = message.streaming;
-                            rows = rows.child(
-                                div()
-                                    .px_1()
-                                    .py_0p5()
-                                    .text_sm()
-                                    .text_color(cx.theme().foreground)
-                                    .map(|this| {
-                                        if text.is_empty() && streaming {
-                                            this.text_color(cx.theme().muted_foreground)
-                                                .child("(empty response)")
-                                        } else {
-                                            // Keyed per message: the free
-                                            // `markdown()` helper keys by call
-                                            // site and would collide in this
-                                            // loop.
-                                            this.child(
-                                                TextView::markdown(
-                                                    SharedString::from(format!(
-                                                        "md-{}",
-                                                        message.id.0
-                                                    )),
-                                                    SharedString::from(text),
-                                                )
-                                                .selectable(true),
-                                            )
-                                        }
-                                    }),
-                            );
-                        }
-                    }
-                    TimelineEntry::Activity(activity) => {
-                        let tone_color = match activity.tone {
-                            OrchestrationThreadActivityTone::Error => cx.theme().danger,
-                            OrchestrationThreadActivityTone::Approval => cx.theme().warning,
-                            _ => cx.theme().foreground.opacity(0.82),
-                        };
-                        let expanded = self.expanded_activities.contains(&activity.id.0);
-                        let detail = activity_detail(activity);
-                        let activity_id = activity.id.0.clone();
-                        let mut block = v_flex().child(
-                            h_flex()
-                                .id(SharedString::from(format!("act-{}", activity.id.0)))
-                                .px_0p5()
-                                .py_0p5()
-                                .gap_1p5()
-                                .items_center()
-                                .rounded(cx.theme().radius)
-                                .when(detail.is_some(), |this| {
-                                    this.cursor_pointer()
-                                        .hover(|style| style.bg(cx.theme().secondary))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if !this.expanded_activities.remove(&activity_id) {
-                                                this.expanded_activities
-                                                    .insert(activity_id.clone());
-                                            }
-                                            cx.notify();
-                                        }))
-                                })
-                                .child(
-                                    Icon::new(activity_icon(&activity.kind.0))
-                                        .size_3p5()
-                                        .text_color(cx.theme().muted_foreground.opacity(0.8)),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.))
-                                        .font_medium()
-                                        .text_color(tone_color)
-                                        .truncate()
-                                        .child(SharedString::from(activity.summary.0.clone())),
-                                ),
-                        );
-                        if expanded && let Some(detail) = detail {
-                            // Electron parity: expanded tool detail is 11px
-                            // mono under the row.
-                            block = block.child(
-                                div()
-                                    .id(SharedString::from(format!("act-detail-{}", activity.id.0)))
-                                    .ml_5()
-                                    .mt_0p5()
-                                    .max_h(px(240.))
-                                    .overflow_y_scroll()
-                                    .rounded(cx.theme().radius)
-                                    .bg(cx.theme().secondary)
-                                    .px_2p5()
-                                    .py_2()
-                                    .font_family(cx.theme().mono_font_family.clone())
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .whitespace_normal()
-                                    .child(SharedString::from(detail)),
-                            );
-                        }
-                        rows = rows.child(block);
-                    }
-                }
-            }
-        }
-        if running {
-            rows = rows.child(
-                h_flex()
-                    .gap_1p5()
-                    .items_center()
-                    .px_0p5()
-                    .py_1()
-                    .child(h_flex().gap_1().children((0..3).map(|_| {
-                        div()
-                            .size(px(4.))
-                            .rounded_full()
-                            .bg(cx.theme().muted_foreground.opacity(0.3))
-                    })))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground.opacity(0.7))
-                            .child("Working…"),
-                    ),
-            );
-        }
 
         // Pending approvals / user-input requests are derived from the
         // activity log (the reducer deliberately skips their events); the
@@ -2422,23 +2609,17 @@ impl ChatApp {
             );
         }
         main.child(
-            div()
-                .id("messages")
-                .flex_1()
-                .overflow_y_scroll()
-                .track_scroll(&self.timeline_scroll)
-                .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                    // Offsets grow negative downward; "at bottom" within 60px
-                    // re-arms anchoring, scrolling further up releases it.
-                    let offset = this.timeline_scroll.offset();
-                    let max = this.timeline_scroll.max_offset();
-                    let at_bottom = offset.y <= -(max.y - px(60.));
-                    if this.stick_to_bottom != at_bottom {
-                        this.stick_to_bottom = at_bottom;
-                        cx.notify();
-                    }
-                }))
-                .child(rows),
+            // The timeline is virtualized: only rows near the viewport are
+            // built, so a long thread costs the same per frame as a short one.
+            // `py_4` sits outside the scroll area (the old column's padding was
+            // inside it) — the difference is invisible at the bottom anchor.
+            div().flex_1().py_4().child(
+                list(
+                    self.timeline_list.clone(),
+                    cx.processor(|this, index, _window, cx| this.render_timeline_row(index, cx)),
+                )
+                .size_full(),
+            ),
         )
         .child(composer)
         .into_any_element()

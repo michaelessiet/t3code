@@ -133,12 +133,19 @@ codegen-units = 16
 debug = "limited"
 split-debuginfo = "unpacked"
 
+# Everything on a render frame's hot path is optimised even in dev builds;
+# without this, scrolling and text shaping are unusably slow to develop against.
 [profile.dev.package]
 gpui = { opt-level = 3 }
 gpui_platform = { opt-level = 3 }
+gpui-base = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+markdown = { opt-level = 3 }
 resvg = { opt-level = 3 }
+ropey = { opt-level = 3 }
 rustybuzz = { opt-level = 3 }
 taffy = { opt-level = 3 }
+tree-sitter = { opt-level = 3 }
 ttf-parser = { opt-level = 3 }
 sum_tree = { opt-level = 3 }
 
