@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Context, Entity, MouseButton, PromptLevel, SharedString, Subscription, WeakEntity, Window,
-    actions, div, prelude::*, px,
+    App, Context, Entity, Focusable as _, MouseButton, PromptLevel, SharedString, Subscription,
+    WeakEntity, Window, actions, div, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
@@ -521,6 +521,44 @@ impl FilesPanel {
         });
     }
 
+    /// Open `path` and put the cursor on `position`, if given.
+    ///
+    /// The entry point for anything outside the panel that knows a location —
+    /// QuickSearch results, the command palette, a go-to-definition hop. When
+    /// the file is already open `open_file` is a no-op, so the reveal has to
+    /// be applied here instead of through `pending_reveal`.
+    pub fn reveal(
+        &mut self,
+        path: String,
+        position: Option<WirePosition>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let already_open = self
+            .open
+            .as_ref()
+            .is_some_and(|open| open.relative_path == path);
+        if already_open {
+            if let Some(position) = position {
+                self.editor.update(cx, |state, cx| {
+                    let offset = wire_to_offset(state.text(), position);
+                    let position = bridge::editor_position(state.text(), offset);
+                    state.set_cursor_position(position, window, cx);
+                });
+            }
+            self.focus_editor(window, cx);
+            return;
+        }
+        self.pending_reveal = position.map(|position| (path.clone(), position));
+        self.open_file(path, window, cx);
+        self.focus_editor(window, cx);
+    }
+
+    /// Move keyboard focus into the editor buffer.
+    fn focus_editor(&self, window: &mut Window, cx: &mut App) {
+        self.editor.read(cx).focus_handle(cx).focus(window, cx);
+    }
+
     fn open_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         if self
             .open
@@ -645,6 +683,25 @@ impl FilesPanel {
             return;
         };
         self.spawn_write(base_revision, window, cx);
+    }
+
+    /// Start an inline create row at the workspace root, the way the panel's
+    /// own header buttons do. Backs the command palette's "New file" / "New
+    /// folder" rows, which Electron routes to the same file-tree affordance.
+    pub fn create_at_root(&mut self, directory: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let kind = if directory {
+            ProjectMutateEntryInputCreateKind::Directory
+        } else {
+            ProjectMutateEntryInputCreateKind::File
+        };
+        self.start_edit(
+            TreeEditTarget::Create {
+                parent: String::new(),
+                kind,
+            },
+            window,
+            cx,
+        );
     }
 
     /// ⌘S: write now instead of waiting out the autosave debounce. A clean

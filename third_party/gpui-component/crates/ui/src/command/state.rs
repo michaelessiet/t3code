@@ -38,6 +38,7 @@ pub(crate) struct CommandModel {
     pub(crate) entries: Vec<CommandEntry>,
     pub(crate) searchable: bool,
     pub(crate) filterable: bool,
+    pub(crate) cancel_clears_query: bool,
     pub(crate) on_query: Option<Rc<OnQuery>>,
     pub(crate) on_select: Option<Rc<OnIndex>>,
     pub(crate) on_confirm: Option<Rc<OnIndex>>,
@@ -50,6 +51,7 @@ impl Default for CommandModel {
             entries: Vec::new(),
             searchable: true,
             filterable: true,
+            cancel_clears_query: true,
             on_query: None,
             on_select: None,
             on_confirm: None,
@@ -183,7 +185,10 @@ impl CommandState {
         if let Some(matched_ix) = preserved_selection {
             self.selected_index = Some(matched_ix);
             self.preserve_no_selection = false;
-            self.pending_scroll = self.matched.get(matched_ix).map(|matched| matched.row_ix);
+            self.pending_scroll = self
+                .matched
+                .get(matched_ix)
+                .map(|matched| self.scroll_anchor(matched.row_ix));
         } else if self.preserve_no_selection {
             self.selected_index = None;
             self.pending_scroll = None;
@@ -260,7 +265,7 @@ impl CommandState {
         self.preserve_no_selection = preserve_no_selection;
         self.pending_scroll = matched_ix
             .and_then(|matched_ix| self.matched.get(matched_ix))
-            .map(|matched| matched.row_ix);
+            .map(|matched| self.scroll_anchor(matched.row_ix));
 
         if let Some((on_select, index)) = self.on_select_if_changed(previous_index) {
             window.defer(cx, move |window, cx| on_select(index, window, cx));
@@ -417,8 +422,25 @@ impl CommandState {
         self.pending_scroll = self
             .selected_index
             .and_then(|selected_index| self.matched.get(selected_index))
-            .map(|matched| matched.row_ix)
+            .map(|matched| self.scroll_anchor(matched.row_ix))
             .or(Some(0));
+    }
+
+    /// The row to scroll to so `row_ix` arrives *with* the chrome that
+    /// introduces it. A group's first item is preceded by its heading (and the
+    /// separator before that); scrolling to the item alone silently pushes the
+    /// heading off the top of the list.
+    fn scroll_anchor(&self, row_ix: usize) -> usize {
+        let mut anchor = row_ix;
+        while anchor > 0
+            && matches!(
+                self.rows[anchor - 1],
+                CommandRow::Heading(_) | CommandRow::Separator
+            )
+        {
+            anchor -= 1;
+        }
+        anchor
     }
 
     fn on_query_input_event(
@@ -503,7 +525,10 @@ impl CommandState {
         let previous_index = self.selected_index();
         self.selected_index = Some(matched_ix);
         self.preserve_no_selection = false;
-        self.pending_scroll = self.matched.get(matched_ix).map(|matched| matched.row_ix);
+        self.pending_scroll = self
+            .matched
+            .get(matched_ix)
+            .map(|matched| self.scroll_anchor(matched.row_ix));
 
         if let Some((on_select, index)) = self.on_select_if_changed(previous_index) {
             window.defer(cx, move |window, cx| on_select(index, window, cx));
@@ -557,9 +582,11 @@ impl CommandState {
     }
 
     /// Escape clears a non-empty query first, and only then leaves the palette
-    /// — the dialog that hosts it closes on the second press.
+    /// — the dialog that hosts it closes on the second press. Palettes that opt
+    /// out via [`crate::command::Command::cancel_clears_query`] skip straight
+    /// to leaving.
     fn on_action_cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
-        if self.model.searchable && !self.query(cx).is_empty() {
+        if self.model.cancel_clears_query && self.model.searchable && !self.query(cx).is_empty() {
             self.set_query("", window, cx);
             return;
         }
@@ -806,6 +833,11 @@ impl Render for CommandState {
         let rows_count = self.rows.len();
         let row_sizes = self.row_sizes.clone();
         let command_state = cx.entity();
+        let suffix = self
+            .options
+            .suffix
+            .clone()
+            .map(|suffix| suffix(self, window, cx));
 
         v_flex()
             .id("command")
@@ -841,6 +873,7 @@ impl Render for CommandState {
                                     Icon::new(IconName::Search)
                                         .text_color(cx.theme().muted_foreground),
                                 )
+                                .when_some(suffix, |input, suffix| input.suffix(suffix))
                                 .appearance(false)
                                 .p_0(),
                         ),

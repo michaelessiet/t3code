@@ -23,6 +23,7 @@ pub(crate) struct CommandOptions {
     pub(crate) bordered: bool,
     pub(crate) header: Option<Rc<CommandSlot>>,
     pub(crate) footer: Option<Rc<CommandSlot>>,
+    pub(crate) suffix: Option<Rc<CommandSlot>>,
 }
 
 impl Default for CommandOptions {
@@ -35,6 +36,7 @@ impl Default for CommandOptions {
             bordered: true,
             header: None,
             footer: None,
+            suffix: None,
         }
     }
 }
@@ -60,6 +62,7 @@ pub struct Command {
     entries: Vec<CommandEntry>,
     searchable: bool,
     filterable: bool,
+    cancel_clears_query: bool,
     on_query: Option<Rc<OnQuery>>,
     on_select: Option<Rc<OnIndex>>,
     on_confirm: Option<Rc<OnIndex>>,
@@ -75,6 +78,7 @@ impl Command {
             entries: Vec::new(),
             searchable: true,
             filterable: true,
+            cancel_clears_query: true,
             on_query: None,
             on_select: None,
             on_confirm: None,
@@ -122,6 +126,17 @@ impl Command {
     /// highlight back to the first item instead of a local textual match.
     pub fn filterable(mut self, filterable: bool) -> Self {
         self.filterable = filterable;
+        self
+    }
+
+    /// Whether Escape clears a non-empty query before it leaves the palette,
+    /// default is `true`.
+    ///
+    /// Set this to `false` for a palette whose query is disposable — a modal
+    /// search overlay the user expects one Escape to dismiss outright, however
+    /// much they have typed.
+    pub fn cancel_clears_query(mut self, cancel_clears_query: bool) -> Self {
+        self.cancel_clears_query = cancel_clears_query;
         self
     }
 
@@ -218,6 +233,24 @@ impl Command {
         self
     }
 
+    /// Render a custom element at the trailing end of the search field, in
+    /// line with the query text.
+    ///
+    /// Unlike [`Self::header`], which occupies a row of its own above the
+    /// field, this sits inside it — the place for a compact mode switch or
+    /// result count that should not cost the palette a line of height.
+    /// Ignored when the palette is not [`Self::searchable`].
+    pub fn suffix<F, E>(mut self, f: F) -> Self
+    where
+        F: Fn(&CommandState, &mut Window, &mut App) -> E + 'static,
+        E: IntoElement,
+    {
+        self.options.suffix = Some(Rc::new(move |state, window, cx| {
+            f(state, window, cx).into_any_element()
+        }));
+        self
+    }
+
     /// Render a custom element below the command list.
     pub fn footer<F, E>(mut self, f: F) -> Self
     where
@@ -244,6 +277,7 @@ impl RenderOnce for Command {
             entries: self.entries,
             searchable: self.searchable,
             filterable: self.filterable,
+            cancel_clears_query: self.cancel_clears_query,
             on_query: self.on_query,
             on_select: self.on_select,
             on_confirm: self.on_confirm,

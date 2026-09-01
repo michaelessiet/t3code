@@ -4,6 +4,7 @@
 mod chat;
 mod files;
 mod lsp;
+mod palette;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -78,6 +79,18 @@ fn resolve_server_entry() -> PathBuf {
     }
     // Dev layout: run from the repo root.
     PathBuf::from("apps/server/dist/bin.mjs")
+}
+
+/// Electron's `mod+` chord prefix, resolved for this platform. Binding both
+/// `cmd-` and `ctrl-` everywhere would work, but the command palette resolves
+/// its shortcut chips from the live keymap and would then advertise the wrong
+/// one of the pair.
+fn modified(chord: &str) -> String {
+    #[cfg(target_os = "macos")]
+    let prefix = "cmd";
+    #[cfg(not(target_os = "macos"))]
+    let prefix = "ctrl";
+    format!("{prefix}-{chord}")
 }
 
 fn vitre_home() -> PathBuf {
@@ -170,9 +183,23 @@ fn main() {
         // focus path, so they reach the files panel from the editor and the
         // tree alike and do nothing when no file is open.
         cx.bind_keys([
-            KeyBinding::new("cmd-s", files::SaveFile, None),
-            KeyBinding::new("ctrl-s", files::SaveFile, None),
+            KeyBinding::new(&modified("s"), files::SaveFile, None),
             KeyBinding::new("shift-alt-f", files::FormatDocument, None),
+        ]);
+
+        // Palette surfaces and the workspace commands their rows advertise.
+        // Every chord here is the Electron DEFAULT_KEYBINDINGS default for the
+        // named command (`quickSearch.open`, `quickSearch.content`,
+        // `commandPalette.toggle`, `chat.new`, `rightPanel.toggle`); they are
+        // rebindable there, which lands with the keymap work. The command
+        // palette resolves its shortcut chips from these bindings, so a chord
+        // changed here changes the chip too.
+        cx.bind_keys([
+            KeyBinding::new(&modified("p"), chat::QuickSearchOpen, None),
+            KeyBinding::new(&modified("shift-f"), chat::QuickSearchContent, None),
+            KeyBinding::new(&modified("shift-p"), chat::CommandPaletteToggle, None),
+            KeyBinding::new(&modified("shift-o"), chat::NewThread, None),
+            KeyBinding::new(&modified("j"), chat::ToggleFilesPanel, None),
         ]);
 
         let supervisor = Arc::new(Supervisor::start(config));

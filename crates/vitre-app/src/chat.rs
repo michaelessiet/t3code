@@ -12,11 +12,12 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use gpui::{
-    AnyElement, Context, Entity, FollowMode, ListAlignment, ListState, PathPromptOptions,
-    SharedString, Subscription, Window, div, list, prelude::*, px, relative,
+    AnyElement, Context, Entity, FocusHandle, FollowMode, ListAlignment, ListState,
+    PathPromptOptions, SharedString, Subscription, Window, actions, div, list, prelude::*, px,
+    relative,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, ResizableState, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, ResizableState, Root, Sizable as _,
     StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex, h_resizable,
@@ -37,7 +38,7 @@ use vitre_contracts::{
     ApprovalRequestId, ClientOrchestrationCommand, CommandId, MessageId, ModelSelection,
     NonNegativeInt, OrchestrationMessage, OrchestrationMessageRole, OrchestrationSessionStatus,
     OrchestrationThread, OrchestrationThreadActivity, OrchestrationThreadActivityTone,
-    OrchestrationThreadShell, ProjectEntry, ProjectEntryKind, ProjectSearchEntriesInput,
+    OrchestrationThreadShell, ProjectEntry, ProjectEntryKind, ProjectId, ProjectSearchEntriesInput,
     ProviderApprovalDecision, ProviderInteractionMode, RuntimeMode, ServerConfig, ThreadId,
     TrimmedNonEmptyString,
 };
@@ -49,6 +50,31 @@ use vitre_state::session_logic::{
 };
 
 use crate::files::FilesPanel;
+use crate::lsp::positions::WirePosition;
+use crate::palette::command_palette::{
+    CommandPalette, CommandPaletteEvent, PaletteAction, PaletteContext,
+};
+pub use crate::palette::quick_search::QuickSearchMode;
+use crate::palette::quick_search::{QuickSearch, QuickSearchEvent};
+
+actions!(
+    vitre,
+    [
+        /// Electron's `quickSearch.open` (`mod+p`): jump to a chat or file.
+        QuickSearchOpen,
+        /// Electron's `quickSearch.content` (`mod+shift+f`): search chat and
+        /// file contents.
+        QuickSearchContent,
+        /// Electron's `commandPalette.toggle` (`mod+shift+p`).
+        CommandPaletteToggle,
+        /// Electron's `chat.new` (`mod+shift+o`): start a thread in the
+        /// contextual project.
+        NewThread,
+        /// Electron's `rightPanel.toggle` (`mod+j`); in Vitre the right panel
+        /// is the files panel.
+        ToggleFilesPanel,
+    ]
+);
 
 pub struct ChatApp {
     client: Option<Arc<EnvironmentClient>>,
@@ -93,6 +119,15 @@ pub struct ChatApp {
     /// expansion and the open buffer survive, recreated on project switch.
     files: Option<Entity<FilesPanel>>,
     files_open: bool,
+    /// The open QuickSearch overlay. Held here because the dialog's content
+    /// closure only keeps a weak reference to it.
+    quick_search: Option<Entity<QuickSearch>>,
+    /// The open command palette, held for the same reason.
+    command_palette: Option<Entity<CommandPalette>>,
+    /// The shell's own focus. Actions dispatch along the focus path, and with
+    /// nothing focused gpui falls back to the window's root node — which is
+    /// above this view, so the palette shortcuts would reach no handler.
+    focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -535,6 +570,11 @@ impl ChatApp {
         })
         .detach();
 
+        // Seed the focus path so the palette shortcuts land before the user
+        // has clicked anything.
+        let focus_handle = cx.focus_handle();
+        focus_handle.focus(window, cx);
+
         Self {
             client: None,
             sidecar_status: "starting…".into(),
@@ -557,6 +597,9 @@ impl ChatApp {
             sidebar_resize: cx.new(|_| ResizableState::default()),
             files: None,
             files_open: false,
+            quick_search: None,
+            command_palette: None,
+            focus_handle,
             _subscriptions: subscriptions,
         }
     }
@@ -567,6 +610,152 @@ impl ChatApp {
             self.ensure_files_panel(window, cx);
         }
         cx.notify();
+    }
+
+    /// Open (or re-target, or dismiss) the QuickSearch overlay.
+    ///
+    /// Electron's trigger is a toggle: the shortcut for the mode already
+    /// showing closes the dialog, the other mode switches corpus in place and
+    /// keeps the typed query.
+    pub fn toggle_quick_search(
+        &mut self,
+        mode: QuickSearchMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(search) = self.quick_search.clone() {
+            if search.read(cx).mode() == mode {
+                window.close_dialog(cx);
+            } else {
+                search.update(cx, |search, cx| search.set_mode(mode, cx));
+            }
+            return;
+        }
+        let search = QuickSearch::open(
+            mode,
+            self.client.clone(),
+            self.open_project_root(),
+            self.shell_threads(),
+            window,
+            cx,
+        );
+        self._subscriptions
+            .push(cx.subscribe_in(&search, window, Self::on_quick_search_event));
+        self.quick_search = Some(search);
+        cx.notify();
+    }
+
+    fn on_quick_search_event(
+        &mut self,
+        _search: &Entity<QuickSearch>,
+        event: &QuickSearchEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            QuickSearchEvent::OpenThread(id) => self.select_thread(id.clone(), cx),
+            QuickSearchEvent::OpenFile { path, line } => {
+                // Electron opens files into the right panel, which it reveals
+                // if it was collapsed; the panel is our files panel.
+                self.files_open = true;
+                self.ensure_files_panel(window, cx);
+                let Some(files) = self.files.clone() else {
+                    return;
+                };
+                // Content-search lines are one-based; wire positions are not.
+                let position = line.map(|line| WirePosition {
+                    line: line.saturating_sub(1),
+                    character: 0,
+                });
+                files.update(cx, |files, cx| {
+                    files.reveal(path.clone(), position, window, cx);
+                });
+                cx.notify();
+            }
+            QuickSearchEvent::Dismissed => {
+                self.quick_search = None;
+                cx.notify();
+            }
+        }
+    }
+
+    /// Open (or dismiss) the command palette. Electron binds the same chord to
+    /// both directions.
+    pub fn toggle_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.command_palette.is_some() {
+            window.close_dialog(cx);
+            return;
+        }
+        let context = PaletteContext {
+            projects: self
+                .shell
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.projects.clone())
+                .unwrap_or_default(),
+            threads: self.shell_threads(),
+            active_thread: self.thread.as_ref().map(|open| open.id.clone()),
+            active_project: self
+                .thread
+                .as_ref()
+                .and_then(|open| self.shell_thread(&open.id))
+                .map(|thread| thread.project_id.clone()),
+        };
+        let palette = CommandPalette::open(context, window, cx);
+        self._subscriptions
+            .push(cx.subscribe_in(&palette, window, Self::on_command_palette_event));
+        self.command_palette = Some(palette);
+        cx.notify();
+    }
+
+    fn on_command_palette_event(
+        &mut self,
+        _palette: &Entity<CommandPalette>,
+        event: &CommandPaletteEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let action = match event {
+            CommandPaletteEvent::Dismissed => {
+                self.command_palette = None;
+                cx.notify();
+                return;
+            }
+            CommandPaletteEvent::Run(action) => action.clone(),
+        };
+        match action {
+            PaletteAction::NewThread { project_id } => self.new_thread(project_id, window, cx),
+            PaletteAction::OpenThread(id) => self.select_thread(id, cx),
+            PaletteAction::OpenProject(project_id) => {
+                // Electron's `openProjectFromSearch`: the project's most recent
+                // thread, or a new one when it has none.
+                match self
+                    .shell_threads()
+                    .into_iter()
+                    .find(|thread| thread.project_id == project_id)
+                {
+                    Some(thread) => self.select_thread(thread.id, cx),
+                    None => self.new_thread(Some(project_id), window, cx),
+                }
+            }
+            PaletteAction::QuickSearchOpen => {
+                self.toggle_quick_search(QuickSearchMode::Open, window, cx);
+            }
+            PaletteAction::QuickSearchContent => {
+                self.toggle_quick_search(QuickSearchMode::Content, window, cx);
+            }
+            PaletteAction::ToggleFilesPanel => self.toggle_files(window, cx),
+            PaletteAction::NewFile | PaletteAction::NewFolder => {
+                self.files_open = true;
+                self.ensure_files_panel(window, cx);
+                let Some(files) = self.files.clone() else {
+                    return;
+                };
+                let directory = action == PaletteAction::NewFolder;
+                files.update(cx, |files, cx| files.create_at_root(directory, window, cx));
+                cx.notify();
+            }
+        }
     }
 
     /// Create (or recreate, when the open thread's project changed) the files
@@ -584,16 +773,31 @@ impl ChatApp {
         }
     }
 
-    fn new_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Start a thread in `project_id`, or — when it is `None` — in the project
+    /// the view is already pointed at, falling back to the first known one
+    /// (Electron's `startNewThreadFromContext`).
+    fn new_thread(
+        &mut self,
+        project_id: Option<ProjectId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(client) = self.client.clone() else {
             return;
         };
-        let Some(project) = self
-            .shell
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.projects.first().cloned())
-        else {
+        let project_id = project_id.or_else(|| {
+            self.thread
+                .as_ref()
+                .and_then(|open| self.shell_thread(&open.id))
+                .map(|thread| thread.project_id.clone())
+        });
+        let Some(project) = self.shell.snapshot.as_ref().and_then(|snapshot| {
+            match &project_id {
+                Some(id) => snapshot.projects.iter().find(|project| project.id == *id),
+                None => snapshot.projects.first(),
+            }
+            .cloned()
+        }) else {
             // Toast, not banner: the banner only renders with an open thread.
             window.push_notification(Notification::error("No project yet — open a folder."), cx);
             return;
@@ -1792,7 +1996,9 @@ impl ChatApp {
                             .hover(|style| style.bg(cx.theme().sidebar_accent))
                             .child(Icon::new(IconName::Plus).size_4())
                             .on_click(
-                                cx.listener(|this, _, window, cx| this.new_thread(window, cx)),
+                                cx.listener(|this, _, window, cx| {
+                                    this.new_thread(None, window, cx)
+                                }),
                             ),
                     ),
             )
@@ -2665,29 +2871,61 @@ impl Render for ChatApp {
                     view.latest_turn.as_ref().map(|turn| &turn.turn_id),
                 )
             });
-        h_flex()
+        // `Root` owns the dialog/sheet/notification stacks but does not paint
+        // them — the window's content view has to mount the layers itself
+        // (gpui-component's own examples do this in their root view). Without
+        // this, `open_dialog`/`push_notification` are silently invisible.
+        let sheet_layer = Root::render_sheet_layer(window, cx);
+        let dialog_layer = Root::render_dialog_layer(window, cx);
+        let notification_layer = Root::render_notification_layer(window, cx);
+
+        div()
             .size_full()
+            .relative()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &QuickSearchOpen, window, cx| {
+                this.toggle_quick_search(QuickSearchMode::Open, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &QuickSearchContent, window, cx| {
+                this.toggle_quick_search(QuickSearchMode::Content, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CommandPaletteToggle, window, cx| {
+                this.toggle_command_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewThread, window, cx| {
+                this.new_thread(None, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleFilesPanel, window, cx| {
+                this.toggle_files(window, cx);
+            }))
             .child(
-                div().flex_1().min_w_0().h_full().child(
-                    h_resizable("workspace")
-                        .with_state(&self.sidebar_resize)
-                        .child(
-                            resizable_panel()
-                                .size(px(256.))
-                                .size_range(px(208.)..px(480.))
-                                .child(self.render_sidebar(cx).into_any_element()),
-                        )
-                        .child(resizable_panel().child(self.render_chat(cx))),
-                ),
+                h_flex()
+                    .size_full()
+                    .child(
+                        div().flex_1().min_w_0().h_full().child(
+                            h_resizable("workspace")
+                                .with_state(&self.sidebar_resize)
+                                .child(
+                                    resizable_panel()
+                                        .size(px(256.))
+                                        .size_range(px(208.)..px(480.))
+                                        .child(self.render_sidebar(cx).into_any_element()),
+                                )
+                                .child(resizable_panel().child(self.render_chat(cx))),
+                        ),
+                    )
+                    .children(files_panel)
+                    .children(
+                        active_plan
+                            .as_ref()
+                            .map(|plan| self.render_plan_sidebar(plan, cx)),
+                    ),
             )
-            .children(files_panel)
-            .children(
-                active_plan
-                    .as_ref()
-                    .map(|plan| self.render_plan_sidebar(plan, cx)),
-            )
+            .children(sheet_layer)
+            .children(dialog_layer)
+            .children(notification_layer)
     }
 }
 
