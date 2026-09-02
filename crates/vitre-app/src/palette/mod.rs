@@ -2,6 +2,7 @@
 //! command palette (`command_palette`), sharing the ranking rules in [`rank`].
 
 pub mod command_palette;
+pub mod preview;
 pub mod quick_search;
 pub mod rank;
 

@@ -246,7 +246,19 @@ impl CommandPalette {
             return;
         };
         cx.emit(CommandPaletteEvent::Run(action));
+        self.dismiss(window, cx);
+    }
+
+    /// Close the palette and tell the shell we are gone.
+    ///
+    /// `close_dialog` only pops the dialog off `Root`; it never runs the
+    /// dialog's own `on_close`, which is invoked solely by the Dialog
+    /// element's Escape/confirm/backdrop handlers. So every close path that
+    /// goes through `close_dialog` has to emit `Dismissed` itself, or the
+    /// shell keeps holding this entity and refuses to open a fresh one.
+    fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.close_dialog(cx);
+        cx.emit(CommandPaletteEvent::Dismissed);
     }
 
     fn push_view(&mut self, group: PaletteGroup, window: &mut Window, cx: &mut Context<Self>) {
@@ -327,13 +339,14 @@ impl CommandPalette {
             command = command.group(entry);
         }
 
-        // The dialog renders outside the shell's element tree, so while it
-        // holds focus the shell's copy of this handler is not on the dispatch
-        // path. Electron's toggle semantics live here instead.
+        // A deferred draw keeps its parent dispatch node, so this element sits
+        // *below* the shell's handler for the same action and shadows it on
+        // the way up. That is what gives Electron's toggle semantics: the
+        // chord closes the palette that is already showing.
         div()
             .size_full()
-            .on_action(cx.listener(|_, _: &CommandPaletteToggle, window, cx| {
-                window.close_dialog(cx);
+            .on_action(cx.listener(|this, _: &CommandPaletteToggle, window, cx| {
+                this.dismiss(window, cx);
             }))
             // Electron pops a sub-view on Backspace at an empty query. The
             // capture phase is the only place to see it: the query field would

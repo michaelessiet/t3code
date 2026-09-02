@@ -77,7 +77,7 @@ fn tnes(text: impl Into<String>) -> TrimmedNonEmptyString {
 /// Highlighter language for a path: the gpui-component registry resolves
 /// extensions and short names itself ("rs" → rust), so pass the extension and
 /// fall back to plain text.
-fn language_for_path(path: &str) -> String {
+pub(crate) fn language_for_path(path: &str) -> String {
     let name = path.rsplit('/').next().unwrap_or(path);
     match name.rsplit_once('.') {
         Some((stem, extension)) if !stem.is_empty() => extension.to_ascii_lowercase(),

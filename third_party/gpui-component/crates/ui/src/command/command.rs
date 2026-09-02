@@ -24,6 +24,7 @@ pub(crate) struct CommandOptions {
     pub(crate) header: Option<Rc<CommandSlot>>,
     pub(crate) footer: Option<Rc<CommandSlot>>,
     pub(crate) suffix: Option<Rc<CommandSlot>>,
+    pub(crate) side: Option<Rc<CommandSlot>>,
 }
 
 impl Default for CommandOptions {
@@ -37,6 +38,7 @@ impl Default for CommandOptions {
             header: None,
             footer: None,
             suffix: None,
+            side: None,
         }
     }
 }
@@ -246,6 +248,24 @@ impl Command {
         E: IntoElement,
     {
         self.options.suffix = Some(Rc::new(move |state, window, cx| {
+            f(state, window, cx).into_any_element()
+        }));
+        self
+    }
+
+    /// Render a custom element to the side of the command list, sharing the
+    /// body row with it.
+    ///
+    /// The list keeps the remaining width, so the side element should size
+    /// itself. Use this for a preview pane that has to sit *below* the search
+    /// field but *beside* the results, which neither [`Self::header`] nor
+    /// [`Self::footer`] can express.
+    pub fn side<F, E>(mut self, f: F) -> Self
+    where
+        F: Fn(&CommandState, &mut Window, &mut App) -> E + 'static,
+        E: IntoElement,
+    {
+        self.options.side = Some(Rc::new(move |state, window, cx| {
             f(state, window, cx).into_any_element()
         }));
         self

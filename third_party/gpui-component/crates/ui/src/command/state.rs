@@ -838,6 +838,80 @@ impl Render for CommandState {
             .suffix
             .clone()
             .map(|suffix| suffix(self, window, cx));
+        let side = self.options.side.clone().map(|side| side(self, window, cx));
+
+        // The list, built up front so a side panel can sit beside it.
+        let list = v_flex()
+            .id("command-list-container")
+            .role(Role::ListBox)
+            .relative()
+            .flex_1()
+            // The rows carry their inset on the virtual list itself so
+            // that a mid-scroll clip edge sits flush against the
+            // surrounding dividers; only the empty slot needs the
+            // container padding.
+            .when(rows_count == 0, |this| this.p_1())
+            .on_prepaint({
+                let measure_state = command_state.clone();
+                move |bounds, window, cx| {
+                    measure_state.update(cx, |state, cx| {
+                        // The list's `p_1` is one quarter rem on each
+                        // side. Its rem-dependent padding and inherited
+                        // layout-relevant text style participate in
+                        // the row-size cache key.
+                        let text_style = window.text_style();
+                        state.set_list_measurement_key(
+                            ListMeasurementKey {
+                                content_width: (bounds.size.width - window.rem_size() * 0.5)
+                                    .max(px(0.)),
+                                rem_size: window.rem_size(),
+                                line_height: window.line_height(),
+                                text_shape: TextShapeKey {
+                                    font_family: text_style.font_family,
+                                    font_features: text_style.font_features,
+                                    font_fallbacks: text_style.font_fallbacks,
+                                    font_size: text_style.font_size,
+                                    font_weight: text_style.font_weight,
+                                    font_style: text_style.font_style,
+                                    white_space: text_style.white_space,
+                                    text_overflow: text_style.text_overflow,
+                                    line_clamp: text_style.line_clamp,
+                                },
+                            },
+                            cx,
+                        )
+                    })
+                }
+            })
+            .max_h(self.options.max_h)
+            .overflow_hidden()
+            // While a search is in flight the list is empty because the
+            // answer has not arrived, which is not the same as no match.
+            .when(rows_count == 0 && !self.loading, |this| {
+                this.child(self.render_empty(window, cx))
+            })
+            .when(rows_count > 0, |this| {
+                this.child(
+                    v_virtual_list(
+                        command_state.clone(),
+                        "command-list",
+                        row_sizes,
+                        move |this, visible_range, window, cx| {
+                            visible_range
+                                .map(|row_ix| this.render_row(row_ix, window, cx))
+                                .collect::<Vec<_>>()
+                        },
+                    )
+                    // Padding on the virtual list acts like CSS
+                    // scroll-padding: the scroll ends keep their inset
+                    // while scrolled-under rows paint and clip at the
+                    // list edge.
+                    .p_1()
+                    .with_sizing_behavior(ListSizingBehavior::Infer)
+                    .track_scroll(&self.scroll_handle),
+                )
+                .child(Scrollbar::vertical(&self.scroll_handle))
+            });
 
         v_flex()
             .id("command")
@@ -879,80 +953,22 @@ impl Render for CommandState {
                         ),
                 )
             })
-            .child(
-                v_flex()
-                    .id("command-list-container")
-                    .role(Role::ListBox)
-                    .relative()
+            .child(match side {
+                // No side panel: the list occupies the body row exactly as
+                // it did before this slot existed.
+                None => list.into_any_element(),
+                // `h_flex` centres its children; the side element has to
+                // reach the full height of the body row, so this row is built
+                // from `div` and left on the default stretch alignment.
+                Some(side) => div()
+                    .flex()
+                    .flex_row()
                     .flex_1()
-                    // The rows carry their inset on the virtual list itself so
-                    // that a mid-scroll clip edge sits flush against the
-                    // surrounding dividers; only the empty slot needs the
-                    // container padding.
-                    .when(rows_count == 0, |this| this.p_1())
-                    .on_prepaint({
-                        let measure_state = command_state.clone();
-                        move |bounds, window, cx| {
-                            measure_state.update(cx, |state, cx| {
-                                // The list's `p_1` is one quarter rem on each
-                                // side. Its rem-dependent padding and inherited
-                                // layout-relevant text style participate in
-                                // the row-size cache key.
-                                let text_style = window.text_style();
-                                state.set_list_measurement_key(
-                                    ListMeasurementKey {
-                                        content_width: (bounds.size.width
-                                            - window.rem_size() * 0.5)
-                                            .max(px(0.)),
-                                        rem_size: window.rem_size(),
-                                        line_height: window.line_height(),
-                                        text_shape: TextShapeKey {
-                                            font_family: text_style.font_family,
-                                            font_features: text_style.font_features,
-                                            font_fallbacks: text_style.font_fallbacks,
-                                            font_size: text_style.font_size,
-                                            font_weight: text_style.font_weight,
-                                            font_style: text_style.font_style,
-                                            white_space: text_style.white_space,
-                                            text_overflow: text_style.text_overflow,
-                                            line_clamp: text_style.line_clamp,
-                                        },
-                                    },
-                                    cx,
-                                )
-                            })
-                        }
-                    })
-                    .max_h(self.options.max_h)
-                    .overflow_hidden()
-                    // While a search is in flight the list is empty because the
-                    // answer has not arrived, which is not the same as no match.
-                    .when(rows_count == 0 && !self.loading, |this| {
-                        this.child(self.render_empty(window, cx))
-                    })
-                    .when(rows_count > 0, |this| {
-                        this.child(
-                            v_virtual_list(
-                                command_state.clone(),
-                                "command-list",
-                                row_sizes,
-                                move |this, visible_range, window, cx| {
-                                    visible_range
-                                        .map(|row_ix| this.render_row(row_ix, window, cx))
-                                        .collect::<Vec<_>>()
-                                },
-                            )
-                            // Padding on the virtual list acts like CSS
-                            // scroll-padding: the scroll ends keep their inset
-                            // while scrolled-under rows paint and clip at the
-                            // list edge.
-                            .p_1()
-                            .with_sizing_behavior(ListSizingBehavior::Infer)
-                            .track_scroll(&self.scroll_handle),
-                        )
-                        .child(Scrollbar::vertical(&self.scroll_handle))
-                    }),
-            )
+                    .min_h_0()
+                    .child(list.min_w_0().flex_1())
+                    .child(side)
+                    .into_any_element(),
+            })
             .when_some(self.options.footer.as_ref(), |this, footer| {
                 this.child(footer(self, window, cx))
             })

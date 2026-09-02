@@ -482,7 +482,7 @@ impl ChatApp {
                 .placeholder("Ask anything, @tag files/folders, $use skills, or / for commands")
                 .auto_grow(1, 8)
         });
-        let subscriptions = vec![cx.subscribe_in(
+        let mut subscriptions = vec![cx.subscribe_in(
             &composer,
             window,
             |this: &mut Self, _, event: &InputEvent, window, cx| match event {
@@ -575,6 +575,21 @@ impl ChatApp {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
 
+        // ...and take it back whenever it empties. gpui dispatches a key from
+        // the focused node upwards, and with nothing focused it starts at the
+        // window's root node — which is `Root`, above this view — so every
+        // chord silently reaches no handler. Plenty of ordinary actions empty
+        // the path: committing a tree rename drops the `InputState` that owned
+        // focus, and hiding the files panel unmounts the focused editor, which
+        // dispatch cannot tell apart from nothing being focused. Zed's
+        // `Workspace` guards itself the same way.
+        subscriptions.push(cx.on_focus_lost(window, |this, window, cx| {
+            let handle = window
+                .focus_lost_restore_target(cx)
+                .unwrap_or_else(|| this.focus_handle.clone());
+            window.focus(&handle, cx);
+        }));
+
         Self {
             client: None,
             sidecar_status: "starting…".into(),
@@ -625,17 +640,28 @@ impl ChatApp {
     ) {
         if let Some(search) = self.quick_search.clone() {
             if search.read(cx).mode() == mode {
+                // Closing from out here skips the overlay's own `dismiss`, so
+                // drop the handle in the same breath — otherwise the next
+                // press finds a `Some` whose dialog is already gone and closes
+                // an empty stack forever.
                 window.close_dialog(cx);
+                self.quick_search = None;
+                cx.notify();
             } else {
-                search.update(cx, |search, cx| search.set_mode(mode, cx));
+                search.update(cx, |search, cx| search.set_mode(mode, window, cx));
             }
             return;
         }
         let search = QuickSearch::open(
             mode,
             self.client.clone(),
-            self.open_project_root(),
+            self.search_root(),
             self.shell_threads(),
+            self.shell
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.projects.clone())
+                .unwrap_or_default(),
             window,
             cx,
         );
@@ -683,7 +709,10 @@ impl ChatApp {
     /// both directions.
     pub fn toggle_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.command_palette.is_some() {
+            // Same as above: this path bypasses the palette's own `dismiss`.
             window.close_dialog(cx);
+            self.command_palette = None;
+            cx.notify();
             return;
         }
         let context = PaletteContext {
@@ -761,7 +790,7 @@ impl ChatApp {
     /// Create (or recreate, when the open thread's project changed) the files
     /// panel for the active workspace root.
     fn ensure_files_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(client), Some(cwd)) = (self.client.clone(), self.open_project_root()) else {
+        let (Some(client), Some(cwd)) = (self.client.clone(), self.search_root()) else {
             return;
         };
         let stale = self
@@ -1285,17 +1314,47 @@ impl ChatApp {
         .detach();
     }
 
-    /// Workspace root of the open thread's project — the mention-search cwd.
+    /// Root of the open thread — its worktree when it has one, otherwise its
+    /// project's workspace root. This is the thread-scoped cwd: the composer's
+    /// `@`-mention search runs here, as Electron's does.
     fn open_project_root(&self) -> Option<String> {
         let open = self.thread.as_ref()?;
-        let project_id = self.shell_thread(&open.id)?.project_id.clone();
+        let thread = self.shell_thread(&open.id)?;
+        // A worktree thread searches its checkout, not the project's main
+        // tree (Electron: `activeThread.worktreePath ?? project.workspaceRoot`).
+        if let Some(worktree) = thread.worktree_path.as_ref() {
+            return Some(worktree.0.clone());
+        }
+        let project_id = thread.project_id.clone();
+        self.project_root(&project_id)
+    }
+
+    /// Workspace root of `project_id`, if the shell knows it.
+    fn project_root(&self, project_id: &ProjectId) -> Option<String> {
         self.shell
             .snapshot
             .as_ref()?
             .projects
             .iter()
-            .find(|project| project.id == project_id)
+            .find(|project| project.id == *project_id)
             .map(|project| project.workspace_root.0.clone())
+    }
+
+    /// The root QuickSearch and the files panel look at.
+    ///
+    /// Electron resolves the overlay's scope down a chain — active thread,
+    /// then the draft thread, then the first project — so ⌘P still searches
+    /// files from the home view, where no thread is selected. Without the
+    /// last step the file corpus is silently empty there.
+    fn search_root(&self) -> Option<String> {
+        self.open_project_root().or_else(|| {
+            self.shell
+                .snapshot
+                .as_ref()?
+                .projects
+                .first()
+                .map(|project| project.workspace_root.0.clone())
+        })
     }
 
     /// Recompute the composer's active `@token` and (re-)issue the entry

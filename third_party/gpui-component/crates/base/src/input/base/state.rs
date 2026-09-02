@@ -1161,12 +1161,29 @@ impl<M: InputModeKind> InputBaseState<M> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.move_cursor_to_position(position, cx);
+        self.focus(window, cx);
+    }
+
+    /// Move the cursor to a (0-based) [`Position`] *without* taking focus.
+    ///
+    /// [`Self::set_cursor_position`] focuses as well, which is what an editor
+    /// the user is about to type in wants. A read-only view driven from
+    /// elsewhere — a search overlay pointing its preview at a match — has to
+    /// leave focus with whatever the user is actually typing into.
+    ///
+    /// The row still scrolls into view, and with line numbers enabled it still
+    /// picks up the active-line background.
+    pub fn move_cursor_to_position(
+        &mut self,
+        position: impl Into<Position>,
+        cx: &mut Context<Self>,
+    ) {
         let position: Position = position.into();
         let offset = self.text.position_to_offset(&position);
 
         self.move_to(offset, None, cx);
         self.update_preferred_column();
-        self.focus(window, cx);
     }
 
     /// Focus the input field.
