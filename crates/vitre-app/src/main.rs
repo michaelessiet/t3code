@@ -5,6 +5,7 @@ mod chat;
 mod files;
 mod lsp;
 mod palette;
+mod sidebar_prefs;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -129,10 +130,11 @@ fn selftest(config: SidecarConfig) -> ! {
 }
 
 fn main() {
+    let home = vitre_home();
     let config = SidecarConfig {
         node_binary: std::env::var("VITRE_NODE").unwrap_or_else(|_| "node".into()),
         server_entry: resolve_server_entry(),
-        t3_home: vitre_home(),
+        t3_home: home.clone(),
         fixed_port: None,
     };
 
@@ -230,7 +232,7 @@ fn main() {
                         gpui_component::Theme::sync_system_appearance(Some(window), cx);
                     })
                     .detach();
-                let shell = cx.new(|cx| chat::ChatApp::new(status_rx, window, cx));
+                let shell = cx.new(|cx| chat::ChatApp::new(&home, status_rx, window, cx));
                 cx.new(|cx| Root::new(shell, window, cx))
             },
         )

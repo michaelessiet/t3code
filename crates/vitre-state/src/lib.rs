@@ -24,9 +24,11 @@
 pub mod file_buffer;
 pub mod file_tree;
 pub mod lsp_gating;
+pub mod project_grouping;
 pub mod session_logic;
 pub mod shell;
 pub mod shell_sync;
+pub mod sidebar;
 pub mod thread;
 pub mod thread_sync;
 pub mod vcs_tree_status;

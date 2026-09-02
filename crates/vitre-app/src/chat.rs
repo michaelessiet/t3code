@@ -5,9 +5,13 @@
 //! only carries the six detail event kinds, so title/meta always come from
 //! the thread shell (the TS client's `mergeEnvironmentThread` split).
 
+mod project_actions;
+mod sidebar;
+
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash as _, Hasher as _};
+use std::path::Path;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -56,6 +60,7 @@ use crate::palette::command_palette::{
 };
 pub use crate::palette::quick_search::QuickSearchMode;
 use crate::palette::quick_search::{QuickSearch, QuickSearchEvent};
+use crate::sidebar_prefs::SidebarPrefs;
 
 actions!(
     vitre,
@@ -113,6 +118,22 @@ pub struct ChatApp {
     timeline_hashes: Vec<u64>,
     /// Revert target per user message, rebuilt alongside `timeline`.
     revert_turn_counts: HashMap<MessageId, i64>,
+    /// Persisted sidebar preferences: grouping mode + per-project overrides,
+    /// sort orders, preview count, expansion, manual order, visit stamps.
+    /// Electron splits these across `ClientSettings` and a browser-local UI
+    /// store; neither is server state, so Vitre keeps its own file.
+    sidebar: SidebarPrefs,
+    /// Derived sidebar rows, rebuilt on shell/selection/preference changes
+    /// rather than per frame — grouping walks every project and thread.
+    sidebar_rows: Vec<sidebar::SidebarProjectRow>,
+    /// Physical project keys in on-screen order, pre-grouping: what a manual
+    /// reorder drag rewrites.
+    sidebar_project_order: Vec<String>,
+    /// The open "Rename project" dialog, if any. Held here because the
+    /// dialog's content closure only keeps a weak reference to this view.
+    project_rename: Option<project_actions::ProjectRenameDialog>,
+    /// The open "Project grouping" dialog, held for the same reason.
+    project_grouping: Option<project_actions::ProjectGroupingDialog>,
     /// Sidebar ⟷ chat split state (drag-resizable, Electron parity).
     sidebar_resize: Entity<ResizableState>,
     /// Right-hand files panel (M2). Kept alive while toggled off so tree
@@ -473,10 +494,12 @@ fn row_content_hash(
 
 impl ChatApp {
     pub fn new(
+        home: &Path,
         status_rx: watch::Receiver<SupervisorStatus>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let sidebar = SidebarPrefs::load(home);
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Ask anything, @tag files/folders, $use skills, or / for commands")
@@ -557,6 +580,11 @@ impl ChatApp {
                 if this
                     .update(cx, |app, cx| {
                         app.shell = state;
+                        // The open thread's row keeps its "seen" stamp current
+                        // so a turn finishing under your eyes doesn't light up
+                        // as unread.
+                        app.sync_thread_visit();
+                        app.rebuild_sidebar();
                         cx.notify();
                     })
                     .is_err()
@@ -609,6 +637,11 @@ impl ChatApp {
             timeline: Vec::new(),
             timeline_hashes: Vec::new(),
             revert_turn_counts: HashMap::new(),
+            sidebar,
+            sidebar_rows: Vec::new(),
+            sidebar_project_order: Vec::new(),
+            project_rename: None,
+            project_grouping: None,
             sidebar_resize: cx.new(|_| ResizableState::default()),
             files: None,
             files_open: false,
@@ -903,6 +936,10 @@ impl ChatApp {
             _handle: handle,
             state: ThreadState::default(),
         });
+        // Opening a thread clears its unread completion and re-pins it in its
+        // project's preview window.
+        self.sync_thread_visit();
+        self.rebuild_sidebar();
         cx.spawn(async move |this, cx| {
             loop {
                 let state = state_rx.borrow_and_update().clone();
@@ -1917,166 +1954,6 @@ impl ChatApp {
                     .child(content),
             )
             .into_any_element()
-    }
-
-    /// Sidebar mirroring the Electron `SidebarV2`: 256px, sidebar tokens,
-    /// top controls (search affordance + new-thread), two-line card rows.
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected = self.thread.as_ref().map(|open| open.id.clone());
-        let phase = match self.shell.phase {
-            SyncPhase::Disconnected => "offline",
-            SyncPhase::Synchronizing => "syncing…",
-            SyncPhase::Live => "live",
-        };
-        let project_title = |thread: &OrchestrationThreadShell| -> SharedString {
-            self.shell
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| {
-                    snapshot
-                        .projects
-                        .iter()
-                        .find(|project| project.id == thread.project_id)
-                })
-                .map(|project| project.title.0.clone().into())
-                .unwrap_or_else(|| "—".into())
-        };
-
-        let mut list = v_flex().gap_0p5().px_2();
-        for thread in self.shell_threads() {
-            let id = thread.id.clone();
-            let is_selected = selected.as_ref() == Some(&id);
-            let running = thread
-                .session
-                .as_ref()
-                .is_some_and(|session| session.status == OrchestrationSessionStatus::Running);
-            let status: gpui::AnyElement = if running {
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .text_xs()
-                    .font_medium()
-                    .text_color(cx.theme().info)
-                    .child("Working")
-                    .into_any_element()
-            } else {
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground.opacity(0.75))
-                    .children(relative_time(&thread.updated_at.0))
-                    .into_any_element()
-            };
-            let mut row = v_flex()
-                .id(SharedString::from(format!("thread-{}", id.0)))
-                .px_2p5()
-                .py_2()
-                .rounded(cx.theme().radius)
-                .cursor_pointer()
-                .child(
-                    h_flex()
-                        .h_5()
-                        .justify_between()
-                        .items_center()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground.opacity(0.85))
-                                .truncate()
-                                .child(project_title(&thread)),
-                        )
-                        .child(status),
-                )
-                .child(
-                    div()
-                        .mt_1()
-                        .text_sm()
-                        .font_medium()
-                        .text_color(cx.theme().sidebar_foreground.opacity(0.9))
-                        .truncate()
-                        .child(SharedString::from(thread.title.0.clone())),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.select_thread(id.clone(), cx);
-                }));
-            row = if is_selected {
-                row.bg(cx.theme().list_active)
-            } else {
-                row.hover(|style| style.bg(cx.theme().list_hover))
-            };
-            list = list.child(row);
-        }
-
-        v_flex()
-            .w_full()
-            .h_full()
-            .bg(cx.theme().sidebar)
-            .text_color(cx.theme().sidebar_foreground)
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
-            // Clear the hiddenInset traffic lights.
-            .pt(px(44.))
-            .child(
-                h_flex()
-                    .px_2()
-                    .pb_2()
-                    .gap_1p5()
-                    .items_center()
-                    .child(
-                        h_flex()
-                            .flex_1()
-                            .h_8()
-                            .px_2()
-                            .gap_2()
-                            .items_center()
-                            .rounded(cx.theme().radius)
-                            .bg(cx.theme().muted)
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(Icon::new(IconName::Search).size_4())
-                            .child("Search")
-                            .child(
-                                div()
-                                    .ml_auto()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground.opacity(0.6))
-                                    .child(phase),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("new-thread")
-                            .size_8()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(cx.theme().radius)
-                            .cursor_pointer()
-                            .text_color(cx.theme().muted_foreground)
-                            .hover(|style| style.bg(cx.theme().sidebar_accent))
-                            .child(Icon::new(IconName::Plus).size_4())
-                            .on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.new_thread(None, window, cx)
-                                }),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .id("thread-list")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .child(list),
-            )
-            .child(
-                div()
-                    .p_3()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground.opacity(0.75))
-                    .border_t_1()
-                    .border_color(cx.theme().sidebar_border)
-                    .child(self.sidecar_status.clone()),
-            )
     }
 
     /// Recompute the cached timeline order, revert targets and list length.

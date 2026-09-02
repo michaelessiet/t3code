@@ -8613,6 +8613,7 @@ dependencies = [
  "percent-encoding",
  "raw-window-handle",
  "ropey",
+ "serde",
  "serde_json",
  "tokio",
  "vitre-client",
@@ -8683,6 +8684,7 @@ dependencies = [
 name = "vitre-state"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde_json",
  "vitre-contracts",
 ]
