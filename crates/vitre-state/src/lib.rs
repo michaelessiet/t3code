@@ -21,6 +21,7 @@
 //! `"full-access"`, `interactionMode` → `"default"`) get the same defaults
 //! applied here when the reducer reads them.
 
+pub mod browse_path;
 pub mod file_buffer;
 pub mod file_tree;
 pub mod lsp_gating;

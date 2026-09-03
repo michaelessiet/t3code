@@ -833,6 +833,11 @@ impl Render for CommandState {
         let rows_count = self.rows.len();
         let row_sizes = self.row_sizes.clone();
         let command_state = cx.entity();
+        let prefix = self
+            .options
+            .prefix
+            .clone()
+            .map(|prefix| prefix(self, window, cx));
         let suffix = self
             .options
             .suffix
@@ -943,10 +948,13 @@ impl Render for CommandState {
                         .border_color(cx.theme().border)
                         .child(
                             Input::new(&self.query_input)
-                                .prefix(
-                                    Icon::new(IconName::Search)
-                                        .text_color(cx.theme().muted_foreground),
-                                )
+                                .map(|input| match prefix {
+                                    Some(prefix) => input.prefix(prefix),
+                                    None => input.prefix(
+                                        Icon::new(IconName::Search)
+                                            .text_color(cx.theme().muted_foreground),
+                                    ),
+                                })
                                 .when_some(suffix, |input, suffix| input.suffix(suffix))
                                 .appearance(false)
                                 .p_0(),

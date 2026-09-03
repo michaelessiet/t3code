@@ -39,12 +39,12 @@ use vitre_client::{EnvironmentClient, ShellState, SyncPhase, ThreadHandle, Threa
 use vitre_contracts::ClientOrchestrationCommandThreadTurnStartMessageAttachments as TurnAttachment;
 use vitre_contracts::methods::ProjectsSearchEntries;
 use vitre_contracts::{
-    ApprovalRequestId, ClientOrchestrationCommand, CommandId, MessageId, ModelSelection,
-    NonNegativeInt, OrchestrationMessage, OrchestrationMessageRole, OrchestrationSessionStatus,
-    OrchestrationThread, OrchestrationThreadActivity, OrchestrationThreadActivityTone,
-    OrchestrationThreadShell, ProjectEntry, ProjectEntryKind, ProjectId, ProjectSearchEntriesInput,
-    ProviderApprovalDecision, ProviderInteractionMode, RuntimeMode, ServerConfig, ThreadId,
-    TrimmedNonEmptyString,
+    ApprovalRequestId, ClientOrchestrationCommand, CommandId, ExecutionEnvironmentPlatformOs,
+    MessageId, ModelSelection, NonNegativeInt, OrchestrationMessage, OrchestrationMessageRole,
+    OrchestrationSessionStatus, OrchestrationThread, OrchestrationThreadActivity,
+    OrchestrationThreadActivityTone, OrchestrationThreadShell, ProjectEntry, ProjectEntryKind,
+    ProjectId, ProjectSearchEntriesInput, ProviderApprovalDecision, ProviderInteractionMode,
+    RuntimeMode, ServerConfig, ThreadId, TrimmedNonEmptyString,
 };
 use vitre_sidecar::SupervisorStatus;
 use vitre_state::session_logic::{
@@ -191,15 +191,15 @@ struct OpenThread {
     state: ThreadState,
 }
 
-fn tnes(text: impl Into<String>) -> TrimmedNonEmptyString {
+pub(crate) fn tnes(text: impl Into<String>) -> TrimmedNonEmptyString {
     TrimmedNonEmptyString(text.into())
 }
 
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-fn fresh_id(prefix: &str) -> String {
+pub(crate) fn fresh_id(prefix: &str) -> String {
     format!(
         "{prefix}-{}",
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
@@ -748,20 +748,66 @@ impl ChatApp {
             cx.notify();
             return;
         }
+        self.open_command_palette(false, window, cx);
+    }
+
+    /// The sidebar's FolderPlus button: the palette opened straight into the
+    /// add-project flow (Electron's `openCommandPalette({open:"add-project"})`).
+    pub fn open_add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.command_palette.is_some() {
+            window.close_dialog(cx);
+            self.command_palette = None;
+        }
+        self.open_command_palette(true, window, cx);
+    }
+
+    fn open_command_palette(
+        &mut self,
+        add_project: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let session = self
+            .client
+            .as_ref()
+            .and_then(|client| client.sessions().borrow().clone());
+        let projects = self
+            .shell
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.projects.clone())
+            .unwrap_or_default();
+        let active_project = self
+            .thread
+            .as_ref()
+            .and_then(|open| self.shell_thread(&open.id))
+            .map(|thread| thread.project_id.clone());
+        let active_project_cwd = active_project
+            .as_ref()
+            .and_then(|id| projects.iter().find(|project| project.id == *id))
+            .map(|project| project.workspace_root.0.clone());
         let context = PaletteContext {
-            projects: self
-                .shell
-                .snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.projects.clone())
-                .unwrap_or_default(),
+            projects,
             threads: self.shell_threads(),
             active_thread: self.thread.as_ref().map(|open| open.id.clone()),
-            active_project: self
-                .thread
+            active_project,
+            client: self.client.clone(),
+            windows_platform: session.as_ref().is_some_and(|session| {
+                session.config.environment.platform.os == ExecutionEnvironmentPlatformOs::Windows
+            }),
+            base_directory: session.as_ref().and_then(|session| {
+                session
+                    .config
+                    .settings
+                    .add_project_base_directory
+                    .clone()
+                    .flatten()
+            }),
+            active_project_cwd,
+            default_model_selection: session
                 .as_ref()
-                .and_then(|open| self.shell_thread(&open.id))
-                .map(|thread| thread.project_id.clone()),
+                .and_then(|session| default_model_selection(&session.config)),
+            open_add_project: add_project,
         };
         let palette = CommandPalette::open(context, window, cx);
         self._subscriptions
@@ -787,6 +833,11 @@ impl ChatApp {
         };
         match action {
             PaletteAction::NewThread { project_id } => self.new_thread(project_id, window, cx),
+            // Electron follows a successful `project.create` with a fresh
+            // draft thread in the new project.
+            PaletteAction::ProjectCreated(project_id) => {
+                self.new_thread(Some(project_id), window, cx)
+            }
             PaletteAction::OpenThread(id) => self.select_thread(id, cx),
             PaletteAction::OpenProject(project_id) => {
                 // Electron's `openProjectFromSearch`: the project's most recent
@@ -853,13 +904,17 @@ impl ChatApp {
                 .and_then(|open| self.shell_thread(&open.id))
                 .map(|thread| thread.project_id.clone())
         });
-        let Some(project) = self.shell.snapshot.as_ref().and_then(|snapshot| {
+        let project = self.shell.snapshot.as_ref().and_then(|snapshot| {
             match &project_id {
                 Some(id) => snapshot.projects.iter().find(|project| project.id == *id),
                 None => snapshot.projects.first(),
             }
             .cloned()
-        }) else {
+        });
+        // An explicit id may not have reached the shell snapshot yet — a
+        // freshly created project's `project.create` resolves before the
+        // subscription delivers it — so only the no-id case needs a project.
+        let Some(project_id) = project_id.or_else(|| project.as_ref().map(|p| p.id.clone())) else {
             // Toast, not banner: the banner only renders with an open thread.
             window.push_notification(Notification::error("No project yet — open a folder."), cx);
             return;
@@ -869,8 +924,8 @@ impl ChatApp {
             return;
         };
         let Some(model_selection) = project
-            .default_model_selection
-            .clone()
+            .as_ref()
+            .and_then(|project| project.default_model_selection.clone())
             .or_else(|| default_model_selection(&session.config))
         else {
             window.push_notification(Notification::error("No provider configured."), cx);
@@ -884,7 +939,7 @@ impl ChatApp {
             created_at: tnes(now_iso()),
             interaction_mode: None,
             model_selection,
-            project_id: project.id.clone(),
+            project_id: project_id.clone(),
             runtime_mode: RuntimeMode::FullAccess,
             thread_id: thread_id.clone(),
             title: tnes("New thread"),

@@ -23,6 +23,7 @@ pub(crate) struct CommandOptions {
     pub(crate) bordered: bool,
     pub(crate) header: Option<Rc<CommandSlot>>,
     pub(crate) footer: Option<Rc<CommandSlot>>,
+    pub(crate) prefix: Option<Rc<CommandSlot>>,
     pub(crate) suffix: Option<Rc<CommandSlot>>,
     pub(crate) side: Option<Rc<CommandSlot>>,
 }
@@ -37,6 +38,7 @@ impl Default for CommandOptions {
             bordered: true,
             header: None,
             footer: None,
+            prefix: None,
             suffix: None,
             side: None,
         }
@@ -242,12 +244,28 @@ impl Command {
     /// field, this sits inside it — the place for a compact mode switch or
     /// result count that should not cost the palette a line of height.
     /// Ignored when the palette is not [`Self::searchable`].
+    ///
+    /// See also [`Self::prefix`], its counterpart at the start of the field.
     pub fn suffix<F, E>(mut self, f: F) -> Self
     where
         F: Fn(&CommandState, &mut Window, &mut App) -> E + 'static,
         E: IntoElement,
     {
         self.options.suffix = Some(Rc::new(move |state, window, cx| {
+            f(state, window, cx).into_any_element()
+        }));
+        self
+    }
+
+    /// Render a custom element at the start of the search field, replacing
+    /// the default search icon — the place for a back affordance or a mode
+    /// glyph. Ignored when the palette is not [`Self::searchable`].
+    pub fn prefix<F, E>(mut self, f: F) -> Self
+    where
+        F: Fn(&CommandState, &mut Window, &mut App) -> E + 'static,
+        E: IntoElement,
+    {
+        self.options.prefix = Some(Rc::new(move |state, window, cx| {
             f(state, window, cx).into_any_element()
         }));
         self

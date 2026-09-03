@@ -900,21 +900,17 @@ impl ChatApp {
                             ),
                     )
                     .child(self.render_sort_menu(cx))
+                    // Electron's header button is add-project, not new-thread
+                    // — per-project rows carry their own new-thread buttons.
                     .child(
-                        div()
-                            .id("new-thread")
-                            .size_8()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(cx.theme().radius)
-                            .cursor_pointer()
-                            .text_color(cx.theme().muted_foreground)
-                            .hover(|style| style.bg(cx.theme().sidebar_accent))
-                            .child(Icon::new(IconName::Plus).size_4())
+                        Button::new("add-project")
+                            .icon(Icon::new(IconName::FolderPlus).size_4())
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Add project")
                             .on_click(
                                 cx.listener(|this, _, window, cx| {
-                                    this.new_thread(None, window, cx)
+                                    this.open_add_project(window, cx)
                                 }),
                             ),
                     ),

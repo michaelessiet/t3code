@@ -129,7 +129,7 @@ impl ProjectGroup {
     }
 }
 
-fn is_windows_drive_path(value: &str) -> bool {
+pub(crate) fn is_windows_drive_path(value: &str) -> bool {
     let mut chars = value.chars();
     match (chars.next(), chars.next()) {
         (Some(letter), Some(':')) if letter.is_ascii_alphabetic() => {
@@ -139,7 +139,7 @@ fn is_windows_drive_path(value: &str) -> bool {
     }
 }
 
-fn is_unc_path(value: &str) -> bool {
+pub(crate) fn is_unc_path(value: &str) -> bool {
     value.starts_with("\\\\")
 }
 
@@ -154,7 +154,7 @@ fn is_root_path(value: &str) -> bool {
         && chars.next().is_none()
 }
 
-fn trim_trailing_path_separators(value: &str) -> String {
+pub(crate) fn trim_trailing_path_separators(value: &str) -> String {
     if value.is_empty() || is_root_path(value) {
         return value.to_owned();
     }
