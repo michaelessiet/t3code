@@ -534,6 +534,30 @@ impl FilesPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.reveal_inner(path, position, true, window, cx);
+    }
+
+    /// [`Self::reveal`] without stealing keyboard focus — for render-driven
+    /// restores (dock surface sync on relaunch or thread switch), where the
+    /// user did not just ask for the file.
+    pub fn reveal_unfocused(
+        &mut self,
+        path: String,
+        position: Option<WirePosition>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reveal_inner(path, position, false, window, cx);
+    }
+
+    fn reveal_inner(
+        &mut self,
+        path: String,
+        position: Option<WirePosition>,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let already_open = self
             .open
             .as_ref()
@@ -546,12 +570,16 @@ impl FilesPanel {
                     state.set_cursor_position(position, window, cx);
                 });
             }
-            self.focus_editor(window, cx);
+            if focus {
+                self.focus_editor(window, cx);
+            }
             return;
         }
         self.pending_reveal = position.map(|position| (path.clone(), position));
         self.open_file(path, window, cx);
-        self.focus_editor(window, cx);
+        if focus {
+            self.focus_editor(window, cx);
+        }
     }
 
     /// Move keyboard focus into the editor buffer.

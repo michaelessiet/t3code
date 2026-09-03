@@ -1,6 +1,7 @@
 //! Vitre app shell: boots the Node sidecar under supervision and renders the
 //! M1 chat core ([`chat::ChatApp`]) — thread list, chat view, composer.
 
+mod assets;
 mod chat;
 mod files;
 mod lsp;
@@ -142,7 +143,7 @@ fn main() {
         selftest(config);
     }
 
-    let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
+    let app = gpui_platform::application().with_assets(assets::VitreAssets);
     app.run(move |cx: &mut App| {
         gpui_tokio::init(cx);
         gpui_component::init(cx);
@@ -201,7 +202,11 @@ fn main() {
             KeyBinding::new(&modified("shift-f"), chat::QuickSearchContent, None),
             KeyBinding::new(&modified("shift-p"), chat::CommandPaletteToggle, None),
             KeyBinding::new(&modified("shift-o"), chat::NewThread, None),
-            KeyBinding::new(&modified("j"), chat::ToggleFilesPanel, None),
+            KeyBinding::new(&modified("j"), chat::RightPanelToggle, None),
+            KeyBinding::new(&modified("alt-b"), chat::RightPanelToggle, None),
+            KeyBinding::new(&modified("w"), chat::RightPanelCloseSurface, None),
+            KeyBinding::new(&modified("shift-]"), chat::RightPanelNextSurface, None),
+            KeyBinding::new(&modified("shift-["), chat::RightPanelPreviousSurface, None),
         ]);
 
         let supervisor = Arc::new(Supervisor::start(config));

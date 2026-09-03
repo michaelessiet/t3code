@@ -56,7 +56,7 @@ use vitre_state::browse_path::{
 use vitre_state::project_grouping::normalize_project_path_for_comparison;
 
 use crate::chat::{
-    CommandPaletteToggle, NewThread, QuickSearchContent, QuickSearchOpen, ToggleFilesPanel,
+    CommandPaletteToggle, NewThread, QuickSearchContent, QuickSearchOpen, RightPanelToggle,
     fresh_id, now_iso, tnes,
 };
 
@@ -1715,7 +1715,7 @@ fn action_items(
                 IconName::PanelRight,
                 &["right panel", "dock", "sidebar", "toggle", "editor panel"],
             )
-            .shortcut(shortcut_for(&ToggleFilesPanel, window))
+            .shortcut(shortcut_for(&RightPanelToggle, window))
             .action(PaletteAction::ToggleFilesPanel),
         );
         items.push(

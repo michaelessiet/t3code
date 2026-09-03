@@ -6,6 +6,7 @@
 //! the thread shell (the TS client's `mergeEnvironmentThread` split).
 
 mod project_actions;
+mod right_panel;
 mod sidebar;
 
 use std::collections::hash_map::DefaultHasher;
@@ -54,7 +55,6 @@ use vitre_state::session_logic::{
 };
 
 use crate::files::FilesPanel;
-use crate::lsp::positions::WirePosition;
 use crate::palette::command_palette::{
     CommandPalette, CommandPaletteEvent, PaletteAction, PaletteContext,
 };
@@ -75,9 +75,14 @@ actions!(
         /// Electron's `chat.new` (`mod+shift+o`): start a thread in the
         /// contextual project.
         NewThread,
-        /// Electron's `rightPanel.toggle` (`mod+j`); in Vitre the right panel
-        /// is the files panel.
-        ToggleFilesPanel,
+        /// Electron's `rightPanel.toggle` (`mod+j` / `mod+alt+b`).
+        RightPanelToggle,
+        /// Electron's `rightPanel.closeSurface` (`mod+w`).
+        RightPanelCloseSurface,
+        /// Electron's `rightPanel.nextSurface` (`mod+shift+]`).
+        RightPanelNextSurface,
+        /// Electron's `rightPanel.previousSurface` (`mod+shift+[`).
+        RightPanelPreviousSurface,
     ]
 );
 
@@ -134,12 +139,19 @@ pub struct ChatApp {
     project_rename: Option<project_actions::ProjectRenameDialog>,
     /// The open "Project grouping" dialog, held for the same reason.
     project_grouping: Option<project_actions::ProjectGroupingDialog>,
-    /// Sidebar ⟷ chat split state (drag-resizable, Electron parity).
+    /// Sidebar ⟷ chat ⟷ right-panel split state (drag-resizable).
     sidebar_resize: Entity<ResizableState>,
-    /// Right-hand files panel (M2). Kept alive while toggled off so tree
-    /// expansion and the open buffer survive, recreated on project switch.
+    /// Right-hand files panel (M2), hosting the dock's `files`/`file`
+    /// surfaces. Kept alive while hidden so tree expansion and the open
+    /// buffer survive, recreated on project switch.
     files: Option<Entity<FilesPanel>>,
-    files_open: bool,
+    /// Right-panel dock state (per-thread surfaces) + persisted panel width.
+    right_panel: right_panel::RightPanelPrefs,
+    /// File-surface reveal requests already applied, keyed
+    /// `${threadKey}|${surfaceId}` → `reveal_request_id`.
+    applied_reveals: HashMap<String, u64>,
+    /// The thread key the dock last synced for, to catch thread switches.
+    last_dock_sync_key: Option<String>,
     /// The open QuickSearch overlay. Held here because the dialog's content
     /// closure only keeps a weak reference to it.
     quick_search: Option<Entity<QuickSearch>>,
@@ -500,6 +512,10 @@ impl ChatApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let sidebar = SidebarPrefs::load(home);
+        let right_panel = right_panel::RightPanelPrefs::load(home);
+        // Panel width persists on drag end only (`Resized` fires once per
+        // drag), matching Electron's localStorage write in `onLayout` commit.
+        let sidebar_resize = cx.new(|_| ResizableState::default());
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Ask anything, @tag files/folders, $use skills, or / for commands")
@@ -521,6 +537,23 @@ impl ChatApp {
                 _ => {}
             },
         )];
+        subscriptions.push(cx.subscribe(
+            &sidebar_resize,
+            |this: &mut Self, state, _: &gpui_component::resizable::ResizablePanelEvent, cx| {
+                if !this.dock_open() {
+                    return;
+                }
+                // Layout order: sidebar | chat | dock — the dock is index 2.
+                let Some(width) = state.read(cx).sizes().get(2).copied() else {
+                    return;
+                };
+                let width = f32::from(width).max(right_panel::MIN_PANEL_WIDTH);
+                if (width - this.right_panel.width).abs() > f32::EPSILON {
+                    this.right_panel.width = width;
+                    this.right_panel.save();
+                }
+            },
+        ));
 
         // Sidecar status line for the footer.
         cx.spawn({
@@ -642,22 +675,16 @@ impl ChatApp {
             sidebar_project_order: Vec::new(),
             project_rename: None,
             project_grouping: None,
-            sidebar_resize: cx.new(|_| ResizableState::default()),
+            sidebar_resize,
             files: None,
-            files_open: false,
+            right_panel,
+            applied_reveals: HashMap::new(),
+            last_dock_sync_key: None,
             quick_search: None,
             command_palette: None,
             focus_handle,
             _subscriptions: subscriptions,
         }
-    }
-
-    fn toggle_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.files_open = !self.files_open;
-        if self.files_open {
-            self.ensure_files_panel(window, cx);
-        }
-        cx.notify();
     }
 
     /// Open (or re-target, or dismiss) the QuickSearch overlay.
@@ -714,22 +741,10 @@ impl ChatApp {
         match event {
             QuickSearchEvent::OpenThread(id) => self.select_thread(id.clone(), cx),
             QuickSearchEvent::OpenFile { path, line } => {
-                // Electron opens files into the right panel, which it reveals
-                // if it was collapsed; the panel is our files panel.
-                self.files_open = true;
-                self.ensure_files_panel(window, cx);
-                let Some(files) = self.files.clone() else {
-                    return;
-                };
-                // Content-search lines are one-based; wire positions are not.
-                let position = line.map(|line| WirePosition {
-                    line: line.saturating_sub(1),
-                    character: 0,
-                });
-                files.update(cx, |files, cx| {
-                    files.reveal(path.clone(), position, window, cx);
-                });
-                cx.notify();
+                // Electron opens files as right-panel file surfaces, revealing
+                // the panel if collapsed. Content-search lines are one-based,
+                // which is what `openFile` stores too.
+                self.dock_open_file(path.clone(), *line, window, cx);
             }
             QuickSearchEvent::Dismissed => {
                 self.quick_search = None;
@@ -857,10 +872,9 @@ impl ChatApp {
             PaletteAction::QuickSearchContent => {
                 self.toggle_quick_search(QuickSearchMode::Content, window, cx);
             }
-            PaletteAction::ToggleFilesPanel => self.toggle_files(window, cx),
+            PaletteAction::ToggleFilesPanel => self.toggle_right_panel(window, cx),
             PaletteAction::NewFile | PaletteAction::NewFolder => {
-                self.files_open = true;
-                self.ensure_files_panel(window, cx);
+                self.dock_open_files_surface(window, cx);
                 let Some(files) = self.files.clone() else {
                     return;
                 };
@@ -2771,17 +2785,17 @@ impl ChatApp {
                             .child(title),
                     )
                     .child(
-                        Button::new("toggle-files")
-                            .icon(if self.files_open {
+                        Button::new("toggle-right-panel")
+                            .icon(if self.dock_open() {
                                 IconName::PanelRightClose
                             } else {
                                 IconName::PanelRightOpen
                             })
                             .ghost()
                             .xsmall()
-                            .tooltip("Files")
+                            .tooltip("Toggle right panel")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_files(window, cx);
+                                this.toggle_right_panel(window, cx);
                             })),
                     ),
             );
@@ -2836,22 +2850,20 @@ fn describe_status(status: &SupervisorStatus) -> String {
 
 impl Render for ChatApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Recreate the files panel when the open thread's project changed
-        // while the panel is showing.
-        if self.files_open {
-            self.ensure_files_panel(window, cx);
+        // Keep the shared files panel in line with the dock's active surface:
+        // recreate it on project switch, apply un-applied file reveals. This
+        // runs per frame, so it must not steal focus — user-initiated opens
+        // focus through their own `after_dock_change(true)` path.
+        let dock_key = self.dock_open().then(|| self.dock_thread_key()).flatten();
+        if dock_key.is_some() {
+            self.sync_active_file_surface(false, window, cx);
         }
-        let files_panel = self
-            .files_open
-            .then(|| self.files.clone())
-            .flatten()
-            .map(|panel| {
-                div()
-                    .w(relative(0.45))
-                    .h_full()
-                    .flex_shrink_0()
-                    .child(panel)
-            });
+        let dock_panel = dock_key
+            .as_deref()
+            .map(|key| self.render_right_panel(key, cx));
+        // Electron caps the panel at 70% of the window (`maxWidthPct`).
+        let dock_max_width =
+            (window.viewport_size().width * 0.7).max(px(right_panel::MIN_PANEL_WIDTH));
         let active_plan = self
             .thread
             .as_ref()
@@ -2888,9 +2900,20 @@ impl Render for ChatApp {
             .on_action(cx.listener(|this, _: &NewThread, window, cx| {
                 this.new_thread(None, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleFilesPanel, window, cx| {
-                this.toggle_files(window, cx);
+            .on_action(cx.listener(|this, _: &RightPanelToggle, window, cx| {
+                this.toggle_right_panel(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &RightPanelCloseSurface, window, cx| {
+                this.dock_close_active_surface(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RightPanelNextSurface, window, cx| {
+                this.dock_cycle_surface(1, window, cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &RightPanelPreviousSurface, window, cx| {
+                    this.dock_cycle_surface(-1, window, cx);
+                }),
+            )
             .child(
                 h_flex()
                     .size_full()
@@ -2904,10 +2927,22 @@ impl Render for ChatApp {
                                         .size_range(px(208.)..px(480.))
                                         .child(self.render_sidebar(cx).into_any_element()),
                                 )
-                                .child(resizable_panel().child(self.render_chat(cx))),
+                                .child(resizable_panel().child(self.render_chat(cx)))
+                                .child(
+                                    // Hidden (not unmounted) when the dock is
+                                    // closed: the state slot keeps the width,
+                                    // so re-opening restores the drag size.
+                                    resizable_panel()
+                                        .size(px(self.right_panel.width))
+                                        .size_range(
+                                            px(right_panel::MIN_PANEL_WIDTH)..dock_max_width,
+                                        )
+                                        .flex_none()
+                                        .visible(dock_panel.is_some())
+                                        .children(dock_panel),
+                                ),
                         ),
                     )
-                    .children(files_panel)
                     .children(
                         active_plan
                             .as_ref()
