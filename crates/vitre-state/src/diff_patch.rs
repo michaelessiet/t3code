@@ -430,6 +430,37 @@ pub fn hunk_intraline_pairs(hunk: &PatchHunk) -> Vec<IntralinePair> {
     pairs
 }
 
+/// Unmodified lines skipped before `file.hunks[index]` — what the diff panel
+/// prints as an "N unmodified lines" separator. Uses head-side numbering when
+/// the hunk has a head side (added/context lines exist there), else base-side
+/// (pure deletions); the two agree for context gaps, which advance both
+/// sides equally. The trailing gap after the last hunk is unknowable from
+/// patch text alone (the file's total length is not in the patch), so there
+/// is no trailing counterpart.
+pub fn unmodified_gap_before(file: &PatchFile, index: usize) -> u32 {
+    let Some(hunk) = file.hunks.get(index) else {
+        return 0;
+    };
+    let use_new_side = hunk.new_lines > 0;
+    let start = if use_new_side {
+        hunk.new_start
+    } else {
+        hunk.old_start
+    };
+    let previous_end = match index.checked_sub(1).and_then(|prev| file.hunks.get(prev)) {
+        Some(previous) => {
+            if use_new_side {
+                previous.new_start + previous.new_lines
+            } else {
+                previous.old_start + previous.old_lines
+            }
+        }
+        // Lines before the first hunk.
+        None => 1,
+    };
+    start.saturating_sub(previous_end)
+}
+
 /// Token budget past which intra-line diffing is skipped (quadratic LCS).
 const INTRALINE_MAX_TOKENS: usize = 200;
 
@@ -600,6 +631,31 @@ index 1111111..2222222 100644
         assert_eq!(hunk.lines[4].kind, PatchLineKind::Context);
         assert_eq!(hunk.lines[4].old_line, Some(3));
         assert_eq!(hunk.lines[4].new_line, Some(4));
+    }
+
+    #[test]
+    fn unmodified_gaps_count_leading_and_between_hunk_lines() {
+        let patch = "\
+diff --git a/x.rs b/x.rs
+--- a/x.rs
++++ b/x.rs
+@@ -10,3 +10,3 @@
+ ctx
+-old
++new
+ ctx
+@@ -30,3 +30,3 @@
+ ctx
+-old2
++new2
+ ctx
+";
+        let files = parse_unified_patch(patch);
+        let file = &files[0];
+        // Lines 1..=9 precede the first hunk; 13..=29 sit between hunks.
+        assert_eq!(unmodified_gap_before(file, 0), 9);
+        assert_eq!(unmodified_gap_before(file, 1), 17);
+        assert_eq!(unmodified_gap_before(file, 2), 0);
     }
 
     #[test]

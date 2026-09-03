@@ -187,12 +187,19 @@ impl ChatApp {
     }
 
     fn dock_add_surface(&mut self, kind: SurfaceKind, window: &mut Window, cx: &mut Context<Self>) {
-        // Only kinds this slice can host; the menu disables the rest, so an
-        // unknown kind arriving here is a bug, not user input.
-        if kind != SurfaceKind::Files {
-            return;
+        // Only kinds the landed slices can host; the menu disables the rest,
+        // so an unknown kind arriving here is a bug, not user input.
+        match kind {
+            SurfaceKind::Files => self.dock_open_files_surface(window, cx),
+            SurfaceKind::Diff => {
+                let Some(key) = self.dock_thread_key() else {
+                    return;
+                };
+                self.right_panel.map.open(&key, SurfaceKind::Diff);
+                self.after_dock_change(false, window, cx);
+            }
+            _ => {}
         }
-        self.dock_open_files_surface(window, cx);
     }
 
     fn dock_activate_surface(
@@ -349,6 +356,7 @@ impl ChatApp {
         self.last_dock_sync_key = Some(key.clone());
         match surface {
             RightPanelSurface::Files { .. } => self.ensure_files_panel(window, cx),
+            RightPanelSurface::Diff { .. } => self.ensure_diff_panel(window, cx),
             RightPanelSurface::File {
                 id,
                 relative_path,
@@ -428,7 +436,8 @@ impl ChatApp {
                 label: "Diff",
                 description: "Review changes in this thread.",
                 icon: || Icon::new(VitreIcon::FileDiff),
-                disabled: Some("The diff panel is not yet available in Vitre.".into()),
+                disabled: (!project_open)
+                    .then(|| "The diff panel is only available when a project is open.".into()),
             },
         ]
     }
@@ -610,9 +619,13 @@ impl ChatApp {
                 Some(panel) => div().size_full().child(panel).into_any_element(),
                 None => dock_placeholder("Files are only available when a project is open.", cx),
             },
-            SurfaceKind::Diff => {
-                dock_placeholder("The diff panel is not yet available in Vitre.", cx)
-            }
+            SurfaceKind::Diff => match self.diff.clone() {
+                Some(panel) => div().size_full().child(panel).into_any_element(),
+                None => dock_placeholder(
+                    "The diff panel is only available when a project is open.",
+                    cx,
+                ),
+            },
             SurfaceKind::Terminal => {
                 dock_placeholder("The terminal is not yet available in Vitre.", cx)
             }

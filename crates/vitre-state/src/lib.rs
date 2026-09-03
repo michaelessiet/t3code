@@ -22,6 +22,7 @@
 //! applied here when the reducer reads them.
 
 pub mod browse_path;
+pub mod diff_panel;
 pub mod diff_patch;
 pub mod file_buffer;
 pub mod file_tree;

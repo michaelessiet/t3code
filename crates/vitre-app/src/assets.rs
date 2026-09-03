@@ -11,13 +11,27 @@ pub struct VitreAssets;
 
 const EXTRA_ICONS: &[(&str, &[u8])] = &[
     (
+        "icons/chevrons-down-up.svg",
+        include_bytes!("../icons/chevrons-down-up.svg"),
+    ),
+    (
+        "icons/columns-2.svg",
+        include_bytes!("../icons/columns-2.svg"),
+    ),
+    (
         "icons/file-diff.svg",
         include_bytes!("../icons/file-diff.svg"),
     ),
     ("icons/files.svg", include_bytes!("../icons/files.svg")),
+    ("icons/pilcrow.svg", include_bytes!("../icons/pilcrow.svg")),
+    ("icons/rows-3.svg", include_bytes!("../icons/rows-3.svg")),
     (
         "icons/text-search.svg",
         include_bytes!("../icons/text-search.svg"),
+    ),
+    (
+        "icons/wrap-text.svg",
+        include_bytes!("../icons/wrap-text.svg"),
     ),
 ];
 
@@ -39,17 +53,27 @@ impl AssetSource for VitreAssets {
 /// `Into<Icon>` is expected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VitreIcon {
+    ChevronsDownUp,
+    Columns2,
     FileDiff,
     Files,
+    Pilcrow,
+    Rows3,
     TextSearch,
+    WrapText,
 }
 
 impl IconNamed for VitreIcon {
     fn path(self) -> SharedString {
         match self {
+            Self::ChevronsDownUp => "icons/chevrons-down-up.svg".into(),
+            Self::Columns2 => "icons/columns-2.svg".into(),
             Self::FileDiff => "icons/file-diff.svg".into(),
             Self::Files => "icons/files.svg".into(),
+            Self::Pilcrow => "icons/pilcrow.svg".into(),
+            Self::Rows3 => "icons/rows-3.svg".into(),
             Self::TextSearch => "icons/text-search.svg".into(),
+            Self::WrapText => "icons/wrap-text.svg".into(),
         }
     }
 }

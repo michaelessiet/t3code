@@ -5,6 +5,7 @@
 //! only carries the six detail event kinds, so title/meta always come from
 //! the thread shell (the TS client's `mergeEnvironmentThread` split).
 
+mod diff_panel;
 mod project_actions;
 mod right_panel;
 mod sidebar;
@@ -12,7 +13,7 @@ mod sidebar;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash as _, Hasher as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -48,6 +49,7 @@ use vitre_contracts::{
     RuntimeMode, ServerConfig, ThreadId, TrimmedNonEmptyString,
 };
 use vitre_sidecar::SupervisorStatus;
+use vitre_state::diff_panel::ordered_turn_diff_summaries;
 use vitre_state::session_logic::{
     ActivePlanState, ApprovalRequestKind, PendingApproval, PendingUserInput, PlanStepStatus,
     derive_active_plan_state, derive_latest_context_window_snapshot, derive_pending_approvals,
@@ -145,6 +147,13 @@ pub struct ChatApp {
     /// surfaces. Kept alive while hidden so tree expansion and the open
     /// buffer survive, recreated on project switch.
     files: Option<Entity<FilesPanel>>,
+    /// Diff dock surface (M3), recreated when the dock's thread key or the
+    /// active git root changes. `None` until first shown.
+    diff: Option<Entity<diff_panel::DiffPanel>>,
+    /// Open-file subscription on the current diff panel; replaced on recreate.
+    diff_subscription: Option<Subscription>,
+    /// Where the diff panel persists its per-thread selections.
+    diff_store: PathBuf,
     /// Right-panel dock state (per-thread surfaces) + persisted panel width.
     right_panel: right_panel::RightPanelPrefs,
     /// File-surface reveal requests already applied, keyed
@@ -677,6 +686,9 @@ impl ChatApp {
             project_grouping: None,
             sidebar_resize,
             files: None,
+            diff: None,
+            diff_subscription: None,
+            diff_store: home.join(diff_panel::FILE_NAME),
             right_panel,
             applied_reveals: HashMap::new(),
             last_dock_sync_key: None,
@@ -897,6 +909,48 @@ impl ChatApp {
             .is_none_or(|panel| panel.read(cx).cwd() != cwd);
         if stale {
             self.files = Some(cx.new(|cx| FilesPanel::new(client, cwd, window, cx)));
+        }
+    }
+
+    /// Create (or recreate, when the dock's thread key or git root changed)
+    /// the diff panel, and feed it the open thread's ordered turn summaries.
+    /// Runs per frame while the diff surface is active, so both steps are
+    /// change-guarded.
+    fn ensure_diff_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(client), Some(key)) = (self.client.clone(), self.dock_thread_key()) else {
+            return;
+        };
+        let Some(cwd) = self.search_root() else {
+            return;
+        };
+        let stale = self.diff.as_ref().is_none_or(|panel| {
+            let panel = panel.read(cx);
+            panel.thread_key() != key || panel.cwd() != cwd
+        });
+        if stale {
+            let thread_id = self.thread.as_ref().map(|open| open.id.clone());
+            let panel = cx.new(|cx| {
+                diff_panel::DiffPanel::new(client, key, cwd, thread_id, self.diff_store.clone(), cx)
+            });
+            self.diff_subscription = Some(cx.subscribe_in(
+                &panel,
+                window,
+                |this, _, event: &diff_panel::DiffPanelEvent, window, cx| match event {
+                    diff_panel::DiffPanelEvent::OpenFile { path } => {
+                        this.dock_open_file(path.clone(), None, window, cx);
+                    }
+                },
+            ));
+            self.diff = Some(panel);
+        }
+        if let Some(panel) = self.diff.clone() {
+            let ordered = self
+                .thread
+                .as_ref()
+                .and_then(|open| open.state.view.as_ref())
+                .map(|view| ordered_turn_diff_summaries(&view.checkpoints))
+                .unwrap_or_default();
+            panel.update(cx, |panel, cx| panel.set_checkpoints(ordered, cx));
         }
     }
 
