@@ -22,6 +22,7 @@
 //! applied here when the reducer reads them.
 
 pub mod browse_path;
+pub mod chat_ui;
 pub mod diff_panel;
 pub mod diff_patch;
 pub mod file_buffer;
@@ -35,6 +36,7 @@ pub mod shell_sync;
 pub mod sidebar;
 pub mod thread;
 pub mod thread_sync;
+pub mod turn_diff_tree;
 pub mod vcs_tree_status;
 pub mod wire_opt;
 

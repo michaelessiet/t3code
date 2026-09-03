@@ -5,16 +5,20 @@ Status of the native Rust/GPUI app (`crates/vitre-*`) against the Electron deskt
 189-row sweep of the Electron codebase on **2026-09-03** (after the add-project flow landed
 in `24f497a63`).
 
-**Snapshot: 42 present · 39 partial · 108 absent.** M1 (chat core) and M2 slices 1–5
+**Snapshot: 45 present · 39 partial · 105 absent.** M1 (chat core) and M2 slices 1–5
 (files, tree ops, LSP bridge, ⌘S/format, QuickSearch + command palette, sidebar grouping,
 add-project) are the "present" mass; the "absent" mass is dominated by whole subsystems the
 master plan schedules as M3+ (terminal, preview, settings, source control,
-knowledge graph, multi-environment). M3 slices 2.1 (right-panel dock) and 2.2/2.3 (diff
-engine + diff panel) landed 2026-09-03.
+knowledge graph, multi-environment). M3 slices 2.1 (right-panel dock), 2.2/2.3 (diff
+engine + diff panel) and 2.4 (turn-diff changed-files cards) landed 2026-09-03.
 
 How to update: flip a row's status in the same PR that changes it; add a `Done <date> (<sha>)`
 note. Rows that will never be ported get status `waived` with a written reason (e.g. WSL
 sources before a Windows build).
+
+QA note: sandboxed verification runs can't inject clicks, so thread-scoped behaviors are
+driven by `VITRE_OPEN_THREAD=<thread-id>` (selects the thread once the shell carries it)
+plus seeded `~/.vitre/*.json` state files, then screenshots.
 
 ---
 
@@ -56,7 +60,7 @@ Right-panel dock/tabs is the structural prerequisite for everything else here.
 | 2.1 | **Done 2026-09-03** — Right-panel dock: multi-surface tab strip, per-thread persistence, close/cycle chords, resize + width persistence | XL+S | `rightPanelStore.ts`, `RightPanelTabs.tsx` |
 | 2.2 | **Done 2026-09-03** — Diff engine: server-patch parser + virtualized GPUI renderer, unified/split, collapse, raw fallback (syntax highlighting deferred) | XL | `DiffWorkerPoolProvider.tsx` (@pierre/diffs — clean-room; note the sticky-inset gotcha memory) |
 | 2.3 | **Done 2026-09-03** — Diff panel shell: branch vs per-turn modes, base-ref menu, collapse/wrap/whitespace toggles, open-in-editor | L+S+S+S | `DiffPanel.tsx`, `baseRefChoices.ts`, `diffCollapse.ts` |
-| 2.4 | Turn-diff summaries + changed-files card under assistant messages (chat's top absent feature; unblocked by 2.2) | M+XL | `useTurnDiffSummaries.ts`, `ChangedFilesTree.tsx` |
+| 2.4 | **Done 2026-09-03** — Turn-diff summaries + changed-files card under assistant messages, opening the diff panel at that turn | M+XL | `useTurnDiffSummaries.ts`, `ChangedFilesTree.tsx` |
 | 2.5 | Terminal: alacritty_terminal PTY-less grid renderer + attach/write/resize lifecycle, input arbitration, links, selection→chat-context, tabs/splits, theme sync, running indicators | XL core + M satellites | `ThreadTerminalDrawer.tsx`, `state/terminalSessions.ts`, `terminal-links.ts`, `terminalUiStateStore.ts` |
 | 2.6 | Source control: branch toolbar (refs/worktree env mode), git actions (commit/push/PR with staged progress), PR-thread dialog, worktree cleanup | L+L+M+S | `BranchToolbar.tsx`, `GitActionsControl.tsx` (logic.ts is pure/portable), `PullRequestThreadDialog.tsx` |
 | 2.7 | Review comments: line-range annotation in editor + diff feeding composer context | XL | `reviewComments.ts`, `AnnotatableCodeView.tsx` (z-20 resize-handle gotcha memory) |
@@ -188,15 +192,15 @@ Sizes are porting-effort estimates: S < 1d, M ~1–3d, L ~1wk, XL > 1wk.
 
 | Feature | Electron ref | Vitre ref | Status | Size | Notes |
 |---|---|---|---|---|---|
-| Diff panel shell: branch-diff vs per-turn checkpoint modes | `apps/web/src/components/DiffPanel.tsx` | `crates/vitre-app/src/chat/diff_panel.rs` | 🟡 partial | L | Done 2026-09-03 (slice 2.2/2.3): selection store port (`vitre-state/src/diff_panel.rs`, version-1 persistence in `~/.vitre/diff-panel-state.json`, turn reconcile, 9 unit tests); scope dropdown (Working tree / Branch changes / Latest turn / Turn submenu with timestamps); SWR-style query slots over review.getDiffPreview + orchestration.getTurnDiff/getFullThreadDiff (stale data stays visible through loading/errors); vcs.subscribeStatus loop freezes has_working_tree_changes and marks git scopes stale on deltas (stand-in for Electron's 5s SWR staleTime); retry-at-server-cwd fallback on "configured workspace root" errors; exact empty/loading/truncation copy. Missing: chat entry points (turn mode reachable only once slice 2.4 lands). Vitre extension: git scopes work on the `:home` pseudo-thread against the first project root (Electron gates the whole panel on a thread). |
+| Diff panel shell: branch-diff vs per-turn checkpoint modes | `apps/web/src/components/DiffPanel.tsx` | `crates/vitre-app/src/chat/diff_panel.rs` | 🟡 partial | L | Done 2026-09-03 (slice 2.2/2.3): selection store port (`vitre-state/src/diff_panel.rs`, version-1 persistence in `~/.vitre/diff-panel-state.json`, turn reconcile, 9 unit tests); scope dropdown (Working tree / Branch changes / Latest turn / Turn submenu with timestamps); SWR-style query slots over review.getDiffPreview + orchestration.getTurnDiff/getFullThreadDiff (stale data stays visible through loading/errors); vcs.subscribeStatus loop freezes has_working_tree_changes and marks git scopes stale on deltas (stand-in for Electron's 5s SWR staleTime); retry-at-server-cwd fallback on "configured workspace root" errors; exact empty/loading/truncation copy. Turn mode is reachable from the changed-files card since slice 2.4 (live-verified: getFullThreadDiff for turn 1, reveal by file path). Vitre extension: git scopes work on the `:home` pseudo-thread against the first project root (Electron gates the whole panel on a thread). |
 | Diff rendering engine: unified(stacked)/split, intra-line highlights, syntax highlighting | `apps/web/src/components/DiffWorkerPoolProvider.tsx` | `crates/vitre-state/src/diff_patch.rs` | 🟡 partial | XL | Done 2026-09-03 (slice 2.2/2.3): total unified-patch parser (never throws; 10 unit tests) + unmodified-gap math over the server-produced patch (no local imara-diff needed — Electron also renders the RPC patch); virtualized gpui `list()` renderer with unified + split (change runs zipped by index), per-file collapse, file headers with change icons/rename arrows/±counts (Electron's exact edge rules), separators with unmodified-line counts, binary rows, raw-patch fallback with Electron's copy. Missing: tree-sitter syntax highlighting; wrap-off truncates instead of horizontal scroll. Intra-line word diffs are parity-neutral — Electron's panel sets lineDiffType "none". |
 | Base ref selection (automatic base + searchable ref combobox) | `apps/web/src/lib/baseRefChoices.ts` | `crates/vitre-state/src/diff_panel.rs` | 🟡 partial | S | Done 2026-09-03 (slice 2.2/2.3): buildBaseRefChoices/filterBaseRefChoices ported (origin-preferred local/remote pairing, unit-tested) over vcs.listRefs Local+Remote; Automatic = absent baseRef with the server-resolved ref shown in the trigger; per-thread baseRef persistence; head→base row appears only when the source reports a base. Missing: search input (flat scrollable PopupMenu instead of a searchable combobox) and Electron's 5s refs repolling (Vitre fetches refs once per preview-echoed cwd). |
 | Diff view options: collapse all/expand all, wrap, whitespace toggle | `apps/web/src/lib/diffCollapse.ts` | `crates/vitre-app/src/chat/diff_panel.rs` | ✅ present | S | Done 2026-09-03 (slice 2.2/2.3): per-file collapse via header chevrons + collapse-all/expand-all header button (icon flips ChevronsDownUp/ChevronsUpDown), stacked/split toggle pair, word-wrap toggle (re-measures the virtualized list), whitespace toggle (Pilcrow ↔ ignoreWhitespace, refetches) — Electron's tooltips and icons (vendored Lucide rows-3 / columns-2 / wrap-text / pilcrow / chevrons-down-up). |
-| Turn diff summaries (changed-file chips per turn in chat) | `apps/web/src/hooks/useTurnDiffSummaries.ts` | — | ❌ absent | M | review.getDiffPreview per TurnId; lib/turnDiffTree.ts groups files into a tree; chat rows link into the diff panel at that turn. |
+| Turn diff summaries (changed-file chips per turn in chat) | `apps/web/src/hooks/useTurnDiffSummaries.ts` | `crates/vitre-app/src/chat/changed_files.rs` | ✅ present | M | Done 2026-09-03 (slice 2.4): summaries are `thread.checkpoints` from the subscribe-thread stream (the reducer already carried the turn-diff-completed arms: never-downgrade-missing, mid-turn placeholders, assistant-message rebinding); `vitre-state::turn_diff_tree` groups files into the tree; cards link into the diff panel at that turn. See the turn-diff section row for the card itself. |
 | Review comments: annotate diff/file lines into composer context | `apps/web/src/components/diffs/AnnotatableCodeView.tsx` | — | ❌ absent | L | Line-range selection over CodeView, LocalCommentAnnotation (components/files/) renders comment cards, reviewCommentContext.ts serializes them into the next prompt. Gotcha from memory: root listener needs stopPropagation vs resize-handle overlay. |
 | Diff file actions: open in editor / preferred external editor | `apps/web/src/diffFileActions.ts` | `crates/vitre-app/src/chat/diff_panel.rs` | 🟡 partial | S | Done 2026-09-03 (slice 2.2/2.3): clicking a file-header path opens the file in the dock editor (DiffPanelEvent::OpenFile → dock_open_file). Missing: preferred-external-editor action (editorPreferences.ts + shell.openInEditor). |
 | Git root switcher for multi-root threads | `apps/web/src/components/GitRootSwitcher.tsx` | — | ❌ absent | S | gitRootStore.ts selects which workspace root the diff/source-control views scope to. |
-| Checkpoint diff state (revert-point diffs) | `apps/web/src/lib/checkpointDiffState.ts` | — | ❌ absent | M | useCheckpointDiff powers turn-scoped checkpoint comparisons and revert affordances in chat. |
+| Checkpoint diff state (revert-point diffs) | `apps/web/src/lib/checkpointDiffState.ts` | `crates/vitre-app/src/chat/diff_panel.rs` | ✅ present | M | Done 2026-09-03 (slices 2.2–2.4): turn-scoped checkpoint diffs fetch through the diff panel's turn mode (`fromTurnCount 0` → getFullThreadDiff, else getTurnDiff — live-verified); chat revert affordances (revert-to-checkpoint per user message) landed in M1. |
 
 ### drafts
 
@@ -515,7 +519,7 @@ Sizes are porting-effort estimates: S < 1d, M ~1–3d, L ~1wk, XL > 1wk.
 
 | Feature | Electron ref | Vitre ref | Status | Size | Notes |
 |---|---|---|---|---|---|
-| Changed-files card under assistant messages with diff stats and open-turn-diff | `apps/web/src/components/chat/ChangedFilesTree.tsx` | — | ❌ absent | XL | useTurnDiffSummaries builds per-turn summaries; ChangedFilesCard/ChangedFilesTree render collapsible file tree with DiffStatLabel (+adds/−dels), per-file click opens the DiffPanel scoped to that turn (onOpenTurnDiff), auto-expands on latest turn, expansion persisted per thread in uiStateStore. Vitre has no diff surface at all. |
+| Changed-files card under assistant messages with diff stats and open-turn-diff | `apps/web/src/components/chat/ChangedFilesTree.tsx` | `crates/vitre-app/src/chat/changed_files.rs` | ✅ present | XL | Done 2026-09-03 (slice 2.4): card after the assistant markdown body — "N changed file(s)" header with inline DiffStatLabel + Show/Hide files hint, collapsible natural-sorted tree (`vitre-state::turn_diff_tree` ports turnDiffTree.ts incl. chain compaction, unit-tested), per-directory toggles with Electron's reset-by-key semantics, compact preview for the latest turn (scope roll-up + up to 3 chips + "Show all N files"), auto-expand rule (≤5 files, ≤200 lines, latest turn, evaluated once), expansion persisted per thread+turn in `~/.vitre/ui-state.json` (uiStateStore port, version-gated + sanitized); header "Open diff" / file rows / chips call onOpenTurnDiff (dock diff surface + turn selection with reveal; tree rows pass normalized paths, chips raw — gotcha 14). Summaries read from `thread.checkpoints` (never fetched — gotcha 1); cards can appear mid-stream from placeholder checkpoints. Deviations: no sticky expanded header, generic file/folder icons (same as files panel), persist not debounced. |
 
 ### updater
 

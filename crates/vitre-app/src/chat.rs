@@ -5,6 +5,7 @@
 //! only carries the six detail event kinds, so title/meta always come from
 //! the thread shell (the TS client's `mergeEnvironmentThread` split).
 
+mod changed_files;
 mod diff_panel;
 mod project_actions;
 mod right_panel;
@@ -111,6 +112,13 @@ pub struct ChatApp {
     reverting: bool,
     /// Activity (tool) rows expanded to show their payload detail.
     expanded_activities: HashSet<String>,
+    /// Changed-files card state: persisted expansion (`~/.vitre/ui-state.json`)
+    /// plus per-turn local UI (auto-expand decision, folder toggles).
+    changed_files: changed_files::ChangedFilesState,
+    /// `VITRE_OPEN_THREAD=<thread-id>`: select this thread as soon as the
+    /// shell carries it, then forget it. Verification hook for sandboxed runs
+    /// where synthetic clicks are dropped (docs/vitre-parity.md QA recipe).
+    debug_open_thread: Option<String>,
     /// The virtualized timeline. Rows vary wildly in height (markdown bodies,
     /// expandable tool detail), so this is gpui's `list`, which measures rows
     /// lazily as they scroll in — not `uniform_list` or gpui-component's
@@ -477,6 +485,8 @@ fn row_content_hash(
     row: TimelineRow,
     revert_turn_counts: &HashMap<MessageId, i64>,
     expanded_activities: &HashSet<String>,
+    thread_key: Option<&str>,
+    changed_files: &changed_files::ChangedFilesState,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     match row {
@@ -492,6 +502,9 @@ fn row_content_hash(
             revert_turn_counts
                 .contains_key(&message.id)
                 .hash(&mut hasher);
+            if message.role == OrchestrationMessageRole::Assistant {
+                changed_files.hash_card(&mut hasher, thread_key, view, &message.id);
+            }
         }
         TimelineRow::Activity(index) => {
             let Some(activity) = view.activities.get(index) else {
@@ -627,6 +640,7 @@ impl ChatApp {
                         // as unread.
                         app.sync_thread_visit();
                         app.rebuild_sidebar();
+                        app.maybe_open_debug_thread(cx);
                         cx.notify();
                     })
                     .is_err()
@@ -673,6 +687,10 @@ impl ChatApp {
             mention: None,
             mention_generation: 0,
             pending_revert: None,
+            changed_files: changed_files::ChangedFilesState::load(home),
+            debug_open_thread: std::env::var("VITRE_OPEN_THREAD")
+                .ok()
+                .filter(|value| !value.is_empty()),
             reverting: false,
             expanded_activities: HashSet::new(),
             timeline_list: new_timeline_list(),
@@ -1035,6 +1053,22 @@ impl ChatApp {
         .detach();
     }
 
+    /// Consume the `VITRE_OPEN_THREAD` hook once its thread shows up in the
+    /// shell (thread selection has no persisted state to seed instead).
+    fn maybe_open_debug_thread(&mut self, cx: &mut Context<Self>) {
+        let Some(wanted) = self.debug_open_thread.clone() else {
+            return;
+        };
+        if self
+            .shell_threads()
+            .iter()
+            .any(|thread| thread.id.0 == wanted)
+        {
+            self.debug_open_thread = None;
+            self.select_thread(ThreadId(wanted), cx);
+        }
+    }
+
     fn select_thread(&mut self, id: ThreadId, cx: &mut Context<Self>) {
         if self.thread.as_ref().is_some_and(|open| open.id == id) {
             return;
@@ -1048,6 +1082,9 @@ impl ChatApp {
         self.mention = None;
         self.pending_attachments.clear();
         self.pending_revert = None;
+        // Thread switch ≙ every changed-files card unmounting: the next
+        // thread's cards re-run their auto-expand decision on first sight.
+        self.changed_files.clear_local();
         // A different thread is a different list: drop every measured row and
         // re-arm tail following so the new thread opens at its newest message.
         self.timeline = Vec::new();
@@ -2136,6 +2173,15 @@ impl ChatApp {
         }
         self.revert_turn_counts = counts;
 
+        // The changed-files card's auto-expand decision is made once per turn,
+        // at the web component's mount ≙ the checkpoint's first appearance.
+        let latest_turn_id = view.latest_turn.as_ref().map(|latest| &latest.turn_id);
+        for checkpoint in &view.checkpoints {
+            let is_latest = latest_turn_id == Some(&checkpoint.turn_id);
+            self.changed_files.ensure_local(checkpoint, is_latest);
+        }
+
+        let thread_key = self.dock_thread_key();
         let hashes = rows
             .iter()
             .map(|row| {
@@ -2144,6 +2190,8 @@ impl ChatApp {
                     *row,
                     &self.revert_turn_counts,
                     &self.expanded_activities,
+                    thread_key.as_deref(),
+                    &self.changed_files,
                 )
             })
             .collect();
@@ -2185,6 +2233,7 @@ impl ChatApp {
             return;
         };
         // Keep the fingerprint in step, or the next rebuild remeasures again.
+        let thread_key = self.dock_thread_key();
         let hash = self
             .thread
             .as_ref()
@@ -2195,6 +2244,8 @@ impl ChatApp {
                     row,
                     &self.revert_turn_counts,
                     &self.expanded_activities,
+                    thread_key.as_deref(),
+                    &self.changed_files,
                 )
             });
         if let Some(hash) = hash {
@@ -2288,30 +2339,45 @@ impl ChatApp {
                     } else {
                         let text = message.text.0.clone();
                         let streaming = message.streaming;
-                        (div()
-                            .px_1()
-                            .py_0p5()
-                            .text_sm()
-                            .text_color(cx.theme().foreground)
-                            .map(|this| {
-                                if text.is_empty() && streaming {
-                                    this.text_color(cx.theme().muted_foreground)
-                                        .child("(empty response)")
-                                } else {
-                                    // Keyed per message: the free
-                                    // `markdown()` helper keys by call
-                                    // site and would collide in this
-                                    // loop.
-                                    this.child(
-                                        TextView::markdown(
-                                            SharedString::from(format!("md-{}", message.id.0)),
-                                            SharedString::from(text),
+                        let mut column = v_flex().child(
+                            div()
+                                .px_1()
+                                .py_0p5()
+                                .text_sm()
+                                .text_color(cx.theme().foreground)
+                                .map(|this| {
+                                    if text.is_empty() && streaming {
+                                        this.text_color(cx.theme().muted_foreground)
+                                            .child("(empty response)")
+                                    } else {
+                                        // Keyed per message: the free
+                                        // `markdown()` helper keys by call
+                                        // site and would collide in this
+                                        // loop.
+                                        this.child(
+                                            TextView::markdown(
+                                                SharedString::from(format!("md-{}", message.id.0)),
+                                                SharedString::from(text),
+                                            )
+                                            .selectable(true),
                                         )
-                                        .selectable(true),
-                                    )
-                                }
-                            }))
-                        .into_any_element()
+                                    }
+                                }),
+                        );
+                        // Changed-files card, right after the markdown body
+                        // (Electron's AssistantChangedFilesSection). Can
+                        // appear mid-stream: placeholder checkpoints land
+                        // while the turn is still running.
+                        if let Some(summary) = changed_files::summary_for_message(view, &message.id)
+                        {
+                            let is_latest = changed_files::is_latest_turn(view, summary);
+                            if let Some(card) =
+                                self.changed_files_card(index, summary, is_latest, cx)
+                            {
+                                column = column.child(card);
+                            }
+                        }
+                        column.into_any_element()
                     }
                 }
                 TimelineRow::Activity(activity_index) => {

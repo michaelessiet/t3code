@@ -30,6 +30,7 @@ use gpui_component::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use vitre_contracts::TurnId;
 use vitre_state::right_panel::{PERSISTED_VERSION, RightPanelMap, RightPanelSurface, SurfaceKind};
 
 use crate::assets::VitreIcon;
@@ -184,6 +185,27 @@ impl ChatApp {
         };
         self.right_panel.map.open(&key, SurfaceKind::Files);
         self.after_dock_change(false, window, cx);
+    }
+
+    /// Open the diff surface scoped to one turn — the changed-files card's
+    /// "Open diff" button, file rows and preview chips. Ports ChatView's
+    /// `onOpenTurnDiff` (selectTurn + rightPanel.open("diff")).
+    pub(super) fn dock_open_turn_diff(
+        &mut self,
+        turn_id: TurnId,
+        file_path: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(key) = self.dock_thread_key() else {
+            return;
+        };
+        self.right_panel.map.open(&key, SurfaceKind::Diff);
+        // Creates/reuses the DiffPanel via sync_active_file_surface.
+        self.after_dock_change(false, window, cx);
+        if let Some(panel) = self.diff.clone() {
+            panel.update(cx, |panel, cx| panel.open_turn(turn_id, file_path, cx));
+        }
     }
 
     fn dock_add_surface(&mut self, kind: SurfaceKind, window: &mut Window, cx: &mut Context<Self>) {

@@ -340,6 +340,20 @@ impl DiffPanel {
         self.after_selection_change(cx);
     }
 
+    /// Turn selection arriving from the chat changed-files card. The bumped
+    /// reveal request scrolls to `file_path` once the patch renders it.
+    pub(super) fn open_turn(
+        &mut self,
+        turn_id: TurnId,
+        file_path: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.map
+            .select_turn(&self.thread_key, turn_id, file_path.as_deref());
+        self.save_store();
+        self.after_selection_change(cx);
+    }
+
     fn set_base_ref(&mut self, base_ref: Option<String>, cx: &mut Context<Self>) {
         self.map
             .select_branch_base_ref(&self.thread_key, base_ref.as_deref());
