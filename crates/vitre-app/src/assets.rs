@@ -15,13 +15,30 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../icons/chevrons-down-up.svg"),
     ),
     (
+        "icons/cloud-upload.svg",
+        include_bytes!("../icons/cloud-upload.svg"),
+    ),
+    (
         "icons/columns-2.svg",
         include_bytes!("../icons/columns-2.svg"),
+    ),
+    (
+        "icons/git-branch-plus.svg",
+        include_bytes!("../icons/git-branch-plus.svg"),
+    ),
+    (
+        "icons/git-commit-horizontal.svg",
+        include_bytes!("../icons/git-commit-horizontal.svg"),
+    ),
+    (
+        "icons/git-pull-request.svg",
+        include_bytes!("../icons/git-pull-request.svg"),
     ),
     (
         "icons/file-diff.svg",
         include_bytes!("../icons/file-diff.svg"),
     ),
+    ("icons/info.svg", include_bytes!("../icons/info.svg")),
     ("icons/files.svg", include_bytes!("../icons/files.svg")),
     ("icons/pilcrow.svg", include_bytes!("../icons/pilcrow.svg")),
     ("icons/rows-3.svg", include_bytes!("../icons/rows-3.svg")),
@@ -63,9 +80,14 @@ impl AssetSource for VitreAssets {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VitreIcon {
     ChevronsDownUp,
+    CloudUpload,
     Columns2,
     FileDiff,
+    GitBranchPlus,
+    GitCommitHorizontal,
+    GitPullRequest,
     Files,
+    Info,
     Pilcrow,
     Rows3,
     SquareSplitHorizontal,
@@ -79,9 +101,14 @@ impl IconNamed for VitreIcon {
     fn path(self) -> SharedString {
         match self {
             Self::ChevronsDownUp => "icons/chevrons-down-up.svg".into(),
+            Self::CloudUpload => "icons/cloud-upload.svg".into(),
             Self::Columns2 => "icons/columns-2.svg".into(),
             Self::FileDiff => "icons/file-diff.svg".into(),
+            Self::GitBranchPlus => "icons/git-branch-plus.svg".into(),
+            Self::GitCommitHorizontal => "icons/git-commit-horizontal.svg".into(),
+            Self::GitPullRequest => "icons/git-pull-request.svg".into(),
             Self::Files => "icons/files.svg".into(),
+            Self::Info => "icons/info.svg".into(),
             Self::Pilcrow => "icons/pilcrow.svg".into(),
             Self::Rows3 => "icons/rows-3.svg".into(),
             Self::SquareSplitHorizontal => "icons/square-split-horizontal.svg".into(),

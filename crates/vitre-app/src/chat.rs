@@ -7,6 +7,7 @@
 
 mod changed_files;
 mod diff_panel;
+mod git_actions;
 mod project_actions;
 mod right_panel;
 mod sidebar;
@@ -168,6 +169,9 @@ pub struct ChatApp {
     /// surfaces. Kept alive while hidden so tree expansion and the open
     /// buffer survive, recreated on project switch.
     files: Option<Entity<FilesPanel>>,
+    /// Header git controls (M3): the `subscribeVcsStatus` fold, quick-action/
+    /// menu state, and the stacked-action progress pipeline.
+    git: git_actions::GitState,
     /// Diff dock surface (M3), recreated when the dock's thread key or the
     /// active git root changes. `None` until first shown.
     diff: Option<Entity<diff_panel::DiffPanel>>,
@@ -735,6 +739,7 @@ impl ChatApp {
             project_grouping: None,
             sidebar_resize,
             files: None,
+            git: git_actions::GitState::default(),
             diff: None,
             diff_subscription: None,
             diff_store: home.join(diff_panel::FILE_NAME),
@@ -1145,6 +1150,8 @@ impl ChatApp {
         self.rebuild_sidebar();
         // Terminals the server already has for this thread appear as tabs.
         self.reconcile_drawer_terminals(cx);
+        // Retarget the vcs status stream at the new thread's git root.
+        self.sync_git_status(cx);
         cx.spawn(async move |this, cx| {
             loop {
                 let state = state_rx.borrow_and_update().clone();
@@ -2928,6 +2935,9 @@ impl ChatApp {
                 .child(footer),
         );
 
+        // Header git controls (Electron: `GitActionsControl` at the far right
+        // of the chat header, before the panel toggle).
+        let git_controls = self.render_git_actions(cx);
         let mut main = v_flex()
             .flex_1()
             .h_full()
@@ -2949,6 +2959,7 @@ impl ChatApp {
                             .truncate()
                             .child(title),
                     )
+                    .children(git_controls)
                     .child(
                         Button::new("toggle-right-panel")
                             .icon(if self.dock_open() {
