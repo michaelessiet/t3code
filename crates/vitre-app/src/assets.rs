@@ -48,6 +48,10 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
         "icons/message-circle.svg",
         include_bytes!("../icons/message-circle.svg"),
     ),
+    (
+        "icons/mouse-pointer-click.svg",
+        include_bytes!("../icons/mouse-pointer-click.svg"),
+    ),
     ("icons/pilcrow.svg", include_bytes!("../icons/pilcrow.svg")),
     ("icons/rows-3.svg", include_bytes!("../icons/rows-3.svg")),
     (
@@ -57,6 +61,10 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
     (
         "icons/square-split-vertical.svg",
         include_bytes!("../icons/square-split-vertical.svg"),
+    ),
+    (
+        "icons/terminal.svg",
+        include_bytes!("../icons/terminal.svg"),
     ),
     (
         "icons/text-search.svg",
@@ -98,10 +106,12 @@ pub enum VitreIcon {
     Files,
     Info,
     MessageCircle,
+    MousePointerClick,
     Pilcrow,
     Rows3,
     SquareSplitHorizontal,
     SquareSplitVertical,
+    Terminal,
     TextSearch,
     Trash2,
     WrapText,
@@ -121,10 +131,12 @@ impl IconNamed for VitreIcon {
             Self::Files => "icons/files.svg".into(),
             Self::Info => "icons/info.svg".into(),
             Self::MessageCircle => "icons/message-circle.svg".into(),
+            Self::MousePointerClick => "icons/mouse-pointer-click.svg".into(),
             Self::Pilcrow => "icons/pilcrow.svg".into(),
             Self::Rows3 => "icons/rows-3.svg".into(),
             Self::SquareSplitHorizontal => "icons/square-split-horizontal.svg".into(),
             Self::SquareSplitVertical => "icons/square-split-vertical.svg".into(),
+            Self::Terminal => "icons/terminal.svg".into(),
             Self::TextSearch => "icons/text-search.svg".into(),
             Self::Trash2 => "icons/trash-2.svg".into(),
             Self::WrapText => "icons/wrap-text.svg".into(),

@@ -38,6 +38,7 @@ pub mod shell_sync;
 pub mod sidebar;
 pub mod source_control;
 pub mod terminal;
+pub mod terminal_context;
 pub mod terminal_ui;
 pub mod thread;
 pub mod thread_sync;

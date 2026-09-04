@@ -9,9 +9,12 @@
 //! surfaces are a separate follow-up — their pane ids are excluded from the
 //! drawer's server reconcile exactly as Electron partitions ownership.
 //!
-//! Deferred (matrix-noted): project scripts and the selection context menu
-//! (M3 slice 2.8 territory), running-subprocess indicators, and the dock
-//! terminal surface content.
+//! The selection "Add to chat" flow bubbles from the views:
+//! [`TerminalViewEvent::AddToChat`] → `ChatApp::add_terminal_context`
+//! (Electron's `onAddTerminalContext` prop chain).
+//!
+//! Deferred (matrix-noted): project scripts (M3 slice 2.8b),
+//! running-subprocess indicators, and the dock terminal surface content.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -524,14 +527,21 @@ impl ChatApp {
                     TerminalViewEvent::SessionExited => {
                         this.terminal_close(&exited_id, cx);
                     }
+                    TerminalViewEvent::AddToChat(selection) => {
+                        this.add_terminal_context(selection, cx);
+                    }
                 });
                 self.terminal_views.insert(map_key.clone(), view);
                 self.terminal_view_subs
                     .insert(map_key.clone(), subscription);
             }
+            let label = self.terminal_label(key, id);
             if let Some(view) = self.terminal_views.get(&map_key) {
                 let active = state.active_terminal_id == *id;
-                view.update(cx, |view, _| view.set_active(active));
+                view.update(cx, |view, _| {
+                    view.set_active(active);
+                    view.set_label(label);
+                });
             }
         }
     }

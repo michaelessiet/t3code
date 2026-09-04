@@ -13,6 +13,7 @@ mod project_actions;
 mod review_comments;
 mod right_panel;
 mod sidebar;
+mod terminal_contexts;
 mod terminal_drawer;
 mod terminal_view;
 
@@ -62,6 +63,7 @@ use vitre_state::session_logic::{
     derive_active_plan_state, derive_latest_context_window_snapshot, derive_pending_approvals,
     derive_pending_user_inputs,
 };
+use vitre_state::terminal_context::{TerminalContextSelection, append_terminal_contexts_to_prompt};
 
 use crate::files::FilesPanel;
 use crate::palette::command_palette::{
@@ -123,6 +125,10 @@ pub struct ChatApp {
     /// `composerDraftStore` reviewComments slice; appended to the prompt as
     /// `<review_comment>` blocks on send).
     pending_review_comments: Vec<ReviewCommentContext>,
+    /// Terminal selections staged to send with the next turn (the
+    /// `composerDraftStore` terminalContexts slice; appended as a trailing
+    /// `<terminal_context>` block on send).
+    pending_terminal_contexts: Vec<terminal_contexts::PendingTerminalContext>,
     /// Active `@`-mention autocomplete in the composer, if any.
     mention: Option<MentionState>,
     /// Monotonic mention-search counter; stale results are dropped.
@@ -730,6 +736,7 @@ impl ChatApp {
             input_draft: None,
             pending_attachments: Vec::new(),
             pending_review_comments: Vec::new(),
+            pending_terminal_contexts: Vec::new(),
             mention: None,
             mention_generation: 0,
             pending_revert: None,
@@ -1146,6 +1153,7 @@ impl ChatApp {
         self.mention = None;
         self.pending_attachments.clear();
         self.pending_review_comments.clear();
+        self.pending_terminal_contexts.clear();
         self.pending_revert = None;
         // Thread switch ≙ every changed-files card unmounting: the next
         // thread's cards re-run their auto-expand decision on first sight.
@@ -1214,6 +1222,7 @@ impl ChatApp {
         self.mention = None;
         self.pending_attachments.clear();
         self.pending_review_comments.clear();
+        self.pending_terminal_contexts.clear();
         self.pending_revert = None;
         self.changed_files.clear_local();
         self.timeline = Vec::new();
@@ -1248,14 +1257,29 @@ impl ChatApp {
         {
             return;
         }
-        // Electron's `canSend`: pending review comments make an empty prompt
-        // sendable — the message body becomes just the comment blocks.
+        // Electron's `deriveComposerSendState`: pending terminal contexts and
+        // review comments each make an empty prompt sendable — the message
+        // body becomes just the context blocks.
         let raw_text = self.composer.read(cx).value().trim().to_string();
-        if raw_text.is_empty() && self.pending_review_comments.is_empty() {
+        let terminal_contexts: Vec<TerminalContextSelection> = self
+            .pending_terminal_contexts
+            .iter()
+            .map(|pending| pending.selection.clone())
+            .collect();
+        if raw_text.is_empty()
+            && terminal_contexts.is_empty()
+            && self.pending_review_comments.is_empty()
+        {
             return;
         }
+        self.pending_terminal_contexts.clear();
         let review_comments = std::mem::take(&mut self.pending_review_comments);
-        let text = append_review_comments_to_prompt(&raw_text, &review_comments);
+        // Send order (`ChatView` handleSend): terminal block first, review
+        // comments outermost (element/preview blocks are M4 territory).
+        let text = append_review_comments_to_prompt(
+            &append_terminal_contexts_to_prompt(&raw_text, &terminal_contexts),
+            &review_comments,
+        );
         self.composer
             .update(cx, |input, cx| input.clean(window, cx));
         self.mention = None;
@@ -2440,16 +2464,15 @@ impl ChatApp {
                                 .p_3()
                                 .text_sm()
                                 .text_color(cx.theme().foreground)
-                                // Messages carrying `<review_comment>` blocks
-                                // render segment text + comment cards instead
-                                // of the raw markup (Electron's
-                                // `UserMessageBody` review path).
-                                .map(|bubble| {
-                                    match self.user_message_review_body(&message.text.0, cx) {
-                                        Some(body) => bubble.child(body),
-                                        None => {
-                                            bubble.child(SharedString::from(message.text.0.clone()))
-                                        }
+                                // Messages carrying trailing context blocks
+                                // (`<terminal_context>` / `<element_context>`)
+                                // or `<review_comment>` blocks render chips and
+                                // cards instead of the raw markup (Electron's
+                                // `UserTimelineRow` + `UserMessageBody`).
+                                .map(|bubble| match self.user_message_body(&message.text.0, cx) {
+                                    Some(body) => bubble.child(body),
+                                    None => {
+                                        bubble.child(SharedString::from(message.text.0.clone()))
                                     }
                                 }),
                         ))
@@ -2979,8 +3002,10 @@ impl ChatApp {
                 }
                 chips.into_any_element()
             });
-        // Pending review comments, above the textarea like Electron's
+        // Pending terminal contexts + review comments, above the textarea like
+        // Electron's `ComposerPendingTerminalContexts` /
         // `ComposerPendingReviewComments`.
+        let terminal_chips = self.render_pending_terminal_contexts(cx);
         let review_chips = self.render_pending_review_comments(cx);
         let composer = div().px_5().pb_4().child(
             v_flex()
@@ -2995,6 +3020,7 @@ impl ChatApp {
                 .children(panel)
                 .children(mention_list)
                 .children(attachment_chips)
+                .children(terminal_chips)
                 .children(review_chips)
                 .child(
                     div()

@@ -10,9 +10,17 @@
 //! written locally as `\r\n[terminal] …\r\n`; `closed`/`exited` transitions
 //! fire the exit latch once and bubble to the drawer, which closes the tab.
 //!
-//! Deliberate Vitre deviations (matrix-noted): no selection model yet (so no
-//! copy/add-to-chat menu), no link detection, no IME composition (plain
-//! `key_char` input), no cursor blink, and no mouse-mode reporting. Keyboard
+//! Mouse selection drives Electron's `readSelectionAction` flow: drag (or
+//! double/triple-click) selects via alacritty's selection model, and on
+//! release a small floating menu offers "Add to chat" / "Copy" — Electron
+//! shows a NATIVE context menu here; the in-window popup is a Vitre
+//! deviation. "Add to chat" emits a [`TerminalContextSelection`] with xterm's
+//! line math (`lineStart = buffer row + 1`, `lineEnd` from the normalized
+//! text's line count).
+//!
+//! Deliberate Vitre deviations (matrix-noted): no link detection, no IME
+//! composition (plain `key_char` input), no cursor blink, no mouse-mode
+//! reporting, and no drag auto-scroll past the viewport edge. Keyboard
 //! passthrough arbitration is gpui's own binding dispatch: chords bound at
 //! the app level never reach `on_key_down`, which is Electron's
 //! `isTerminalPassthroughShortcut` contract for free.
@@ -24,25 +32,28 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alacritty_terminal::event::{Event as AlacEvent, EventListener};
-use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::grid::{Dimensions as _, Scroll};
+use alacritty_terminal::index::{Column, Line as AlacLine, Point as AlacPoint, Side};
+use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
+use alacritty_terminal::term::{Config as TermConfig, Term, TermMode, viewport_to_point};
 use alacritty_terminal::vte::ansi::{
     Color as AnsiColor, CursorShape, NamedColor, Processor, Rgb as AnsiRgb,
 };
 use gpui::{
     Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, FontStyle, FontWeight,
-    Hsla, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, Pixels, Point, ScrollWheelEvent,
-    SharedString, Size, StrikethroughStyle, TextAlign, TextRun, UnderlineStyle, Window, canvas,
-    div, fill, outline, point, prelude::*, px, size,
+    Hsla, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, ScrollWheelEvent, SharedString, Size, StrikethroughStyle, TextAlign, TextRun,
+    UnderlineStyle, Window, canvas, div, fill, outline, point, prelude::*, px, size,
 };
-use gpui_component::ActiveTheme as _;
+use gpui_component::{ActiveTheme as _, v_flex};
 use vitre_client::EnvironmentClient;
 use vitre_contracts::methods::{TerminalAttach, TerminalResize, TerminalWrite};
 use vitre_contracts::{TerminalAttachInput, TerminalResizeInput, TerminalWriteInput};
 use vitre_rpc::TypedStreamEvent;
 use vitre_state::terminal::{TerminalBufferState, TerminalClientStatus, apply_attach_event};
+use vitre_state::terminal_context::{TerminalContextSelection, normalize_terminal_context_text};
 
 use super::tnes;
 
@@ -66,6 +77,9 @@ pub enum TerminalViewEvent {
     /// The session reported `closed`/`exited` (Electron's `onSessionExited`);
     /// the drawer responds by running its close flow for this tab.
     SessionExited,
+    /// The selection menu's "Add to chat": the drawer bubbles this to the
+    /// ChatApp's pending terminal contexts (Electron's `onAddTerminalContext`).
+    AddToChat(TerminalContextSelection),
 }
 
 /// Everything that, when changed, makes Electron destroy and recreate the
@@ -115,6 +129,14 @@ pub struct TerminalView {
     resize_in_flight: bool,
     pending_resize: Option<(i64, i64)>,
     scroll_accum: f32,
+    /// The drawer-supplied tab label ("Add to chat" contexts carry it).
+    label: String,
+    /// A left-drag selection is in progress.
+    selecting: bool,
+    /// "Add to chat"/"Copy" popup origin, relative to the grid's bounds.
+    selection_menu: Option<Point<Pixels>>,
+    /// Grid bounds from the last layout pass (mouse → cell hit testing).
+    last_bounds: Option<Bounds<Pixels>>,
     _attach_task: gpui::Task<()>,
 }
 
@@ -159,6 +181,10 @@ impl TerminalView {
             resize_in_flight: false,
             pending_resize: None,
             scroll_accum: 0.,
+            label: String::new(),
+            selecting: false,
+            selection_menu: None,
+            last_bounds: None,
             _attach_task: attach_task,
         }
     }
@@ -171,6 +197,12 @@ impl TerminalView {
     /// wants it (activation, split, re-show).
     pub(super) fn set_active(&mut self, active: bool) {
         self.autofocus = active;
+    }
+
+    /// The drawer's tab label (server label or `Terminal N`), refreshed every
+    /// render so "Add to chat" snapshots the label the tab shows.
+    pub(super) fn set_label(&mut self, label: String) {
+        self.label = label;
     }
 
     pub(super) fn request_focus(&mut self, cx: &mut Context<Self>) {
@@ -533,6 +565,186 @@ impl TerminalView {
         cx.notify();
     }
 
+    // ---- selection ---------------------------------------------------------
+
+    /// Window position → buffer point + cell side, via the last grid bounds.
+    fn grid_point(&self, position: Point<Pixels>) -> Option<(AlacPoint, Side)> {
+        let bounds = self.last_bounds?;
+        let cell = self.cell_size?;
+        let (cols, rows) = self.dims;
+        let x = f32::from(position.x - bounds.origin.x).max(0.);
+        let y = f32::from(position.y - bounds.origin.y).max(0.);
+        let col_exact = x / f32::from(cell.width);
+        let col = (col_exact.floor() as usize).min(cols.saturating_sub(1));
+        let row = ((y / f32::from(cell.height)).floor() as usize).min(rows.saturating_sub(1));
+        let side = if col_exact.fract() < 0.5 {
+            Side::Left
+        } else {
+            Side::Right
+        };
+        let display_offset = self.term.grid().display_offset();
+        let point = viewport_to_point(display_offset, AlacPoint::new(row, Column(col)));
+        Some((point, side))
+    }
+
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+        self.selection_menu = None;
+        let Some((point, side)) = self.grid_point(event.position) else {
+            return;
+        };
+        // xterm: click starts, double-click selects the word, triple the line.
+        let ty = match event.click_count {
+            1 => SelectionType::Simple,
+            2 => SelectionType::Semantic,
+            _ => SelectionType::Lines,
+        };
+        self.term.selection = Some(Selection::new(ty, point, side));
+        self.selecting = true;
+        cx.notify();
+    }
+
+    fn on_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        let Some((point, side)) = self.grid_point(event.position) else {
+            return;
+        };
+        if let Some(selection) = self.term.selection.as_mut() {
+            selection.update(point, side);
+            cx.notify();
+        }
+    }
+
+    /// Selection release: Electron's xterm fires `readSelectionAction` and
+    /// pops the native Add to chat / Copy menu near the pointer.
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.selecting) {
+            return;
+        }
+        let has_selection = self
+            .selection_text()
+            .is_some_and(|text| !normalize_terminal_context_text(&text).is_empty());
+        if !has_selection {
+            self.term.selection = None;
+            cx.notify();
+            return;
+        }
+        let bounds = self.last_bounds.unwrap_or_default();
+        // Near the pointer (+4px like Electron), clamped into the grid.
+        let menu = point(
+            (event.position.x - bounds.origin.x + px(4.))
+                .max(px(0.))
+                .min((bounds.size.width - px(150.)).max(px(0.))),
+            (event.position.y - bounds.origin.y + px(4.))
+                .max(px(0.))
+                .min((bounds.size.height - px(64.)).max(px(0.))),
+        );
+        self.selection_menu = Some(menu);
+        cx.notify();
+    }
+
+    fn selection_text(&self) -> Option<String> {
+        self.term.selection.as_ref()?.to_range(&self.term)?;
+        self.term.selection_to_string()
+    }
+
+    fn dismiss_selection_menu(&mut self, cx: &mut Context<Self>) {
+        self.selection_menu = None;
+        cx.notify();
+    }
+
+    /// "Copy": clipboard write; the selection stays (xterm keeps it).
+    fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self.selection_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+        self.dismiss_selection_menu(cx);
+    }
+
+    /// "Add to chat": Electron's `readSelectionAction` payload — buffer-based
+    /// 1-based `lineStart`, `lineEnd` from the normalized text's line count —
+    /// then clear the selection and refocus.
+    fn add_selection_to_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let payload = self.selection_text().and_then(|raw| {
+            let range = self.term.selection.as_ref()?.to_range(&self.term)?;
+            let text = normalize_terminal_context_text(&raw);
+            if text.is_empty() {
+                return None;
+            }
+            let history = self.term.grid().history_size() as i32;
+            let line_start = (range.start.line.0 + history).max(0) as u32 + 1;
+            let line_end = line_start + text.split('\n').count() as u32 - 1;
+            Some(TerminalContextSelection {
+                terminal_id: self.launch.terminal_id.clone(),
+                terminal_label: self.label.clone(),
+                line_start,
+                line_end,
+                text,
+            })
+        });
+        if let Some(selection) = payload {
+            cx.emit(TerminalViewEvent::AddToChat(selection));
+        }
+        self.term.selection = None;
+        self.dismiss_selection_menu(cx);
+        window.focus(&self.focus_handle, cx);
+    }
+
+    /// The floating Add to chat / Copy popup (Electron uses a native context
+    /// menu here — the in-window popup is the Vitre stand-in).
+    fn render_selection_menu(
+        &self,
+        origin: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let item = |id: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .px_2()
+                .py_1()
+                .rounded(px(4.))
+                .text_size(px(12.))
+                .text_color(cx.theme().popover_foreground)
+                .cursor_pointer()
+                .hover(|style| style.bg(cx.theme().accent))
+                .child(label)
+        };
+        v_flex()
+            .id("terminal-selection-menu")
+            .occlude()
+            .absolute()
+            .left(origin.x)
+            .top(origin.y)
+            .p_1()
+            .gap_0p5()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .shadow_md()
+            .child(
+                item("terminal-selection-add", "Add to chat").on_click(cx.listener(
+                    |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.add_selection_to_chat(window, cx);
+                    },
+                )),
+            )
+            .child(
+                item("terminal-selection-copy", "Copy").on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.copy_selection(cx);
+                })),
+            )
+    }
+
     // ---- layout & paint ---------------------------------------------------
 
     fn mono_font(&self, cx: &Context<Self>) -> gpui::Font {
@@ -565,6 +777,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> TerminalLayout {
         let cell = self.measure_cell(window, cx);
+        self.last_bounds = Some(bounds);
         let cols = ((bounds.size.width / cell.width).floor() as usize).clamp(1, 1000);
         let rows = ((bounds.size.height / cell.height).floor() as usize).clamp(1, 500);
         if (cols, rows) != self.dims && bounds.size.width > px(0.) && bounds.size.height > px(0.) {
@@ -591,6 +804,7 @@ impl TerminalView {
         let content = self.term.renderable_content();
         let display_offset = content.display_offset;
         let colors = content.colors;
+        let selection_range = content.selection;
         for indexed in content.display_iter {
             if indexed.cell.flags.contains(CellFlags::WIDE_CHAR_SPACER)
                 || indexed
@@ -623,6 +837,11 @@ impl TerminalView {
                 flags: cell.flags,
             });
         }
+
+        // Selection overlay rectangles (painted over cell backgrounds, under
+        // glyphs — xterm's selection layer).
+        let selection_rects =
+            selection_rects(selection_range, rows, cols, display_offset, bounds, cell);
 
         // Cursor (grid coords; hidden while scrolled out of the viewport).
         let cursor = content.cursor;
@@ -739,8 +958,53 @@ impl TerminalView {
             lines,
             cursor: cursor_layout,
             line_height: cell.height,
+            selection_rects,
+            selection_color: palette.selection,
         }
     }
+}
+
+/// Per-row selection rectangles for the visible viewport.
+fn selection_rects(
+    range: Option<SelectionRange>,
+    rows: usize,
+    cols: usize,
+    display_offset: usize,
+    bounds: Bounds<Pixels>,
+    cell: Size<Pixels>,
+) -> Vec<Bounds<Pixels>> {
+    let Some(range) = range else {
+        return Vec::new();
+    };
+    let mut rects = Vec::new();
+    for row in 0..rows {
+        let line = AlacLine(row as i32 - display_offset as i32);
+        if line < range.start.line || line > range.end.line {
+            continue;
+        }
+        let start_col = if range.is_block || line == range.start.line {
+            range.start.column.0
+        } else {
+            0
+        };
+        let end_col = if range.is_block || line == range.end.line {
+            range.end.column.0
+        } else {
+            cols.saturating_sub(1)
+        };
+        if end_col < start_col {
+            continue;
+        }
+        let origin = point(
+            bounds.origin.x + cell.width * start_col as f32,
+            bounds.origin.y + cell.height * row as f32,
+        );
+        rects.push(Bounds::new(
+            origin,
+            size(cell.width * (end_col - start_col + 1) as f32, cell.height),
+        ));
+    }
+    rects
 }
 
 struct CursorLayout {
@@ -754,6 +1018,8 @@ struct TerminalLayout {
     lines: Vec<(gpui::ShapedLine, Point<Pixels>)>,
     cursor: Option<CursorLayout>,
     line_height: Pixels,
+    selection_rects: Vec<Bounds<Pixels>>,
+    selection_color: Hsla,
 }
 
 impl Render for TerminalView {
@@ -779,6 +1045,9 @@ impl Render for TerminalView {
                         window,
                         cx,
                     );
+                }
+                for rect in &layout.selection_rects {
+                    window.paint_quad(fill(*rect, layout.selection_color));
                 }
                 for (line, origin) in &layout.lines {
                     let _ = line.paint(
@@ -822,6 +1091,7 @@ impl Render for TerminalView {
             )))
             .key_context("Terminal")
             .track_focus(&self.focus_handle)
+            .relative()
             .size_full()
             .overflow_hidden()
             .rounded(px(4.))
@@ -829,13 +1099,20 @@ impl Render for TerminalView {
             .font_family(cx.theme().mono_font_family.clone())
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_scroll_wheel(event, cx)))
-            .on_mouse_down(
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_move(cx.listener(|this, event, _, cx| this.on_mouse_move(event, cx)))
+            .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                    window.focus(&this.focus_handle, cx);
-                }),
+                cx.listener(|this, event, _, cx| this.on_mouse_up(event, cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, event, _, cx| this.on_mouse_up(event, cx)),
             )
             .child(grid)
+            .when_some(self.selection_menu, |this, origin| {
+                this.child(self.render_selection_menu(origin, cx))
+            })
     }
 }
 
@@ -1049,6 +1326,8 @@ struct TerminalPalette {
     cursor: Hsla,
     foreground: Hsla,
     background: Hsla,
+    /// Electron's xterm `selectionBackground` (semi-transparent overlay).
+    selection: Hsla,
 }
 
 fn c(hex: u32) -> Hsla {
@@ -1083,6 +1362,8 @@ impl TerminalPalette {
                 cursor: c(0xB4CBFF),
                 foreground: c(0xEDF1F7),
                 background: c(0x0E1218),
+                // rgba(180, 203, 255, 0.25)
+                selection: c(0xB4CBFF).opacity(0.25),
             })
         } else {
             LIGHT.get_or_init(|| TerminalPalette {
@@ -1107,6 +1388,8 @@ impl TerminalPalette {
                 cursor: c(0x26384E),
                 foreground: c(0x1C2129),
                 background: c(0xFFFFFF),
+                // rgba(37, 63, 99, 0.2)
+                selection: c(0x253F63).opacity(0.2),
             })
         }
     }
