@@ -10,6 +10,7 @@ mod changed_files;
 mod diff_panel;
 mod git_actions;
 mod project_actions;
+mod project_scripts;
 mod review_comments;
 mod right_panel;
 mod sidebar;
@@ -142,6 +143,8 @@ pub struct ChatApp {
     /// Changed-files card state: persisted expansion (`~/.vitre/ui-state.json`)
     /// plus per-turn local UI (auto-expand decision, folder toggles).
     changed_files: changed_files::ChangedFilesState,
+    /// Project scripts ("actions") control: dialog + t3.json import offers.
+    scripts: project_scripts::ScriptsState,
     /// `VITRE_OPEN_THREAD=<thread-id>`: select this thread as soon as the
     /// shell carries it, then forget it. Verification hook for sandboxed runs
     /// where synthetic clicks are dropped (docs/vitre-parity.md QA recipe).
@@ -741,6 +744,7 @@ impl ChatApp {
             mention_generation: 0,
             pending_revert: None,
             changed_files: changed_files::ChangedFilesState::load(home),
+            scripts: project_scripts::ScriptsState::default(),
             debug_open_thread: std::env::var("VITRE_OPEN_THREAD")
                 .ok()
                 .filter(|value| !value.is_empty()),
@@ -3031,8 +3035,10 @@ impl ChatApp {
                 .child(footer),
         );
 
-        // Header git controls (Electron: `GitActionsControl` at the far right
-        // of the chat header, before the panel toggle).
+        // Header controls (Electron: `ProjectScriptsControl` then
+        // `GitActionsControl` at the far right of the chat header, before the
+        // panel toggle).
+        let script_controls = self.render_project_scripts(cx);
         let git_controls = self.render_git_actions(cx);
         let mut main = v_flex()
             .flex_1()
@@ -3055,6 +3061,7 @@ impl ChatApp {
                             .truncate()
                             .child(title),
                     )
+                    .children(script_controls)
                     .children(git_controls)
                     .child(
                         Button::new("toggle-right-panel")

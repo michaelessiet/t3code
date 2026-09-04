@@ -111,11 +111,11 @@ pub(super) struct TerminalDrag {
 /// thread: cwd (worktree checkout when the thread has one), the wire
 /// worktree field, and the canonical runtime env. A changed env silently
 /// restarts the server shell, so this must stay deterministic.
-struct ThreadLaunchDefaults {
-    thread_id: String,
-    cwd: String,
-    worktree: Option<String>,
-    env: BTreeMap<String, String>,
+pub(super) struct ThreadLaunchDefaults {
+    pub(super) thread_id: String,
+    pub(super) cwd: String,
+    pub(super) worktree: Option<String>,
+    pub(super) env: BTreeMap<String, String>,
 }
 
 impl ChatApp {
@@ -130,7 +130,7 @@ impl ChatApp {
         Some(format!("{environment}:{}", thread.id.0))
     }
 
-    fn thread_launch_defaults(&self) -> Option<ThreadLaunchDefaults> {
+    pub(super) fn thread_launch_defaults(&self) -> Option<ThreadLaunchDefaults> {
         let open = self.thread.as_ref()?;
         let shell_thread = self.shell_thread(&open.id)?;
         let worktree = shell_thread
@@ -308,7 +308,7 @@ impl ChatApp {
         cx.notify();
     }
 
-    fn focus_active_terminal(&mut self, key: &str, cx: &mut Context<Self>) {
+    pub(super) fn focus_active_terminal(&mut self, key: &str, cx: &mut Context<Self>) {
         let state = self.terminal_ui.map.thread(key);
         if state.active_terminal_id.is_empty() {
             return;
@@ -327,6 +327,36 @@ impl ChatApp {
         self.terminal_create(Some(vertical), cx);
     }
 
+    /// Every terminal id the environment knows for this thread: the drawer
+    /// store's ids ∪ server metadata ids ∪ dock-owned pane ids. New ids are
+    /// allocated against this union so nothing collides.
+    pub(super) fn all_known_terminal_ids(&self, key: &str, thread_id: &str) -> Vec<String> {
+        let state = self.terminal_ui.map.thread(key);
+        let dock_ids = self
+            .right_panel
+            .map
+            .thread(key)
+            .surfaces
+            .iter()
+            .filter_map(|surface| match surface {
+                RightPanelSurface::Terminal { terminal_ids, .. } => Some(terminal_ids.clone()),
+                _ => None,
+            })
+            .flatten();
+        let server_ids = self
+            .terminal_metadata
+            .iter()
+            .filter(|summary| summary.thread_id == thread_id)
+            .map(|summary| summary.terminal_id.clone());
+        state
+            .terminal_ids
+            .iter()
+            .cloned()
+            .chain(server_ids)
+            .chain(dock_ids)
+            .collect()
+    }
+
     /// Shared create path: allocate the lowest unused `term-N` across every
     /// id the environment knows for this thread (store ∪ server ∪ dock
     /// panes), mutate the store, then fire `terminal.open` (no cols/rows —
@@ -338,33 +368,8 @@ impl ChatApp {
         let Some(defaults) = self.thread_launch_defaults() else {
             return;
         };
-        let state = self.terminal_ui.map.thread(&key);
-        let dock_ids: Vec<String> = self
-            .right_panel
-            .map
-            .thread(&key)
-            .surfaces
-            .iter()
-            .filter_map(|surface| match surface {
-                RightPanelSurface::Terminal { terminal_ids, .. } => Some(terminal_ids.clone()),
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        let server_ids: Vec<String> = self
-            .terminal_metadata
-            .iter()
-            .filter(|summary| summary.thread_id == defaults.thread_id)
-            .map(|summary| summary.terminal_id.clone())
-            .collect();
-        let existing: Vec<&str> = state
-            .terminal_ids
-            .iter()
-            .chain(server_ids.iter())
-            .chain(dock_ids.iter())
-            .map(String::as_str)
-            .collect();
-        let id = next_terminal_id(existing.iter().copied());
+        let existing = self.all_known_terminal_ids(&key, &defaults.thread_id);
+        let id = next_terminal_id(existing.iter().map(String::as_str));
         let changed = match split_vertical {
             None => self.terminal_ui.map.new_terminal(&key, &id),
             // The store rejects a split past the 4-per-group cap.

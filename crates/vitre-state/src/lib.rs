@@ -30,6 +30,7 @@ pub mod file_buffer;
 pub mod file_tree;
 pub mod lsp_gating;
 pub mod project_grouping;
+pub mod project_scripts;
 pub mod review_comments;
 pub mod right_panel;
 pub mod session_logic;

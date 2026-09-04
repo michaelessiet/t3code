@@ -10,6 +10,7 @@ use gpui_component::IconNamed;
 pub struct VitreAssets;
 
 const EXTRA_ICONS: &[(&str, &[u8])] = &[
+    ("icons/bug.svg", include_bytes!("../icons/bug.svg")),
     (
         "icons/chevrons-down-up.svg",
         include_bytes!("../icons/chevrons-down-up.svg"),
@@ -21,6 +22,14 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
     (
         "icons/columns-2.svg",
         include_bytes!("../icons/columns-2.svg"),
+    ),
+    (
+        "icons/download.svg",
+        include_bytes!("../icons/download.svg"),
+    ),
+    (
+        "icons/flask-conical.svg",
+        include_bytes!("../icons/flask-conical.svg"),
     ),
     (
         "icons/git-branch-plus.svg",
@@ -42,8 +51,13 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
         "icons/folder-git.svg",
         include_bytes!("../icons/folder-git.svg"),
     ),
+    ("icons/hammer.svg", include_bytes!("../icons/hammer.svg")),
     ("icons/info.svg", include_bytes!("../icons/info.svg")),
     ("icons/files.svg", include_bytes!("../icons/files.svg")),
+    (
+        "icons/list-checks.svg",
+        include_bytes!("../icons/list-checks.svg"),
+    ),
     (
         "icons/message-circle.svg",
         include_bytes!("../icons/message-circle.svg"),
@@ -75,6 +89,7 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
         "icons/wrap-text.svg",
         include_bytes!("../icons/wrap-text.svg"),
     ),
+    ("icons/wrench.svg", include_bytes!("../icons/wrench.svg")),
 ];
 
 impl AssetSource for VitreAssets {
@@ -95,16 +110,21 @@ impl AssetSource for VitreAssets {
 /// `Into<Icon>` is expected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VitreIcon {
+    Bug,
     ChevronsDownUp,
     CloudUpload,
     Columns2,
+    Download,
     FileDiff,
+    FlaskConical,
     FolderGit,
     GitBranchPlus,
     GitCommitHorizontal,
     GitPullRequest,
     Files,
+    Hammer,
     Info,
+    ListChecks,
     MessageCircle,
     MousePointerClick,
     Pilcrow,
@@ -115,21 +135,27 @@ pub enum VitreIcon {
     TextSearch,
     Trash2,
     WrapText,
+    Wrench,
 }
 
 impl IconNamed for VitreIcon {
     fn path(self) -> SharedString {
         match self {
+            Self::Bug => "icons/bug.svg".into(),
             Self::ChevronsDownUp => "icons/chevrons-down-up.svg".into(),
             Self::CloudUpload => "icons/cloud-upload.svg".into(),
             Self::Columns2 => "icons/columns-2.svg".into(),
+            Self::Download => "icons/download.svg".into(),
             Self::FileDiff => "icons/file-diff.svg".into(),
+            Self::FlaskConical => "icons/flask-conical.svg".into(),
             Self::FolderGit => "icons/folder-git.svg".into(),
             Self::GitBranchPlus => "icons/git-branch-plus.svg".into(),
             Self::GitCommitHorizontal => "icons/git-commit-horizontal.svg".into(),
             Self::GitPullRequest => "icons/git-pull-request.svg".into(),
             Self::Files => "icons/files.svg".into(),
+            Self::Hammer => "icons/hammer.svg".into(),
             Self::Info => "icons/info.svg".into(),
+            Self::ListChecks => "icons/list-checks.svg".into(),
             Self::MessageCircle => "icons/message-circle.svg".into(),
             Self::MousePointerClick => "icons/mouse-pointer-click.svg".into(),
             Self::Pilcrow => "icons/pilcrow.svg".into(),
@@ -140,6 +166,7 @@ impl IconNamed for VitreIcon {
             Self::TextSearch => "icons/text-search.svg".into(),
             Self::Trash2 => "icons/trash-2.svg".into(),
             Self::WrapText => "icons/wrap-text.svg".into(),
+            Self::Wrench => "icons/wrench.svg".into(),
         }
     }
 }

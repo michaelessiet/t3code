@@ -1,12 +1,15 @@
-//! Persisted chat UI state: the changed-files card expansion map.
+//! Persisted chat UI state: the changed-files card expansion map and the
+//! per-project last-invoked script.
 //!
-//! Ports the relevant slice of Electron's `apps/web/src/uiStateStore.ts`
+//! Ports the relevant slices of Electron's `apps/web/src/uiStateStore.ts`
 //! (localStorage key `t3code:ui-state:v1`): per-thread, per-turn expansion
-//! choices for the changed-files card. Vitre persists it as
-//! `~/.vitre/ui-state.json`. The map is only honored when
+//! choices for the changed-files card, plus the separate
+//! `lastInvokedScriptByProjectId` localStorage record backing the scripts
+//! control's preferred script. Vitre persists both as
+//! `~/.vitre/ui-state.json`. The expansion map is only honored when
 //! `threadChangedFilesExpansionVersion` matches; loading sanitizes shapes the
-//! same way Electron does (drop non-object entries, non-boolean values, and
-//! empty per-thread maps).
+//! same way Electron does (drop non-object entries, non-boolean/non-string
+//! values, and empty per-thread maps).
 
 use std::collections::HashMap;
 
@@ -19,11 +22,25 @@ pub const CHANGED_FILES_EXPANSION_VERSION: u64 = 1;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChatUiState {
     changed_files_expanded: HashMap<String, HashMap<String, bool>>,
+    last_invoked_script_by_project: HashMap<String, String>,
 }
 
 impl ChatUiState {
     pub fn from_persisted(value: &Value) -> Self {
         let mut state = Self::default();
+        if let Some(by_project) = value
+            .get("lastInvokedScriptByProjectId")
+            .and_then(Value::as_object)
+        {
+            state.last_invoked_script_by_project = by_project
+                .iter()
+                .filter_map(|(project_id, script_id)| {
+                    script_id
+                        .as_str()
+                        .map(|script_id| (project_id.clone(), script_id.to_string()))
+                })
+                .collect();
+        }
         if value
             .get("threadChangedFilesExpansionVersion")
             .and_then(Value::as_u64)
@@ -69,9 +86,15 @@ impl ChatUiState {
                 (thread_key.clone(), Value::Object(turns))
             })
             .collect();
+        let by_project: Map<String, Value> = self
+            .last_invoked_script_by_project
+            .iter()
+            .map(|(project_id, script_id)| (project_id.clone(), Value::String(script_id.clone())))
+            .collect();
         json!({
             "threadChangedFilesExpansionVersion": CHANGED_FILES_EXPANSION_VERSION,
             "threadChangedFilesExpandedById": by_thread,
+            "lastInvokedScriptByProjectId": by_project,
         })
     }
 
@@ -93,6 +116,24 @@ impl ChatUiState {
     /// `removeThreadUiState`.
     pub fn remove_thread(&mut self, thread_key: &str) {
         self.changed_files_expanded.remove(thread_key);
+    }
+
+    /// `lastInvokedScriptByProjectId[projectId]`.
+    pub fn last_invoked_script(&self, project_id: &str) -> Option<&str> {
+        self.last_invoked_script_by_project
+            .get(project_id)
+            .map(String::as_str)
+    }
+
+    /// Returns `false` when the value was already set (Electron skips the
+    /// state update, so callers can skip the save).
+    pub fn set_last_invoked_script(&mut self, project_id: &str, script_id: &str) -> bool {
+        if self.last_invoked_script(project_id) == Some(script_id) {
+            return false;
+        }
+        self.last_invoked_script_by_project
+            .insert(project_id.to_string(), script_id.to_string());
+        true
     }
 }
 

@@ -87,6 +87,20 @@ impl ChangedFilesState {
         }
     }
 
+    /// `lastInvokedScriptByProjectId[projectId]` (scripts control).
+    pub(super) fn last_invoked_script(&self, project_id: &str) -> Option<String> {
+        self.store
+            .last_invoked_script(project_id)
+            .map(str::to_string)
+    }
+
+    /// Remember the script the run button should prefer; persists on change.
+    pub(super) fn remember_last_invoked_script(&mut self, project_id: &str, script_id: &str) {
+        if self.store.set_last_invoked_script(project_id, script_id) {
+            self.save();
+        }
+    }
+
     /// Record the once-only auto-expand decision for a newly seen checkpoint.
     /// Called from `rebuild_timeline`, the Vitre analog of the card mounting.
     pub(super) fn ensure_local(
