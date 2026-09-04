@@ -34,6 +34,8 @@ pub mod session_logic;
 pub mod shell;
 pub mod shell_sync;
 pub mod sidebar;
+pub mod terminal;
+pub mod terminal_ui;
 pub mod thread;
 pub mod thread_sync;
 pub mod turn_diff_tree;

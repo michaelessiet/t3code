@@ -838,28 +838,13 @@ fn surface_title(surface: &RightPanelSurface) -> SharedString {
         RightPanelSurface::Preview { .. } => "Browser".into(),
         RightPanelSurface::Terminal {
             active_terminal_id, ..
-        } => terminal_label(active_terminal_id).into(),
+        } => vitre_state::terminal::terminal_fallback_label(active_terminal_id).into(),
         RightPanelSurface::File { relative_path, .. } => relative_path
             .rsplit(['/', '\\'])
             .next()
             .unwrap_or(relative_path)
             .to_string()
             .into(),
-    }
-}
-
-/// Electron's `getTerminalLabel`: `term-3` / `terminal-3` → `Terminal 3`,
-/// anything else verbatim.
-fn terminal_label(terminal_id: &str) -> String {
-    let lower = terminal_id.to_ascii_lowercase();
-    let rest = lower
-        .strip_prefix("terminal-")
-        .or_else(|| lower.strip_prefix("term-"));
-    match rest {
-        Some(digits) if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => {
-            format!("Terminal {digits}")
-        }
-        _ => terminal_id.to_string(),
     }
 }
 
@@ -886,17 +871,4 @@ fn dock_placeholder(message: &'static str, cx: &mut Context<ChatApp>) -> AnyElem
         .text_color(cx.theme().muted_foreground)
         .child(message)
         .into_any_element()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::terminal_label;
-
-    #[test]
-    fn terminal_labels_follow_electron() {
-        assert_eq!(terminal_label("term-3"), "Terminal 3");
-        assert_eq!(terminal_label("Terminal-12"), "Terminal 12");
-        assert_eq!(terminal_label("term-"), "term-");
-        assert_eq!(terminal_label("zsh"), "zsh");
-    }
 }

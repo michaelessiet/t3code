@@ -209,6 +209,25 @@ fn main() {
             KeyBinding::new(&modified("shift-["), chat::RightPanelPreviousSurface, None),
         ]);
 
+        // Terminal drawer. `terminal.toggle` is global (`ctrl+\`` plus the
+        // Electron default `mod+r`); the session chords only fire while a
+        // terminal is focused (`Terminal` key context) — everywhere else they
+        // keep their platform/app meaning, and the deeper context beats the
+        // global `mod+w` above, exactly Electron's passthrough arbitration.
+        cx.bind_keys([
+            KeyBinding::new("ctrl-`", chat::TerminalToggle, None),
+            KeyBinding::new(&modified("r"), chat::TerminalToggle, None),
+            KeyBinding::new(&modified("d"), chat::TerminalSplit, Some("Terminal")),
+            KeyBinding::new(
+                &modified("shift-d"),
+                chat::TerminalSplitVertical,
+                Some("Terminal"),
+            ),
+            KeyBinding::new(&modified("n"), chat::TerminalNew, Some("Terminal")),
+            KeyBinding::new(&modified("t"), chat::TerminalNew, Some("Terminal")),
+            KeyBinding::new(&modified("w"), chat::TerminalCloseActive, Some("Terminal")),
+        ]);
+
         let supervisor = Arc::new(Supervisor::start(config));
         let status_rx = supervisor.status();
         cx.on_app_quit(move |_| {

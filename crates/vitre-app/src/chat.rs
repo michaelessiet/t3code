@@ -10,6 +10,8 @@ mod diff_panel;
 mod project_actions;
 mod right_panel;
 mod sidebar;
+mod terminal_drawer;
+mod terminal_view;
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
@@ -86,6 +88,17 @@ actions!(
         RightPanelNextSurface,
         /// Electron's `rightPanel.previousSurface` (`mod+shift+[`).
         RightPanelPreviousSurface,
+        /// Electron's `terminal.toggle` (`` ctrl+` `` / `mod+r`): the bottom
+        /// terminal drawer for the open thread.
+        TerminalToggle,
+        /// Terminal-context `mod+d`: split the active group to the right.
+        TerminalSplit,
+        /// Terminal-context `mod+shift+d`: split the active group downward.
+        TerminalSplitVertical,
+        /// Terminal-context `mod+n` / `mod+t`: new terminal tab.
+        TerminalNew,
+        /// Terminal-context `mod+w`: close the active terminal.
+        TerminalCloseActive,
     ]
 );
 
@@ -164,6 +177,23 @@ pub struct ChatApp {
     diff_store: PathBuf,
     /// Right-panel dock state (per-thread surfaces) + persisted panel width.
     right_panel: right_panel::RightPanelPrefs,
+    /// Bottom terminal drawer: persisted per-thread UI state (tabs, groups,
+    /// height) plus the session-only suppression map.
+    terminal_ui: terminal_drawer::TerminalPrefs,
+    /// Live drawer terminal panes, keyed `(threadKey, terminalId)`. Cleared on
+    /// thread switch — Electron unmounts the drawer's xterms the same way
+    /// (sessions live on server-side).
+    terminal_views: HashMap<(String, String), Entity<terminal_view::TerminalView>>,
+    /// Session-exited subscriptions, parallel to `terminal_views`.
+    terminal_view_subs: HashMap<(String, String), Subscription>,
+    /// `subscribeTerminalMetadata` fold: every session the environment knows,
+    /// MRU-ordered (never used for tab order — see the drawer's reconcile).
+    terminal_metadata: Vec<vitre_contracts::TerminalSummary>,
+    /// An in-flight drag on the drawer's resize handle.
+    terminal_drag: Option<terminal_drawer::TerminalDrag>,
+    /// Window height as of the last frame, for the drawer's height clamp
+    /// (`render_chat` has no `Window` access).
+    viewport_height: f32,
     /// File-surface reveal requests already applied, keyed
     /// `${threadKey}|${surfaceId}` → `reveal_request_id`.
     applied_reveals: HashMap<String, u64>,
@@ -624,6 +654,7 @@ impl ChatApp {
             if this
                 .update(cx, |app, cx| {
                     app.client = Some(client);
+                    app.spawn_terminal_metadata_loop(cx);
                     cx.notify();
                 })
                 .is_err()
@@ -708,6 +739,12 @@ impl ChatApp {
             diff_subscription: None,
             diff_store: home.join(diff_panel::FILE_NAME),
             right_panel,
+            terminal_ui: terminal_drawer::TerminalPrefs::load(home),
+            terminal_views: HashMap::new(),
+            terminal_view_subs: HashMap::new(),
+            terminal_metadata: Vec::new(),
+            terminal_drag: None,
+            viewport_height: 720.,
             applied_reveals: HashMap::new(),
             last_dock_sync_key: None,
             quick_search: None,
@@ -903,6 +940,7 @@ impl ChatApp {
                 self.toggle_quick_search(QuickSearchMode::Content, window, cx);
             }
             PaletteAction::ToggleFilesPanel => self.toggle_right_panel(window, cx),
+            PaletteAction::ToggleTerminal => self.terminal_toggle(cx),
             PaletteAction::NewFile | PaletteAction::NewFolder => {
                 self.dock_open_files_surface(window, cx);
                 let Some(files) = self.files.clone() else {
@@ -1091,6 +1129,11 @@ impl ChatApp {
         self.timeline_hashes = Vec::new();
         self.revert_turn_counts = HashMap::new();
         self.timeline_list = new_timeline_list();
+        // The drawer unmounts with the thread: panes are per-thread views
+        // (server sessions persist; reselecting re-attaches).
+        self.terminal_views.clear();
+        self.terminal_view_subs.clear();
+        self.terminal_drag = None;
         self.thread = Some(OpenThread {
             id: id.clone(),
             _handle: handle,
@@ -1100,6 +1143,8 @@ impl ChatApp {
         // project's preview window.
         self.sync_thread_visit();
         self.rebuild_sidebar();
+        // Terminals the server already has for this thread appear as tabs.
+        self.reconcile_drawer_terminals(cx);
         cx.spawn(async move |this, cx| {
             loop {
                 let state = state_rx.borrow_and_update().clone();
@@ -2953,6 +2998,7 @@ impl ChatApp {
             ),
         )
         .child(composer)
+        .children(self.render_terminal_drawer(cx))
         .into_any_element()
     }
 }
@@ -2978,6 +3024,9 @@ impl Render for ChatApp {
         if dock_key.is_some() {
             self.sync_active_file_surface(false, window, cx);
         }
+        // The drawer clamps its height against the live viewport; render_chat
+        // has no Window, so the frame's height is captured here.
+        self.viewport_height = f32::from(window.viewport_size().height);
         let dock_panel = dock_key
             .as_deref()
             .map(|key| self.render_right_panel(key, cx));
@@ -3034,6 +3083,35 @@ impl Render for ChatApp {
                     this.dock_cycle_surface(-1, window, cx);
                 }),
             )
+            .on_action(cx.listener(|this, _: &TerminalToggle, _, cx| {
+                this.terminal_toggle(cx);
+            }))
+            .on_action(cx.listener(|this, _: &TerminalSplit, _, cx| {
+                this.terminal_split(false, cx);
+            }))
+            .on_action(cx.listener(|this, _: &TerminalSplitVertical, _, cx| {
+                this.terminal_split(true, cx);
+            }))
+            .on_action(cx.listener(|this, _: &TerminalNew, _, cx| {
+                this.terminal_new(cx);
+            }))
+            .on_action(cx.listener(|this, _: &TerminalCloseActive, _, cx| {
+                this.terminal_close_active(cx);
+            }))
+            // Drawer drag-resize: pointer moves/releases land anywhere in the
+            // window, so the root tracks them while a drag is live (Electron
+            // attaches the same listeners to `window` on pointerdown).
+            .when(self.terminal_drag.is_some(), |this| {
+                this.on_mouse_move(cx.listener(|this, event, window, cx| {
+                    this.terminal_drag_move(event, window, cx);
+                }))
+                .on_mouse_up(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.terminal_drag_end(cx);
+                    }),
+                )
+            })
             .child(
                 h_flex()
                     .size_full()

@@ -57,7 +57,7 @@ use vitre_state::project_grouping::normalize_project_path_for_comparison;
 
 use crate::chat::{
     CommandPaletteToggle, NewThread, QuickSearchContent, QuickSearchOpen, RightPanelToggle,
-    fresh_id, now_iso, tnes,
+    TerminalToggle, fresh_id, now_iso, tnes,
 };
 
 use super::add_project::{
@@ -91,6 +91,7 @@ pub enum PaletteAction {
     QuickSearchOpen,
     QuickSearchContent,
     ToggleFilesPanel,
+    ToggleTerminal,
     NewFile,
     NewFolder,
 }
@@ -1717,6 +1718,15 @@ fn action_items(
             )
             .shortcut(shortcut_for(&RightPanelToggle, window))
             .action(PaletteAction::ToggleFilesPanel),
+        );
+        items.push(
+            PaletteItem::new(
+                "Toggle terminal",
+                IconName::SquareTerminal,
+                &["terminal", "shell", "console", "toggle", "drawer"],
+            )
+            .shortcut(shortcut_for(&TerminalToggle, window))
+            .action(PaletteAction::ToggleTerminal),
         );
         items.push(
             PaletteItem::new(
