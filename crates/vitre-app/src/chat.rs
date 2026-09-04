@@ -10,6 +10,7 @@ mod changed_files;
 mod diff_panel;
 mod git_actions;
 mod project_actions;
+mod review_comments;
 mod right_panel;
 mod sidebar;
 mod terminal_drawer;
@@ -55,6 +56,7 @@ use vitre_contracts::{
 };
 use vitre_sidecar::SupervisorStatus;
 use vitre_state::diff_panel::ordered_turn_diff_summaries;
+use vitre_state::review_comments::{ReviewCommentContext, append_review_comments_to_prompt};
 use vitre_state::session_logic::{
     ActivePlanState, ApprovalRequestKind, PendingApproval, PendingUserInput, PlanStepStatus,
     derive_active_plan_state, derive_latest_context_window_snapshot, derive_pending_approvals,
@@ -117,6 +119,10 @@ pub struct ChatApp {
     input_draft: Option<InputDraft>,
     /// Files staged to send with the next turn (data-URL attachments).
     pending_attachments: Vec<PendingAttachment>,
+    /// Review comments staged to send with the next turn (Electron's
+    /// `composerDraftStore` reviewComments slice; appended to the prompt as
+    /// `<review_comment>` blocks on send).
+    pending_review_comments: Vec<ReviewCommentContext>,
     /// Active `@`-mention autocomplete in the composer, if any.
     mention: Option<MentionState>,
     /// Monotonic mention-search counter; stale results are dropped.
@@ -723,6 +729,7 @@ impl ChatApp {
             responding: HashSet::new(),
             input_draft: None,
             pending_attachments: Vec::new(),
+            pending_review_comments: Vec::new(),
             mention: None,
             mention_generation: 0,
             pending_revert: None,
@@ -1005,6 +1012,12 @@ impl ChatApp {
                     diff_panel::DiffPanelEvent::OpenFile { path } => {
                         this.dock_open_file(path.clone(), None, window, cx);
                     }
+                    diff_panel::DiffPanelEvent::AddReviewComment(comment) => {
+                        this.add_review_comment(comment.clone(), cx);
+                    }
+                    diff_panel::DiffPanelEvent::RemoveReviewComment { id } => {
+                        this.remove_review_comment(id, cx);
+                    }
                 },
             ));
             self.diff = Some(panel);
@@ -1016,7 +1029,10 @@ impl ChatApp {
                 .and_then(|open| open.state.view.as_ref())
                 .map(|view| ordered_turn_diff_summaries(&view.checkpoints))
                 .unwrap_or_default();
-            panel.update(cx, |panel, cx| panel.set_checkpoints(ordered, cx));
+            panel.update(cx, |panel, cx| {
+                panel.set_checkpoints(ordered, cx);
+                panel.set_review_comments(self.pending_review_comments.clone(), cx);
+            });
         }
     }
 
@@ -1129,6 +1145,7 @@ impl ChatApp {
         self.input_draft = None;
         self.mention = None;
         self.pending_attachments.clear();
+        self.pending_review_comments.clear();
         self.pending_revert = None;
         // Thread switch ≙ every changed-files card unmounting: the next
         // thread's cards re-run their auto-expand decision on first sight.
@@ -1196,6 +1213,7 @@ impl ChatApp {
         self.input_draft = None;
         self.mention = None;
         self.pending_attachments.clear();
+        self.pending_review_comments.clear();
         self.pending_revert = None;
         self.changed_files.clear_local();
         self.timeline = Vec::new();
@@ -1230,10 +1248,14 @@ impl ChatApp {
         {
             return;
         }
-        let text = self.composer.read(cx).value().trim().to_string();
-        if text.is_empty() {
+        // Electron's `canSend`: pending review comments make an empty prompt
+        // sendable — the message body becomes just the comment blocks.
+        let raw_text = self.composer.read(cx).value().trim().to_string();
+        if raw_text.is_empty() && self.pending_review_comments.is_empty() {
             return;
         }
+        let review_comments = std::mem::take(&mut self.pending_review_comments);
+        let text = append_review_comments_to_prompt(&raw_text, &review_comments);
         self.composer
             .update(cx, |input, cx| input.clean(window, cx));
         self.mention = None;
@@ -2418,7 +2440,18 @@ impl ChatApp {
                                 .p_3()
                                 .text_sm()
                                 .text_color(cx.theme().foreground)
-                                .child(SharedString::from(message.text.0.clone())),
+                                // Messages carrying `<review_comment>` blocks
+                                // render segment text + comment cards instead
+                                // of the raw markup (Electron's
+                                // `UserMessageBody` review path).
+                                .map(|bubble| {
+                                    match self.user_message_review_body(&message.text.0, cx) {
+                                        Some(body) => bubble.child(body),
+                                        None => {
+                                            bubble.child(SharedString::from(message.text.0.clone()))
+                                        }
+                                    }
+                                }),
                         ))
                         .into_any_element()
                     } else {
@@ -2946,6 +2979,9 @@ impl ChatApp {
                 }
                 chips.into_any_element()
             });
+        // Pending review comments, above the textarea like Electron's
+        // `ComposerPendingReviewComments`.
+        let review_chips = self.render_pending_review_comments(cx);
         let composer = div().px_5().pb_4().child(
             v_flex()
                 .w_full()
@@ -2959,6 +2995,7 @@ impl ChatApp {
                 .children(panel)
                 .children(mention_list)
                 .children(attachment_chips)
+                .children(review_chips)
                 .child(
                     div()
                         .px_2()

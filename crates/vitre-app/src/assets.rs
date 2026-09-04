@@ -44,6 +44,10 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
     ),
     ("icons/info.svg", include_bytes!("../icons/info.svg")),
     ("icons/files.svg", include_bytes!("../icons/files.svg")),
+    (
+        "icons/message-circle.svg",
+        include_bytes!("../icons/message-circle.svg"),
+    ),
     ("icons/pilcrow.svg", include_bytes!("../icons/pilcrow.svg")),
     ("icons/rows-3.svg", include_bytes!("../icons/rows-3.svg")),
     (
@@ -93,6 +97,7 @@ pub enum VitreIcon {
     GitPullRequest,
     Files,
     Info,
+    MessageCircle,
     Pilcrow,
     Rows3,
     SquareSplitHorizontal,
@@ -115,6 +120,7 @@ impl IconNamed for VitreIcon {
             Self::GitPullRequest => "icons/git-pull-request.svg".into(),
             Self::Files => "icons/files.svg".into(),
             Self::Info => "icons/info.svg".into(),
+            Self::MessageCircle => "icons/message-circle.svg".into(),
             Self::Pilcrow => "icons/pilcrow.svg".into(),
             Self::Rows3 => "icons/rows-3.svg".into(),
             Self::SquareSplitHorizontal => "icons/square-split-horizontal.svg".into(),

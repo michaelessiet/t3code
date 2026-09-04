@@ -14,8 +14,10 @@
 //! input, no per-row remote Switch, no 5s ref repolling); diff rows are plain
 //! mono text (no syntax highlighting); word-wrap off truncates long lines
 //! instead of scrolling horizontally; no GitRootSwitcher (single-root only);
-//! review-comment annotations and the external-editor open action are not yet
-//! ported.
+//! the external-editor open action is not yet ported. Review-comment
+//! annotations (`AnnotatableCodeView`) are ported: drag over the line-number
+//! gutter to select, comment drafts anchor under the selection's end row —
+//! without Pierre's hover "+" gutter-utility button.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -23,13 +25,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, EventEmitter, ListAlignment, ListState, SharedString, Window,
-    div, list, prelude::*, px,
+    AnyElement, ClickEvent, Context, Entity, EventEmitter, ListAlignment, ListState, MouseButton,
+    MouseMoveEvent, SharedString, Subscription, Window, div, list, prelude::*, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
+    StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    input::{InputEvent, Textarea, TextareaState},
     menu::{DropdownMenu as _, PopupMenuItem},
     v_flex,
 };
@@ -51,6 +55,11 @@ use vitre_state::diff_panel::{
 };
 use vitre_state::diff_patch::{
     PatchFile, PatchFileKind, PatchLine, PatchLineKind, parse_unified_patch, unmodified_gap_before,
+};
+use vitre_state::review_comments::{
+    DiffReviewCommentInput, ReviewCommentContext, SelectedLineRange, annotation_side_is_deletions,
+    build_diff_review_comment, restore_diff_review_comment_range,
+    selected_line_range_from_row_indices,
 };
 
 use crate::assets::VitreIcon;
@@ -78,6 +87,11 @@ pub enum DiffPanelEvent {
     /// (Electron's `openDiffFilePrimaryAction` with the default
     /// `openFilesInExternalEditor: false`).
     OpenFile { path: String },
+    /// A draft annotation was submitted — Electron's
+    /// `composerDraftStore.addReviewComment` (ChatApp owns the pending list).
+    AddReviewComment(ReviewCommentContext),
+    /// A persisted annotation's delete button — `removeReviewComment`.
+    RemoveReviewComment { id: String },
 }
 
 /// One virtualized row of the diff body. Indices point into
@@ -106,6 +120,13 @@ enum DiffRow {
     },
     RawLine {
         line: usize,
+    },
+    /// Review-comment annotation group anchored under the diff row carrying
+    /// this side-qualified line number (Pierre's `renderAnnotation` slot).
+    Annotation {
+        file: usize,
+        deletions: bool,
+        line: u32,
     },
 }
 
@@ -180,6 +201,37 @@ pub struct DiffPanel {
     /// Last applied reveal request id — scroll at most once per request, but
     /// keep retrying while the file has not appeared yet (gotcha #5).
     applied_reveal: Option<u64>,
+    /// The composer's pending review comments, pushed in by ChatApp
+    /// (Electron's `composerDraftStore` reviewComments slice).
+    review_comments: Vec<ReviewCommentContext>,
+    /// An in-flight gutter drag: anchor/head are flattened diff-review row
+    /// indices within `files[file]`.
+    gutter_drag: Option<GutterDrag>,
+    /// The one open draft annotation (`AnnotatableCodeView`'s `draft`) —
+    /// line selection is disabled while it exists.
+    draft: Option<DraftAnnotation>,
+    /// `nextFileCommentId` sequence half (paired with a timestamp).
+    draft_seq: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GutterDrag {
+    file: usize,
+    anchor: usize,
+    head: usize,
+}
+
+struct DraftAnnotation {
+    /// `nextFileCommentId()` — becomes the comment id on submit.
+    id: String,
+    file_path: String,
+    range: SelectedLineRange,
+    range_label: String,
+    /// Anchor row: `annotationSide(range)` + `range.end`.
+    deletions: bool,
+    line: u32,
+    input: Entity<TextareaState>,
+    _input_sub: Subscription,
 }
 
 impl EventEmitter<DiffPanelEvent> for DiffPanel {}
@@ -227,6 +279,10 @@ impl DiffPanel {
             rows: Vec::new(),
             list_state: new_diff_list(0),
             applied_reveal: None,
+            review_comments: Vec::new(),
+            gutter_drag: None,
+            draft: None,
+            draft_seq: 0,
         };
         panel.spawn_vcs_status_loop(cx);
         panel.sync_queries(cx);
@@ -264,6 +320,21 @@ impl DiffPanel {
         }
         self.sync_queries(cx);
         self.refresh_patch(cx);
+    }
+
+    /// ChatApp pushes the composer's pending review comments in whenever they
+    /// change (per-frame while the surface is visible, so this must converge).
+    pub fn set_review_comments(
+        &mut self,
+        comments: Vec<ReviewCommentContext>,
+        cx: &mut Context<Self>,
+    ) {
+        if comments == self.review_comments {
+            return;
+        }
+        self.review_comments = comments;
+        self.rebuild_rows();
+        cx.notify();
     }
 
     // ---- selection ----------------------------------------------------
@@ -313,6 +384,25 @@ impl DiffPanel {
                     .find(|summary| summary.turn_id == *turn_id)
                 {
                     Some(summary) => format!("Turn {}", summary.turn_count).into(),
+                    None => "Turn ?".into(),
+                }
+            }
+        }
+    }
+
+    /// Electron's `reviewSectionTitle`: unlike `scope_label`, the latest turn
+    /// is still titled `Turn {count}` (never "Latest turn").
+    fn review_section_title(&self, selection: &DiffPanelSelection) -> String {
+        match selection {
+            DiffPanelSelection::Unstaged => "Working tree".into(),
+            DiffPanelSelection::Branch { .. } => "Branch changes".into(),
+            DiffPanelSelection::Turn { turn_id, .. } => {
+                match self
+                    .checkpoints
+                    .iter()
+                    .find(|summary| summary.turn_id == *turn_id)
+                {
+                    Some(summary) => format!("Turn {}", summary.turn_count),
                     None => "Turn ?".into(),
                 }
             }
@@ -768,6 +858,7 @@ impl DiffPanel {
 
     fn rebuild_rows(&mut self) {
         let old = self.rows.len();
+        let anchors = self.annotation_anchors();
         let mut rows = Vec::new();
         if self.raw_reason.is_some() {
             rows.extend((0..self.raw_lines.len()).map(|line| DiffRow::RawLine { line }));
@@ -787,19 +878,267 @@ impl DiffPanel {
                         rows.push(DiffRow::Separator { gap });
                     }
                     if self.split {
-                        rows.extend(split_hunk_rows(file_ix, hunk_ix, &hunk.lines));
+                        for row in split_hunk_rows(file_ix, hunk_ix, &hunk.lines) {
+                            rows.push(row);
+                            let DiffRow::SplitLine { left, right, .. } = row else {
+                                continue;
+                            };
+                            if let Some(line) = left.and_then(|ix| hunk.lines.get(ix)) {
+                                push_line_annotations(&mut rows, &anchors, file_ix, line);
+                            }
+                            if right != left
+                                && let Some(line) = right.and_then(|ix| hunk.lines.get(ix))
+                            {
+                                push_line_annotations(&mut rows, &anchors, file_ix, line);
+                            }
+                        }
                     } else {
-                        rows.extend((0..hunk.lines.len()).map(|line| DiffRow::Line {
-                            file: file_ix,
-                            hunk: hunk_ix,
-                            line,
-                        }));
+                        for (line_ix, line) in hunk.lines.iter().enumerate() {
+                            rows.push(DiffRow::Line {
+                                file: file_ix,
+                                hunk: hunk_ix,
+                                line: line_ix,
+                            });
+                            push_line_annotations(&mut rows, &anchors, file_ix, line);
+                        }
                     }
                 }
             }
         }
         self.rows = rows;
         self.list_state.splice(0..old, self.rows.len());
+    }
+
+    /// Anchor set for annotation rows — persisted comments restored against
+    /// the current patch plus the open draft, keyed
+    /// `(file index, deletions side, end line number)` like Pierre groups
+    /// annotations per `(side, lineNumber)`.
+    fn annotation_anchors(&self) -> HashSet<(usize, bool, u32)> {
+        let mut anchors = HashSet::new();
+        if self.review_comments.is_empty() && self.draft.is_none() {
+            return anchors;
+        }
+        let section = self.section_id(&self.resolved_selection());
+        for (file_ix, file) in self.files.iter().enumerate() {
+            let path = file.display_path();
+            for comment in &self.review_comments {
+                if comment.section_id != section
+                    || comment.file_path != path
+                    || comment.fence_language.as_deref().unwrap_or("diff") != "diff"
+                {
+                    continue;
+                }
+                if let Some(range) = restore_diff_review_comment_range(file, comment) {
+                    anchors.insert((file_ix, annotation_side_is_deletions(&range), range.end));
+                }
+            }
+            if let Some(draft) = &self.draft
+                && draft.file_path == path
+            {
+                anchors.insert((file_ix, draft.deletions, draft.line));
+            }
+        }
+        anchors
+    }
+
+    // ---- review-comment annotations -------------------------------------
+
+    /// `enableLineSelection: !hasOpenComment` — one draft at a time.
+    fn gutter_selection_enabled(&self) -> bool {
+        self.draft.is_none()
+    }
+
+    fn gutter_mouse_down(&mut self, file: usize, hunk: usize, line: usize, cx: &mut Context<Self>) {
+        if !self.gutter_selection_enabled() {
+            return;
+        }
+        let Some(flat) = self
+            .files
+            .get(file)
+            .map(|file| flat_row_index(file, hunk, line))
+        else {
+            return;
+        };
+        self.gutter_drag = Some(GutterDrag {
+            file,
+            anchor: flat,
+            head: flat,
+        });
+        cx.notify();
+    }
+
+    fn gutter_mouse_move(
+        &mut self,
+        file: usize,
+        hunk: usize,
+        line: usize,
+        event: &MouseMoveEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if self.gutter_drag.is_none() {
+            return;
+        }
+        // The release landed outside the panel: abandon the drag.
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.gutter_drag = None;
+            cx.notify();
+            return;
+        }
+        let Some(flat) = self
+            .files
+            .get(file)
+            .map(|file| flat_row_index(file, hunk, line))
+        else {
+            return;
+        };
+        if let Some(drag) = &mut self.gutter_drag
+            && drag.file == file
+            && drag.head != flat
+        {
+            drag.head = flat;
+            cx.notify();
+        }
+    }
+
+    /// Pierre's `onLineSelectionEnd` → `beginComment`.
+    fn finish_gutter_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(drag) = self.gutter_drag.take() else {
+            return;
+        };
+        let Some(range) = self
+            .files
+            .get(drag.file)
+            .and_then(|file| selected_line_range_from_row_indices(file, drag.anchor, drag.head))
+        else {
+            cx.notify();
+            return;
+        };
+        self.begin_comment(drag.file, range, window, cx);
+    }
+
+    /// `beginComment`: open a draft annotation under the selection's end row.
+    fn begin_comment(
+        &mut self,
+        file_ix: usize,
+        range: SelectedLineRange,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(file) = self.files.get(file_ix) else {
+            cx.notify();
+            return;
+        };
+        let file_path = file.display_path().to_string();
+        // `nextFileCommentId()`.
+        self.draft_seq += 1;
+        let id = format!(
+            "file-comment-{}-{}",
+            chrono::Utc::now().timestamp_millis(),
+            self.draft_seq
+        );
+        let selection = self.resolved_selection();
+        let section_id = self.section_id(&selection);
+        let section_title = self.review_section_title(&selection);
+        // Built with empty text only for the range label (Electron does the
+        // same to validate the range resolves).
+        let Some(seed) = build_diff_review_comment(&DiffReviewCommentInput {
+            id: &id,
+            section_id: &section_id,
+            section_title: &section_title,
+            file_path: &file_path,
+            file_diff: file,
+            range,
+            text: "",
+        }) else {
+            cx.notify();
+            return;
+        };
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("Request change")
+                .auto_grow(2, 6)
+        });
+        input.update(cx, |input, cx| input.focus(window, cx));
+        // Cmd+Enter submits like Electron's textarea keydown; Change re-renders
+        // the Comment button's disabled state.
+        let input_sub = cx.subscribe_in(
+            &input,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter {
+                    secondary: true, ..
+                } => this.submit_draft(window, cx),
+                InputEvent::Change => cx.notify(),
+                _ => {}
+            },
+        );
+        self.draft = Some(DraftAnnotation {
+            id,
+            file_path,
+            range,
+            range_label: seed.range_label,
+            deletions: annotation_side_is_deletions(&range),
+            line: range.end,
+            input,
+            _input_sub: input_sub,
+        });
+        self.rebuild_rows();
+        cx.notify();
+    }
+
+    /// `submitEntry`: rebuild the comment with the final text and hand it to
+    /// the composer.
+    fn submit_draft(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(draft) = &self.draft else {
+            return;
+        };
+        let text = draft.input.read(cx).value().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let id = draft.id.clone();
+        let file_path = draft.file_path.clone();
+        let range = draft.range;
+        let selection = self.resolved_selection();
+        let comment = self
+            .files
+            .iter()
+            .find(|file| file.display_path() == file_path)
+            .and_then(|file| {
+                build_diff_review_comment(&DiffReviewCommentInput {
+                    id: &id,
+                    section_id: &self.section_id(&selection),
+                    section_title: &self.review_section_title(&selection),
+                    file_path: &file_path,
+                    file_diff: file,
+                    range,
+                    text: &text,
+                })
+            });
+        self.draft = None;
+        if let Some(comment) = comment {
+            cx.emit(DiffPanelEvent::AddReviewComment(comment));
+        }
+        self.rebuild_rows();
+        cx.notify();
+    }
+
+    /// `removeEntry`: a draft cancels locally; a persisted comment removes
+    /// from the composer store (ChatApp pushes the shrunken list back).
+    fn remove_annotation_entry(&mut self, entry_id: &str, cx: &mut Context<Self>) {
+        if self
+            .draft
+            .as_ref()
+            .is_some_and(|draft| draft.id == entry_id)
+        {
+            self.draft = None;
+            self.rebuild_rows();
+            cx.notify();
+            return;
+        }
+        cx.emit(DiffPanelEvent::RemoveReviewComment {
+            id: entry_id.to_string(),
+        });
     }
 
     /// Scroll to the deep-linked file at most once per reveal request; keep
@@ -1240,13 +1579,24 @@ impl DiffPanel {
             }
             return column
                 .child(
-                    div().flex_1().min_h_0().child(
-                        list(
-                            self.list_state.clone(),
-                            cx.processor(|this, index, _window, cx| this.render_row(index, cx)),
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        // A release outside the number gutter still ends the
+                        // drag (bubble phase — gutter cells handle their own).
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.finish_gutter_selection(window, cx);
+                            }),
                         )
-                        .size_full(),
-                    ),
+                        .child(
+                            list(
+                                self.list_state.clone(),
+                                cx.processor(|this, index, _window, cx| this.render_row(index, cx)),
+                            )
+                            .size_full(),
+                        ),
                 )
                 .into_any_element();
         }
@@ -1329,6 +1679,11 @@ impl DiffPanel {
                     .into_any_element()
             }
             DiffRow::Line { file, hunk, line } => self.render_unified_line(file, hunk, line, cx),
+            DiffRow::Annotation {
+                file,
+                deletions,
+                line,
+            } => self.render_annotation_row(file, deletions, line, cx),
             DiffRow::SplitLine {
                 file,
                 hunk,
@@ -1471,6 +1826,53 @@ impl DiffPanel {
             .into_any_element()
     }
 
+    /// Whether an active gutter drag covers this row (Pierre's selected-line
+    /// highlight).
+    fn row_in_drag_selection(&self, file_ix: usize, hunk_ix: usize, line_ix: usize) -> bool {
+        self.gutter_drag.as_ref().is_some_and(|drag| {
+            drag.file == file_ix
+                && self.files.get(file_ix).is_some_and(|file| {
+                    let flat = flat_row_index(file, hunk_ix, line_ix);
+                    (drag.anchor.min(drag.head)..=drag.anchor.max(drag.head)).contains(&flat)
+                })
+        })
+    }
+
+    /// Number cells with the selection mouse handlers attached — Pierre's
+    /// selectable gutter (both cells in unified mode, one per half in split).
+    fn gutter_cells(
+        &self,
+        file_ix: usize,
+        hunk_ix: usize,
+        line_ix: usize,
+        numbers: &[Option<u32>],
+        number_bg: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut gutter = h_flex()
+            .items_stretch()
+            .flex_shrink_0()
+            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                this.gutter_mouse_move(file_ix, hunk_ix, line_ix, event, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| this.finish_gutter_selection(window, cx)),
+            );
+        if self.gutter_selection_enabled() {
+            gutter = gutter.cursor_pointer().on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.gutter_mouse_down(file_ix, hunk_ix, line_ix, cx);
+                }),
+            );
+        }
+        for number in numbers {
+            gutter = gutter.child(line_number_cell(*number, number_bg, cx));
+        }
+        gutter.into_any_element()
+    }
+
     fn render_unified_line(
         &self,
         file_ix: usize,
@@ -1486,14 +1888,24 @@ impl DiffPanel {
         else {
             return div().into_any_element();
         };
-        let (row_bg, number_bg, bar) = line_colors(line.kind, cx);
+        let (mut row_bg, number_bg, bar) = line_colors(line.kind, cx);
+        if self.row_in_drag_selection(file_ix, hunk_ix, line_ix) {
+            row_bg = cx.theme().info.opacity(0.12);
+        }
+        let gutter = self.gutter_cells(
+            file_ix,
+            hunk_ix,
+            line_ix,
+            &[line.old_line, line.new_line],
+            number_bg,
+            cx,
+        );
         h_flex()
             .w_full()
             .items_stretch()
             .min_h(px(20.))
             .bg(row_bg)
-            .child(line_number_cell(line.old_line, number_bg, cx))
-            .child(line_number_cell(line.new_line, number_bg, cx))
+            .child(gutter)
             .child(div().w(px(3.)).flex_shrink_0().bg(bar))
             .child(self.line_content(line, cx))
             .into_any_element()
@@ -1515,7 +1927,8 @@ impl DiffPanel {
             return div().into_any_element();
         };
         let side = |line_ix: Option<usize>, old_side: bool, cx: &mut Context<Self>| {
-            let Some(line) = line_ix.and_then(|ix| hunk.lines.get(ix)) else {
+            let Some((line_ix, line)) = line_ix.and_then(|ix| hunk.lines.get(ix).map(|l| (ix, l)))
+            else {
                 // Pierre's empty "buffer" half opposite an unpaired change.
                 return div()
                     .flex_1()
@@ -1523,18 +1936,22 @@ impl DiffPanel {
                     .bg(cx.theme().foreground.opacity(0.03))
                     .into_any_element();
             };
-            let (row_bg, number_bg, bar) = line_colors(line.kind, cx);
+            let (mut row_bg, number_bg, bar) = line_colors(line.kind, cx);
+            if self.row_in_drag_selection(file_ix, hunk_ix, line_ix) {
+                row_bg = cx.theme().info.opacity(0.12);
+            }
             let number = if old_side {
                 line.old_line
             } else {
                 line.new_line
             };
+            let gutter = self.gutter_cells(file_ix, hunk_ix, line_ix, &[number], number_bg, cx);
             h_flex()
                 .flex_1()
                 .min_w_0()
                 .items_stretch()
                 .bg(row_bg)
-                .child(line_number_cell(number, number_bg, cx))
+                .child(gutter)
                 .child(div().w(px(3.)).flex_shrink_0().bg(bar))
                 .child(self.line_content(line, cx))
                 .into_any_element()
@@ -1555,6 +1972,174 @@ impl DiffPanel {
                     .border_l_1()
                     .border_color(cx.theme().border.opacity(0.6))
                     .child(right_side),
+            )
+            .into_any_element()
+    }
+
+    /// The annotation group under one diff row — every persisted comment
+    /// whose restored range ends here, then the open draft
+    /// (`renderAnnotation` in AnnotatableCodeView).
+    fn render_annotation_row(
+        &mut self,
+        file_ix: usize,
+        deletions: bool,
+        line: u32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(file) = self.files.get(file_ix) else {
+            return div().into_any_element();
+        };
+        let path = file.display_path().to_string();
+        let section = self.section_id(&self.resolved_selection());
+        let comments: Vec<ReviewCommentContext> = self
+            .review_comments
+            .iter()
+            .filter(|comment| {
+                comment.section_id == section
+                    && comment.file_path == path
+                    && comment.fence_language.as_deref().unwrap_or("diff") == "diff"
+                    && restore_diff_review_comment_range(file, comment).is_some_and(|range| {
+                        annotation_side_is_deletions(&range) == deletions && range.end == line
+                    })
+            })
+            .cloned()
+            .collect();
+        let draft_here = self.draft.as_ref().is_some_and(|draft| {
+            draft.file_path == path && draft.deletions == deletions && draft.line == line
+        });
+        let mut column = v_flex().w_full().py_1();
+        for comment in comments {
+            column = column.child(self.render_comment_card(comment, cx));
+        }
+        if draft_here {
+            column = column.child(self.render_draft_card(cx));
+        }
+        column.into_any_element()
+    }
+
+    /// `LocalCommentAnnotation` kind="comment": the saved-comment card.
+    fn render_comment_card(
+        &self,
+        comment: ReviewCommentContext,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let entry_id = comment.id.clone();
+        v_flex()
+            .mx_3()
+            .my_2()
+            .p_3()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(cx.theme().border.opacity(0.7))
+            .bg(cx.theme().background)
+            .shadow_sm()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Icon::new(VitreIcon::MessageCircle)
+                            .size_4()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(div().text_xs().font_medium().child("Local comment"))
+                    .child(
+                        div()
+                            .ml_auto()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(comment.range_label.clone())),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("annotation-delete-{entry_id}")))
+                            .icon(Icon::new(VitreIcon::Trash2).size_3p5())
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Delete comment")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.remove_annotation_entry(&entry_id, cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .mt_2()
+                    .text_sm()
+                    .text_color(cx.theme().foreground)
+                    .child(SharedString::from(comment.text)),
+            )
+            .into_any_element()
+    }
+
+    /// `LocalCommentAnnotation` kind="draft": textarea + Cancel/Comment.
+    fn render_draft_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(draft) = &self.draft else {
+            return div().into_any_element();
+        };
+        let can_comment = !draft.input.read(cx).value().trim().is_empty();
+        let cancel_id = draft.id.clone();
+        let escape_id = draft.id.clone();
+        v_flex()
+            .mx_3()
+            .my_2()
+            .p_3()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(cx.theme().border.opacity(0.7))
+            .bg(cx.theme().background)
+            .shadow_lg()
+            // Escape cancels (bubbles up from the textarea when unhandled).
+            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    this.remove_annotation_entry(&escape_id, cx);
+                }
+            }))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Icon::new(VitreIcon::MessageCircle)
+                            .size_4()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(div().text_sm().font_medium().child("Local comment")),
+            )
+            .child(
+                div()
+                    .mt_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(format!(
+                        "Comment on lines {}",
+                        draft.range_label
+                    ))),
+            )
+            .child(div().mt_3().child(Textarea::new(&draft.input)))
+            .child(
+                h_flex()
+                    .mt_3()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("annotation-cancel")
+                            .label("Cancel")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.remove_annotation_entry(&cancel_id, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("annotation-comment")
+                            .label("Comment")
+                            .primary()
+                            .small()
+                            .disabled(!can_comment)
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.submit_draft(window, cx);
+                            })),
+                    ),
             )
             .into_any_element()
     }
@@ -1606,6 +2191,46 @@ fn load_map(path: &Path) -> DiffPanelMap {
             eprintln!("[vitre] ignoring unreadable {FILE_NAME}: {error}");
             DiffPanelMap::default()
         }
+    }
+}
+
+/// Flattened diff-review row index of a `(hunk, line)` pair — the coordinate
+/// space `selected_line_range_from_row_indices` consumes.
+fn flat_row_index(file: &PatchFile, hunk_ix: usize, line_ix: usize) -> usize {
+    file.hunks[..hunk_ix.min(file.hunks.len())]
+        .iter()
+        .map(|hunk| hunk.lines.len())
+        .sum::<usize>()
+        + line_ix
+}
+
+/// Push the annotation rows anchored under `line` (deletions match Del rows'
+/// old numbers, additions match any row's new number — the two sides
+/// `getDiffReviewSelectionPoint` can produce).
+fn push_line_annotations(
+    rows: &mut Vec<DiffRow>,
+    anchors: &HashSet<(usize, bool, u32)>,
+    file: usize,
+    line: &PatchLine,
+) {
+    if line.kind == PatchLineKind::Del
+        && let Some(old) = line.old_line
+        && anchors.contains(&(file, true, old))
+    {
+        rows.push(DiffRow::Annotation {
+            file,
+            deletions: true,
+            line: old,
+        });
+    }
+    if let Some(new) = line.new_line
+        && anchors.contains(&(file, false, new))
+    {
+        rows.push(DiffRow::Annotation {
+            file,
+            deletions: false,
+            line: new,
+        });
     }
 }
 
