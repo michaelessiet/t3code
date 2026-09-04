@@ -5,6 +5,7 @@
 //! only carries the six detail event kinds, so title/meta always come from
 //! the thread shell (the TS client's `mergeEnvironmentThread` split).
 
+mod branch_toolbar;
 mod changed_files;
 mod diff_panel;
 mod git_actions;
@@ -172,6 +173,9 @@ pub struct ChatApp {
     /// Header git controls (M3): the `subscribeVcsStatus` fold, quick-action/
     /// menu state, and the stacked-action progress pipeline.
     git: git_actions::GitState,
+    /// Branch toolbar (M3): the strip above the composer — workspace label,
+    /// PR pill, and the paginated branch combobox.
+    branch: branch_toolbar::BranchToolbarState,
     /// Diff dock surface (M3), recreated when the dock's thread key or the
     /// active git root changes. `None` until first shown.
     diff: Option<Entity<diff_panel::DiffPanel>>,
@@ -740,6 +744,7 @@ impl ChatApp {
             sidebar_resize,
             files: None,
             git: git_actions::GitState::default(),
+            branch: branch_toolbar::BranchToolbarState::new(window, cx),
             diff: None,
             diff_subscription: None,
             diff_store: home.join(diff_panel::FILE_NAME),
@@ -1152,6 +1157,8 @@ impl ChatApp {
         self.reconcile_drawer_terminals(cx);
         // Retarget the vcs status stream at the new thread's git root.
         self.sync_git_status(cx);
+        // Retarget the branch toolbar (drops stale pages + optimistic label).
+        self.sync_branch_toolbar(cx);
         cx.spawn(async move |this, cx| {
             loop {
                 let state = state_rx.borrow_and_update().clone();
@@ -3008,6 +3015,7 @@ impl ChatApp {
                 .size_full(),
             ),
         )
+        .children(self.render_branch_toolbar(cx))
         .child(composer)
         .children(self.render_terminal_drawer(cx))
         .into_any_element()

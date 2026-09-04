@@ -79,6 +79,32 @@ pub trait SearchableListDelegate: Sized + 'static {
         Task::ready(())
     }
 
+    // MARK: Pagination hooks
+    //
+    // Mirrors of the [`ListDelegate`](crate::list::ListDelegate) load-more
+    // contract, forwarded by the adapter so paginated data sources work
+    // inside Select/Combobox dropdowns.
+
+    /// Return true to enable load more data when scrolling to the bottom.
+    ///
+    /// Default: false
+    fn has_more(&self, _cx: &App) -> bool {
+        false
+    }
+
+    /// The remaining-row count near the bottom that triggers `load_more`.
+    ///
+    /// Default: 20 entities (section header, footer and row).
+    fn load_more_threshold(&self) -> usize {
+        20
+    }
+
+    /// Load more data when the dropdown list is scrolled near the bottom.
+    ///
+    /// Always called when the list nears the bottom, so implementations must
+    /// check whether more data exists or lock their loading state.
+    fn load_more(&mut self, _window: &mut Window, _cx: &mut App) {}
+
     // MARK: Rendering hooks
 
     /// Override the row content for the item at `ix`.

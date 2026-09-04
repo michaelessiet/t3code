@@ -289,6 +289,11 @@ where
         self
     }
 
+    /// Whether the dropdown popup is currently open.
+    pub fn is_open(&self) -> bool {
+        self.state.open
+    }
+
     /// Return the currently selected values.
     pub fn selected_values(&self) -> Vec<<D::Item as SearchableListItem>::Value> {
         self.state.selected_values()
@@ -385,6 +390,16 @@ where
     /// Focus the trigger.
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.state.focus_handle.focus(window, cx);
+    }
+
+    /// Open the dropdown menu programmatically (e.g. from a keyboard
+    /// shortcut), focusing its list like a trigger click would.
+    pub fn open_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.open {
+            return;
+        }
+        self.set_open(true, cx);
+        self.state.list.focus_handle(cx).focus(window, cx);
     }
 
     /// Returns the search query.

@@ -161,6 +161,18 @@ impl<D: SearchableListDelegate + 'static> ListDelegate for SearchableListAdapter
         self.delegate.perform_search(query, window, cx)
     }
 
+    fn has_more(&self, cx: &App) -> bool {
+        self.delegate.has_more(cx)
+    }
+
+    fn load_more_threshold(&self) -> usize {
+        self.delegate.load_more_threshold()
+    }
+
+    fn load_more(&mut self, window: &mut Window, cx: &mut Context<ListState<Self>>) {
+        self.delegate.load_more(window, cx)
+    }
+
     fn set_selected_index(
         &mut self,
         ix: Option<IndexPath>,

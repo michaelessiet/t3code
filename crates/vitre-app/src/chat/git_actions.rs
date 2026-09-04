@@ -61,8 +61,9 @@ pub(super) struct GitState {
     /// The status-stream target (`activeThread.worktreePath ?? workspaceRoot`).
     cwd: Option<String>,
     /// The folded `subscribeVcsStatus` result. Kept renderable across
-    /// resubscribes; the fold accumulator itself lives in the task.
-    status: Option<GitStatus>,
+    /// resubscribes; the fold accumulator itself lives in the task. The
+    /// branch toolbar reads it too (closed-state trigger label, PR pill).
+    pub(super) status: Option<GitStatus>,
     /// Status-stream failure, shown as a menu footer row.
     status_error: Option<SharedString>,
     /// A stacked action, pull, or init is running (`isGitActionRunning`).
@@ -247,7 +248,7 @@ impl ChatApp {
     }
 
     /// Fire-and-forget `vcs.refreshStatus` — the stream delivers the update.
-    fn git_refresh_status(&self, cx: &mut Context<Self>) {
+    pub(super) fn git_refresh_status(&self, cx: &mut Context<Self>) {
         let (Some(client), Some(cwd)) = (self.client.clone(), self.git.cwd.clone()) else {
             return;
         };

@@ -21,6 +21,7 @@
 //! `"full-access"`, `interactionMode` → `"default"`) get the same defaults
 //! applied here when the reducer reads them.
 
+pub mod branch_toolbar;
 pub mod browse_path;
 pub mod chat_ui;
 pub mod diff_panel;
