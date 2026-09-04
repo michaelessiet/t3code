@@ -16,16 +16,18 @@
 use gpui::{Context, div};
 use gpui::{CursorStyle, Hsla, SharedString, Window, prelude::*, px, rgb};
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem},
+    notification::Notification,
     v_flex,
 };
 use std::collections::HashMap;
 use vitre_contracts::{
     ClientOrchestrationCommand, CommandId, OrchestrationSessionStatus, OrchestrationThreadShell,
-    ProjectId, ThreadId,
+    ProjectId, TerminalCloseInput, ThreadId, VcsRemoveWorktreeInput, VcsStatusInput,
+    methods::{TerminalClose, VcsRefreshStatus, VcsRemoveWorktree},
 };
 use vitre_state::project_grouping::{
     ProjectGroupingMode, build_project_groups, derive_physical_project_key,
@@ -36,9 +38,15 @@ use vitre_state::sidebar::{
     ThreadStatus, ThreadWindow, is_archived, resolve_project_status, resolve_thread_status,
     sort_project_groups, sort_threads, thread_window,
 };
+use vitre_state::worktree_cleanup::{
+    fallback_thread_id_after_delete, format_worktree_path_for_display,
+    orphaned_worktree_path_for_thread,
+};
+
+use crate::assets::VitreIcon;
 
 use super::project_actions::{ProjectMember, project_context_menu};
-use super::{ChatApp, SyncPhase, fresh_id, relative_time};
+use super::{ChatApp, SyncPhase, fresh_id, now_iso, relative_time, tnes};
 
 /// Hover group that reveals a project header's "new thread" button, and a
 /// thread row's archive button. Electron does the same with
@@ -385,6 +393,239 @@ impl ChatApp {
         .detach();
     }
 
+    /// Electron's sidebar `delete` action: a confirm dialog first
+    /// (`confirmThreadDelete` defaults on), then the orphaned-worktree offer,
+    /// then the actual stop/close/delete pipeline.
+    fn delete_thread_request(&mut self, id: ThreadId, window: &mut Window, cx: &mut Context<Self>) {
+        let title = self.thread_title(&id);
+        let owner = cx.entity().downgrade();
+        let dialog_title: SharedString = format!("Delete thread \"{title}\"?").into();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let id = id.clone();
+            let confirm_owner = owner.clone();
+            dialog
+                .title(dialog_title.clone())
+                .w(px(448.))
+                .content(|content, _, cx| {
+                    content.child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("This permanently clears conversation history for this thread."),
+                    )
+                })
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("delete-thread-cancel")
+                                .outline()
+                                .small()
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("delete-thread-confirm")
+                                .danger()
+                                .small()
+                                .label("Delete thread")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let id = id.clone();
+                                    let _ = confirm_owner.update(cx, |this, cx| {
+                                        this.delete_thread_offer_worktree_cleanup(id, window, cx);
+                                    });
+                                }),
+                        ),
+                )
+        });
+    }
+
+    /// The orphaned-worktree offer (`useThreadActions.deleteThread`): when the
+    /// deleted thread is the only one linked to its worktree, ask whether to
+    /// remove the worktree too. Either answer still deletes the thread.
+    fn delete_thread_offer_worktree_cleanup(
+        &mut self,
+        id: ThreadId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Archived threads still reference their worktrees, so the share check
+        // runs over the raw snapshot, not the sidebar's filtered list.
+        let all_threads: Vec<&OrchestrationThreadShell> = self
+            .shell
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.threads.iter().collect())
+            .unwrap_or_default();
+        let orphaned = orphaned_worktree_path_for_thread(&all_threads, &id);
+        let project_cwd = self
+            .shell_thread(&id)
+            .map(|thread| thread.project_id.clone())
+            .and_then(|project_id| self.project_root(&project_id));
+        let (Some(path), Some(cwd)) = (orphaned, project_cwd) else {
+            self.perform_thread_delete(id, None, cx);
+            return;
+        };
+        let display = format_worktree_path_for_display(&path);
+        let owner = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let keep_id = id.clone();
+            let keep_owner = owner.clone();
+            let remove_id = id.clone();
+            let remove_owner = owner.clone();
+            let remove = (cwd.clone(), path.clone(), display.clone());
+            let display = display.clone();
+            dialog
+                .title("Delete the worktree too?")
+                .w(px(448.))
+                .content(move |content, _, cx| {
+                    content.child(
+                        v_flex()
+                            .gap_1()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("This thread is the only one linked to this worktree:")
+                            .child(
+                                div()
+                                    .font_medium()
+                                    .text_color(cx.theme().foreground)
+                                    .child(display.clone()),
+                            ),
+                    )
+                })
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("delete-worktree-keep")
+                                .outline()
+                                .small()
+                                .label("Keep worktree")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let id = keep_id.clone();
+                                    let _ = keep_owner.update(cx, |this, cx| {
+                                        this.perform_thread_delete(id, None, cx);
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new("delete-worktree-remove")
+                                .danger()
+                                .small()
+                                .label("Delete worktree")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let id = remove_id.clone();
+                                    let remove = remove.clone();
+                                    let _ = remove_owner.update(cx, |this, cx| {
+                                        this.perform_thread_delete(id, Some(remove), cx);
+                                    });
+                                }),
+                        ),
+                )
+        });
+    }
+
+    /// The delete pipeline (`useThreadActions.deleteThread`): stop a live
+    /// session, close the thread terminal with history, dispatch
+    /// `ThreadDelete`, move the selection off the dead thread, and optionally
+    /// remove the orphaned worktree (`force: true` + a status refresh).
+    fn perform_thread_delete(
+        &mut self,
+        id: ThreadId,
+        remove_worktree: Option<(String, String, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let stop_first = self
+            .shell_thread(&id)
+            .and_then(|thread| thread.session.as_ref())
+            .is_some_and(|session| session.status != OrchestrationSessionStatus::Stopped);
+        let was_open = self.thread.as_ref().is_some_and(|open| open.id == id);
+        // The fallback is computed before the shell drops the thread — after
+        // the delete lands, its project is no longer derivable.
+        let fallback = if was_open {
+            let threads = self.shell_threads();
+            let refs: Vec<&OrchestrationThreadShell> = threads.iter().collect();
+            fallback_thread_id_after_delete(&refs, &id, self.sidebar.thread_sort_order)
+        } else {
+            None
+        };
+        self.last_error = None;
+        cx.spawn(async move |this, cx| {
+            if stop_first {
+                let stop = ClientOrchestrationCommand::ThreadSessionStop {
+                    command_id: CommandId(fresh_id("vitre-cmd")),
+                    created_at: tnes(now_iso()),
+                    thread_id: id.clone(),
+                    r#type: Default::default(),
+                };
+                let _ = client.dispatch(&stop).await;
+            }
+            let close = TerminalCloseInput {
+                delete_history: Some(Some(true)),
+                terminal_id: None,
+                thread_id: tnes(&id.0),
+            };
+            let _ = client.call::<TerminalClose>(&close).await;
+            let delete = ClientOrchestrationCommand::ThreadDelete {
+                command_id: CommandId(fresh_id("vitre-cmd")),
+                thread_id: id.clone(),
+                r#type: Default::default(),
+            };
+            if let Err(error) = client.dispatch(&delete).await {
+                let _ = this.update(cx, |app, cx| {
+                    app.last_error = Some(format!("delete failed: {error:?}").into());
+                    cx.notify();
+                });
+                return;
+            }
+            let _ = this.update(cx, |app, cx| {
+                if was_open {
+                    match fallback.clone() {
+                        Some(fallback_id) => app.select_thread(fallback_id, cx),
+                        None => app.close_open_thread(cx),
+                    }
+                }
+            });
+            let Some((cwd, path, display)) = remove_worktree else {
+                return;
+            };
+            let input = VcsRemoveWorktreeInput {
+                cwd: tnes(&cwd),
+                force: Some(Some(true)),
+                path: tnes(&path),
+            };
+            match client.call::<VcsRemoveWorktree>(&input).await {
+                Ok(_) => {
+                    let _ = client
+                        .call::<VcsRefreshStatus>(&VcsStatusInput { cwd: tnes(&cwd) })
+                        .await;
+                }
+                Err(error) => {
+                    let _ = this.update_in(cx, |_, window, cx| {
+                        window.push_notification(
+                            Notification::error(SharedString::from(format!(
+                                "Could not remove {display}. {error:?}"
+                            )))
+                            .title("Thread deleted, but worktree removal failed"),
+                            cx,
+                        );
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     /// The status dot Electron paints beside a collapsed project and inside a
     /// thread row.
     fn status_dot(&self, status: ThreadStatus, cx: &Context<Self>) -> impl IntoElement {
@@ -419,6 +660,8 @@ impl ChatApp {
         let id = thread.id.clone();
         let archive_id = thread.id.clone();
         let archive_label = format!("Archive {}", thread.title);
+        let delete_id = thread.id.clone();
+        let delete_label = format!("Delete {}", thread.title);
 
         let meta: gpui::AnyElement = if thread.running {
             // A running turn keeps its timestamp visible; there is no archive
@@ -446,9 +689,10 @@ impl ChatApp {
                         .children(thread.time.clone()),
                 )
                 .child(
-                    div()
+                    h_flex()
                         .absolute()
                         .right_0p5()
+                        .gap_0p5()
                         .invisible()
                         .group_hover(THREAD_ROW_GROUP, |style| style.visible())
                         .child(
@@ -460,6 +704,17 @@ impl ChatApp {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
                                     this.archive_thread(archive_id.clone(), cx);
+                                })),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("delete-{}", thread.id.0)))
+                                .icon(Icon::new(VitreIcon::Trash2).size_3p5())
+                                .ghost()
+                                .xsmall()
+                                .tooltip(delete_label)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.delete_thread_request(delete_id.clone(), window, cx);
                                 })),
                         ),
                 )

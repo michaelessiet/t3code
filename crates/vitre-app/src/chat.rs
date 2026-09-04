@@ -1186,6 +1186,32 @@ impl ChatApp {
         cx.notify();
     }
 
+    /// Drop the open thread and return to the home view — Electron's
+    /// navigate-to-`/` after deleting the last thread of a project. The same
+    /// per-thread teardown as `select_thread`, with nothing opened after.
+    fn close_open_thread(&mut self, cx: &mut Context<Self>) {
+        if self.thread.is_none() {
+            return;
+        }
+        self.input_draft = None;
+        self.mention = None;
+        self.pending_attachments.clear();
+        self.pending_revert = None;
+        self.changed_files.clear_local();
+        self.timeline = Vec::new();
+        self.timeline_hashes = Vec::new();
+        self.revert_turn_counts = HashMap::new();
+        self.timeline_list = new_timeline_list();
+        self.terminal_views.clear();
+        self.terminal_view_subs.clear();
+        self.terminal_drag = None;
+        self.thread = None;
+        self.rebuild_sidebar();
+        self.sync_git_status(cx);
+        self.sync_branch_toolbar(cx);
+        cx.notify();
+    }
+
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else {
             return;
