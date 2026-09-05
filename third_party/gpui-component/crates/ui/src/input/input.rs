@@ -627,7 +627,13 @@ impl RenderOnce for Input {
                 )
             })
             .relative()
-            .children(overlays.floating)
+            // Completion, code-action, hover and diagnostic popovers all
+            // paint at absolute window coordinates, so they must stay out of
+            // this row's flex flow: as in-flow children they each collected a
+            // `gap`, stealing those pixels from the input's width and
+            // re-wrapping every soft-wrapped line the moment a popover
+            // appeared.
+            .child(div().absolute().children(overlays.floating))
             .render(window, cx)
     }
 }
@@ -1073,5 +1079,73 @@ mod tests {
         });
         assert!(!cx.update(|window, cx| window.has_focused_input(cx)));
         assert_eq!(cx.update(|window, cx| window.focused_input(cx)), None);
+    }
+
+    /// A floating popover must not resize the input underneath it.
+    ///
+    /// The popovers paint at absolute window coordinates, but they are still
+    /// children of the input's flex row, and that row carries `gap`. An
+    /// in-flow child therefore charged the editor `gap` pixels of width the
+    /// moment a hover appeared — which re-wrapped every soft-wrapped line and
+    /// visibly shifted the text up or down under the mouse.
+    #[gpui::test]
+    fn floating_overlays_do_not_resize_the_input(cx: &mut gpui::TestAppContext) {
+        use crate::input::{Editor, EditorState};
+        use gpui::{AppContext as _, Render};
+        use lsp_types::{Hover, HoverContents, MarkedString};
+
+        struct EditorProbe {
+            state: Entity<EditorState>,
+        }
+
+        impl Render for EditorProbe {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                Editor::new(&self.state).appearance(false).size_full()
+            }
+        }
+
+        cx.update(crate::init);
+        let (probe, cx) = cx.add_window_view(|window, cx| EditorProbe {
+            state: cx.new(|cx| EditorState::new(window, cx).line_number(true)),
+        });
+        let state = probe.read_with(cx, |probe, _| probe.state.clone());
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.set_value("fn main() {\n    println!(\"hello\");\n}\n", window, cx);
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let before = cx.update(|_, cx| state.read(cx).input_bounds().size);
+
+        cx.update(|_, cx| {
+            state.update(cx, |state, cx| {
+                state.present_hover(
+                    0..2,
+                    Hover {
+                        contents: HoverContents::Scalar(MarkedString::String("docs".into())),
+                        range: None,
+                    },
+                    cx,
+                );
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let during = cx.update(|_, cx| state.read(cx).input_bounds().size);
+
+        assert_eq!(
+            before, during,
+            "showing a hover popover must not change the editor's size"
+        );
+
+        cx.update(|_, cx| {
+            state.update(cx, |state, cx| state.clear_hover_state(cx));
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let after = cx.update(|_, cx| state.read(cx).input_bounds().size);
+        assert_eq!(before, after, "dismissing a hover must restore the size");
     }
 }
