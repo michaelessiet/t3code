@@ -376,8 +376,22 @@ impl ChatApp {
         // tab is active would snap straight back.
         let key_changed = self.last_dock_sync_key.as_deref() != Some(key.as_str());
         self.last_dock_sync_key = Some(key.clone());
+        // The files listing revalidates on the activation EDGE (this runs per
+        // frame): another surface was active before, the dock's thread
+        // changed, or the dock reopened (render clears the marker while the
+        // dock is closed). Electron gets the same effect from the panel
+        // remounting with `revalidateOnMount` when its surface is selected.
+        let surface_marker = format!("{key}|{}", surface.id());
+        let surface_activated =
+            self.last_dock_active_surface.as_deref() != Some(surface_marker.as_str());
+        self.last_dock_active_surface = Some(surface_marker);
         match surface {
-            RightPanelSurface::Files { .. } => self.ensure_files_panel(window, cx),
+            RightPanelSurface::Files { .. } => {
+                self.ensure_files_panel(window, cx);
+                if surface_activated && let Some(files) = self.files.clone() {
+                    files.update(cx, |files, cx| files.revalidate_if_stale(cx));
+                }
+            }
             RightPanelSurface::Diff { .. } => self.ensure_diff_panel(window, cx),
             RightPanelSurface::File {
                 id,
@@ -387,6 +401,9 @@ impl ChatApp {
                 ..
             } => {
                 self.ensure_files_panel(window, cx);
+                if surface_activated && let Some(files) = self.files.clone() {
+                    files.update(cx, |files, cx| files.revalidate_if_stale(cx));
+                }
                 let applied_key = format!("{key}|{id}");
                 let fresh = self.applied_reveals.get(&applied_key) != Some(&reveal_request_id);
                 if !fresh && !focus && !key_changed {
@@ -668,7 +685,10 @@ impl ChatApp {
         let offers = self.dock_surface_offers();
         let mut grid = v_flex().gap_2().w_full().max_w(px(576.));
         for pair in offers.chunks(2) {
-            let mut row = h_flex().gap_2().w_full().min_w_0();
+            // Plain flex row, not `h_flex`: its `items_center` would defeat
+            // the default cross-axis stretch that keeps both cards in a row
+            // the same height (Electron's CSS grid rows stretch likewise).
+            let mut row = div().flex().gap_2().w_full().min_w_0();
             for offer in pair {
                 row = row.child(self.render_dock_card(offer, cx));
             }
@@ -731,27 +751,27 @@ impl ChatApp {
                     .text_color(cx.theme().foreground)
                     .child(offer.label),
             );
+        // Electron always renders the short description; a disabled card
+        // keeps it and shows the reason only in a tooltip over the dimmed
+        // card, so every card's content (and height) stays uniform.
+        card = card.child(
+            div()
+                .mt_1()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(offer.description),
+        );
         match offer.disabled.clone() {
-            // Electron shows the reason in a tooltip over the dimmed card;
-            // Vitre prints it in the description slot instead.
             Some(reason) => {
-                card = card.opacity(0.4).child(
-                    div()
-                        .mt_1()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(reason),
-                );
+                card = card
+                    .opacity(0.4)
+                    .cursor_not_allowed()
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(reason.clone()).build(window, cx)
+                    });
             }
             None => {
                 card = card
-                    .child(
-                        div()
-                            .mt_1()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(offer.description),
-                    )
                     .hover(|style| {
                         style
                             .border_color(cx.theme().border)

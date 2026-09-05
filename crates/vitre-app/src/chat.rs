@@ -27,8 +27,8 @@ use std::sync::Arc;
 use base64::Engine as _;
 use gpui::{
     AnyElement, Context, Entity, FocusHandle, FollowMode, ListAlignment, ListState,
-    PathPromptOptions, SharedString, Subscription, Window, actions, div, list, prelude::*, px,
-    relative,
+    PathPromptOptions, SharedString, Subscription, Task, Window, actions, div, list, prelude::*,
+    px, relative,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, ResizableState, Root, Sizable as _,
@@ -50,8 +50,8 @@ use vitre_contracts::ClientOrchestrationCommandThreadTurnStartMessageAttachments
 use vitre_contracts::methods::ProjectsSearchEntries;
 use vitre_contracts::{
     ApprovalRequestId, ClientOrchestrationCommand, CommandId, ExecutionEnvironmentPlatformOs,
-    MessageId, ModelSelection, NonNegativeInt, OrchestrationMessage, OrchestrationMessageRole,
-    OrchestrationSessionStatus, OrchestrationThread, OrchestrationThreadActivity,
+    MessageId, ModelSelection, NonNegativeInt, OrchestrationLatestTurnState, OrchestrationMessage,
+    OrchestrationMessageRole, OrchestrationSessionStatus, OrchestrationThread,
     OrchestrationThreadActivityTone, OrchestrationThreadShell, ProjectEntry, ProjectEntryKind,
     ProjectId, ProjectSearchEntriesInput, ProviderApprovalDecision, ProviderInteractionMode,
     RuntimeMode, ServerConfig, ThreadId, TrimmedNonEmptyString,
@@ -65,7 +65,9 @@ use vitre_state::session_logic::{
     derive_pending_user_inputs,
 };
 use vitre_state::terminal_context::{TerminalContextSelection, append_terminal_contexts_to_prompt};
+use vitre_state::work_log::{self, DerivedTimelineRow, TimelineDeriveInput, WorkLogEntry};
 
+use crate::assets::VitreIcon;
 use crate::files::FilesPanel;
 use crate::palette::command_palette::{
     CommandPalette, CommandPaletteEvent, PaletteAction, PaletteContext,
@@ -138,8 +140,26 @@ pub struct ChatApp {
     pending_revert: Option<MessageId>,
     /// A `ThreadCheckpointRevert` is in flight.
     reverting: bool,
-    /// Activity (tool) rows expanded to show their payload detail.
-    expanded_activities: HashSet<String>,
+    /// Work rows expanded to show their payload detail (keyed by the derived
+    /// work-log entry id).
+    expanded_work_entries: HashSet<String>,
+    /// Derived work-log entries for the open thread (Electron's
+    /// `deriveWorkLogEntries`: started/context-window rows dropped, tool
+    /// lifecycle merged) — rebuilt with the timeline.
+    work_entries: Vec<WorkLogEntry>,
+    /// Side tables for the non-`Copy` timeline row kinds.
+    work_toggles: Vec<WorkToggleData>,
+    turn_folds: Vec<TurnFoldData>,
+    /// Settled turns the user re-expanded (Electron `expandedTurnIds`) and
+    /// overflow groups shown in full (`expandedWorkGroupIds`). Session-local,
+    /// like Electron's component state.
+    expanded_turn_ids: HashSet<String>,
+    expanded_work_groups: HashSet<String>,
+    /// Latest turn (id, state) last seen, driving the auto-fold lifecycle:
+    /// an interrupt expands its turn, a new turn folds the previous one.
+    prev_latest_turn: Option<(String, OrchestrationLatestTurnState)>,
+    /// 1s repaint task while a turn runs — the "Working for Ns" timer.
+    working_tick: Option<Task<()>>,
     /// Changed-files card state: persisted expansion (`~/.vitre/ui-state.json`)
     /// plus per-turn local UI (auto-expand decision, folder toggles).
     changed_files: changed_files::ChangedFilesState,
@@ -183,8 +203,18 @@ pub struct ChatApp {
     sidebar_resize: Entity<ResizableState>,
     /// Right-hand files panel (M2), hosting the dock's `files`/`file`
     /// surfaces. Kept alive while hidden so tree expansion and the open
-    /// buffer survive, recreated on project switch.
+    /// buffer survive; on project switch the panel is stashed in
+    /// `files_cache` and revived when the user returns (Electron's
+    /// listEntries atom cache serves a previously viewed root instantly).
     files: Option<Entity<FilesPanel>>,
+    /// Stashed panels of previously viewed workspace roots, keyed by cwd,
+    /// most recently used last. Bounded — Electron's atom cache evicts after
+    /// five idle minutes; Vitre keeps the last few roots instead.
+    files_cache: Vec<(String, Entity<FilesPanel>)>,
+    /// `${threadKey}|${surfaceId}` of the dock surface last seen active —
+    /// the activation edge on which the files listing revalidates (Electron
+    /// revalidates on the panel's remount when the surface is selected).
+    last_dock_active_surface: Option<String>,
     /// Header git controls (M3): the `subscribeVcsStatus` fold, quick-action/
     /// menu state, and the stacked-action progress pipeline.
     git: git_actions::GitState,
@@ -441,50 +471,28 @@ fn format_mention(path: &str) -> String {
     }
 }
 
-fn activity_icon(kind: &str) -> IconName {
-    if kind.contains("terminal") || kind.contains("bash") || kind.contains("shell") {
-        IconName::SquareTerminal
-    } else if kind.contains("web") || kind.contains("fetch") || kind.contains("url") {
-        IconName::Globe
-    } else if kind.contains("read") || kind.contains("view") || kind.contains("search") {
-        IconName::Eye
-    } else if kind.contains("edit") || kind.contains("write") || kind.contains("file") {
-        IconName::File
-    } else {
-        IconName::Settings2
+/// The lucide icon a work-log entry renders with (Electron
+/// `workEntryIconName`, mapped from name strings to the vendored assets).
+fn work_entry_icon(entry: &WorkLogEntry) -> Icon {
+    match work_log::work_entry_icon_name(entry) {
+        "message-circle" => Icon::new(VitreIcon::MessageCircle),
+        "terminal" => Icon::new(VitreIcon::Terminal),
+        "eye" => Icon::new(IconName::Eye),
+        "square-pen" => Icon::new(IconName::SquarePen),
+        "globe" => Icon::new(IconName::Globe),
+        "wrench" => Icon::new(VitreIcon::Wrench),
+        "hammer" => Icon::new(VitreIcon::Hammer),
+        "circle-alert" => Icon::new(VitreIcon::CircleAlert),
+        "bot" => Icon::new(IconName::Bot),
+        "check" => Icon::new(IconName::Check),
+        "x" => Icon::new(IconName::Close),
+        _ => Icon::new(VitreIcon::Zap),
     }
-}
-
-/// Expanded tool-row detail: a well-known string payload field when present
-/// (command/detail/preview/text/path), else the pretty-printed payload.
-fn activity_detail(activity: &OrchestrationThreadActivity) -> Option<String> {
-    const MAX_LEN: usize = 4000;
-    let payload = activity.payload.as_object()?;
-    if payload.is_empty() {
-        return None;
-    }
-    let text = ["command", "detail", "preview", "text", "path"]
-        .iter()
-        .find_map(|key| payload.get(*key).and_then(serde_json::Value::as_str))
-        .map(str::to_string)
-        .or_else(|| serde_json::to_string_pretty(&activity.payload).ok())?;
-    if text.trim().is_empty() {
-        return None;
-    }
-    let mut text = text;
-    if text.len() > MAX_LEN {
-        let mut end = MAX_LEN;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
-        text.push('…');
-    }
-    Some(text)
 }
 
 /// One row of the virtualized timeline: a position in the thread view's
-/// `messages` or `activities`, or the trailing typing indicator.
+/// `messages`, in the derived work log or its grouping side tables, or the
+/// trailing typing indicator.
 ///
 /// Rows hold indices rather than borrows so the order can be cached on the
 /// entity across frames; they are rebuilt whenever the view changes, which is
@@ -492,8 +500,32 @@ fn activity_detail(activity: &OrchestrationThreadActivity) -> Option<String> {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum TimelineRow {
     Message(usize),
-    Activity(usize),
+    /// Index into [`ChatApp::work_entries`].
+    Work(usize),
+    /// Index into [`ChatApp::work_toggles`].
+    WorkToggle(usize),
+    /// Index into [`ChatApp::turn_folds`].
+    TurnFold(usize),
     Running,
+}
+
+/// The "+N previous tool calls" overflow row of one consecutive-work group
+/// (Electron `WorkGroupToggleTimelineRow`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct WorkToggleData {
+    group_id: String,
+    hidden_count: usize,
+    expanded: bool,
+    only_tool_entries: bool,
+}
+
+/// The "Worked for …" row folding one settled turn (Electron
+/// `TurnFoldTimelineRow`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct TurnFoldData {
+    turn_id: String,
+    label: SharedString,
+    expanded: bool,
 }
 
 /// Overdraw roughly a viewport of rows so scrolling doesn't pop.
@@ -503,29 +535,6 @@ fn new_timeline_list() -> ListState {
     state
 }
 
-/// A turn's timeline interleaves messages and activity (tool) rows in
-/// creation order, exactly like the Electron `MessagesTimeline`, with the
-/// typing indicator as a trailing row so it participates in virtualization.
-fn timeline_rows(view: &OrchestrationThread, running: bool) -> Vec<TimelineRow> {
-    let mut entries: Vec<(&str, TimelineRow)> = view
-        .messages
-        .iter()
-        .enumerate()
-        .map(|(index, message)| (message.created_at.0.as_str(), TimelineRow::Message(index)))
-        .chain(view.activities.iter().enumerate().map(|(index, activity)| {
-            (activity.created_at.0.as_str(), TimelineRow::Activity(index))
-        }))
-        .collect();
-    // RFC3339 timestamps with fixed millisecond precision sort lexically. The
-    // sort is stable, so messages keep their lead over same-instant activities.
-    entries.sort_by(|a, b| a.0.cmp(b.0));
-    let mut rows: Vec<TimelineRow> = entries.into_iter().map(|(_, row)| row).collect();
-    if running {
-        rows.push(TimelineRow::Running);
-    }
-    rows
-}
-
 /// Fingerprint of everything in a row that changes its rendered height.
 ///
 /// `ListState` caches the height it measured for each row, so a row whose
@@ -533,13 +542,18 @@ fn timeline_rows(view: &OrchestrationThread, running: bool) -> Vec<TimelineRow> 
 /// expanding — keeps its stale height until it is explicitly remeasured.
 /// Comparing fingerprints is how [`ChatApp::rebuild_timeline`] finds those
 /// rows without remeasuring (and so re-laying-out) the whole thread.
+#[allow(clippy::too_many_arguments)]
 fn row_content_hash(
     view: &OrchestrationThread,
     row: TimelineRow,
     revert_turn_counts: &HashMap<MessageId, i64>,
-    expanded_activities: &HashSet<String>,
+    expanded_work_entries: &HashSet<String>,
     thread_key: Option<&str>,
     changed_files: &changed_files::ChangedFilesState,
+    work_entries: &[WorkLogEntry],
+    work_toggles: &[WorkToggleData],
+    turn_folds: &[TurnFoldData],
+    workspace_root: Option<&str>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     match row {
@@ -559,21 +573,44 @@ fn row_content_hash(
                 changed_files.hash_card(&mut hasher, thread_key, view, &message.id);
             }
         }
-        TimelineRow::Activity(index) => {
-            let Some(activity) = view.activities.get(index) else {
+        TimelineRow::Work(index) => {
+            let Some(entry) = work_entries.get(index) else {
                 return 0;
             };
             1u8.hash(&mut hasher);
-            activity.id.0.hash(&mut hasher);
-            activity.summary.0.hash(&mut hasher);
-            let expanded = expanded_activities.contains(&activity.id.0);
+            entry.id.hash(&mut hasher);
+            work_log::work_entry_heading(entry).hash(&mut hasher);
+            work_log::work_entry_preview(entry).hash(&mut hasher);
+            let expanded = expanded_work_entries.contains(&entry.id);
             expanded.hash(&mut hasher);
+            let body = work_log::build_tool_call_expanded_body(entry, workspace_root);
             if expanded {
-                activity_detail(activity).hash(&mut hasher);
+                body.hash(&mut hasher);
             } else {
-                activity_detail(activity).is_some().hash(&mut hasher);
+                body.is_some().hash(&mut hasher);
             }
         }
+        TimelineRow::WorkToggle(index) => {
+            let Some(toggle) = work_toggles.get(index) else {
+                return 0;
+            };
+            3u8.hash(&mut hasher);
+            toggle.group_id.hash(&mut hasher);
+            toggle.hidden_count.hash(&mut hasher);
+            toggle.expanded.hash(&mut hasher);
+            toggle.only_tool_entries.hash(&mut hasher);
+        }
+        TimelineRow::TurnFold(index) => {
+            let Some(fold) = turn_folds.get(index) else {
+                return 0;
+            };
+            4u8.hash(&mut hasher);
+            fold.turn_id.hash(&mut hasher);
+            fold.label.hash(&mut hasher);
+            fold.expanded.hash(&mut hasher);
+        }
+        // Constant: the ticking "Working for Ns" text never changes the
+        // row's height, so it must not trigger remeasures.
         TimelineRow::Running => 2u8.hash(&mut hasher),
     }
     hasher.finish()
@@ -749,7 +786,14 @@ impl ChatApp {
                 .ok()
                 .filter(|value| !value.is_empty()),
             reverting: false,
-            expanded_activities: HashSet::new(),
+            expanded_work_entries: HashSet::new(),
+            work_entries: Vec::new(),
+            work_toggles: Vec::new(),
+            turn_folds: Vec::new(),
+            expanded_turn_ids: HashSet::new(),
+            expanded_work_groups: HashSet::new(),
+            prev_latest_turn: None,
+            working_tick: None,
             timeline_list: new_timeline_list(),
             timeline: Vec::new(),
             timeline_hashes: Vec::new(),
@@ -761,6 +805,8 @@ impl ChatApp {
             project_grouping: None,
             sidebar_resize,
             files: None,
+            files_cache: Vec::new(),
+            last_dock_active_surface: None,
             git: git_actions::GitState::default(),
             branch: branch_toolbar::BranchToolbarState::new(window, cx),
             diff: None,
@@ -981,19 +1027,45 @@ impl ChatApp {
         }
     }
 
-    /// Create (or recreate, when the open thread's project changed) the files
-    /// panel for the active workspace root.
+    /// Create (or swap in, when the open thread's project changed) the files
+    /// panel for the active workspace root. Panels of previously viewed
+    /// roots are stashed rather than dropped, so switching back shows the
+    /// old tree instantly and revalidates in the background — Electron's
+    /// listEntries atom cache behaves the same way.
     fn ensure_files_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        /// How many background roots to keep warm (each holds a watch loop).
+        const FILES_CACHE_ROOTS: usize = 4;
         let (Some(client), Some(cwd)) = (self.client.clone(), self.search_root()) else {
             return;
         };
-        let stale = self
+        if self
             .files
             .as_ref()
-            .is_none_or(|panel| panel.read(cx).cwd() != cwd);
-        if stale {
-            self.files = Some(cx.new(|cx| FilesPanel::new(client, cwd, window, cx)));
+            .is_some_and(|panel| panel.read(cx).cwd() == cwd)
+        {
+            return;
         }
+        if let Some(previous) = self.files.take() {
+            let previous_cwd = previous.read(cx).cwd().to_string();
+            self.files_cache.retain(|(key, _)| key != &previous_cwd);
+            self.files_cache.push((previous_cwd, previous));
+            if self.files_cache.len() > FILES_CACHE_ROOTS {
+                self.files_cache.remove(0);
+            }
+        }
+        let revived = self
+            .files_cache
+            .iter()
+            .position(|(key, _)| key == &cwd)
+            .map(|index| self.files_cache.remove(index).1);
+        let panel = match revived {
+            Some(panel) => {
+                panel.update(cx, |panel, cx| panel.revalidate_if_stale(cx));
+                panel
+            }
+            None => cx.new(|cx| FilesPanel::new(client, cwd, window, cx)),
+        };
+        self.files = Some(panel);
     }
 
     /// Create (or recreate, when the dock's thread key or git root changed)
@@ -2265,6 +2337,10 @@ impl ChatApp {
             self.timeline = Vec::new();
             self.timeline_hashes = Vec::new();
             self.revert_turn_counts = HashMap::new();
+            self.work_entries = Vec::new();
+            self.work_toggles = Vec::new();
+            self.turn_folds = Vec::new();
+            self.working_tick = None;
             self.timeline_list.reset(0);
             cx.notify();
             return;
@@ -2274,7 +2350,125 @@ impl ChatApp {
             .session
             .as_ref()
             .is_some_and(|session| session.status == OrchestrationSessionStatus::Running);
-        let rows = timeline_rows(view, running);
+
+        // Auto-fold lifecycle (Electron MessagesTimeline's expandedTurnIds
+        // effect): an interrupt leaves its turn expanded; a NEW latest turn
+        // folds the previous one.
+        if let Some(latest) = view.latest_turn.as_ref() {
+            let latest_id = latest.turn_id.0.clone();
+            match &self.prev_latest_turn {
+                Some((previous_id, _)) if *previous_id != latest_id => {
+                    let previous_id = previous_id.clone();
+                    self.expanded_turn_ids.remove(&previous_id);
+                }
+                Some((_, previous_state))
+                    if *previous_state == OrchestrationLatestTurnState::Running
+                        && latest.state == OrchestrationLatestTurnState::Interrupted =>
+                {
+                    self.expanded_turn_ids.insert(latest_id.clone());
+                }
+                _ => {}
+            }
+            self.prev_latest_turn = Some((latest_id, latest.state.clone()));
+        }
+
+        // The Electron derive pipeline: activities → filtered/merged work-log
+        // entries → rows with turn folds and "+N previous" overflow groups.
+        self.work_entries = work_log::derive_work_log_entries(&view.activities);
+        let running_turn_id: Option<String> = view
+            .session
+            .as_ref()
+            .filter(|session| session.status == OrchestrationSessionStatus::Running)
+            .and_then(|session| session.active_turn_id.as_ref())
+            .map(|turn| turn.0.clone());
+        let derived = work_log::derive_timeline_rows(&TimelineDeriveInput {
+            messages: &view.messages,
+            work_entries: &self.work_entries,
+            latest_turn: view.latest_turn.as_ref(),
+            running_turn_id: running_turn_id.as_deref(),
+            expanded_turn_ids: &self.expanded_turn_ids,
+            expanded_work_group_ids: &self.expanded_work_groups,
+            is_working: running,
+        });
+        let mut rows = Vec::with_capacity(derived.len());
+        let mut work_toggles = Vec::new();
+        let mut turn_folds = Vec::new();
+        for row in derived {
+            match row {
+                DerivedTimelineRow::Message { message_index } => {
+                    rows.push(TimelineRow::Message(message_index));
+                }
+                DerivedTimelineRow::Work { entry_index } => {
+                    rows.push(TimelineRow::Work(entry_index));
+                }
+                DerivedTimelineRow::WorkToggle {
+                    group_id,
+                    hidden_count,
+                    expanded,
+                    only_tool_entries,
+                } => {
+                    rows.push(TimelineRow::WorkToggle(work_toggles.len()));
+                    work_toggles.push(WorkToggleData {
+                        group_id,
+                        hidden_count,
+                        expanded,
+                        only_tool_entries,
+                    });
+                }
+                DerivedTimelineRow::TurnFold {
+                    turn_id,
+                    label,
+                    expanded,
+                } => {
+                    rows.push(TimelineRow::TurnFold(turn_folds.len()));
+                    turn_folds.push(TurnFoldData {
+                        turn_id,
+                        label: label.into(),
+                        expanded,
+                    });
+                }
+                DerivedTimelineRow::Working => rows.push(TimelineRow::Running),
+            }
+        }
+        self.work_toggles = work_toggles;
+        self.turn_folds = turn_folds;
+
+        // The "Working for Ns" timer repaints once a second while a turn
+        // runs; the row's height never changes, so a bare notify suffices
+        // (list heights are cached by content hash, and Running hashes
+        // constant).
+        if running {
+            if self.working_tick.is_none() {
+                self.working_tick = Some(cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_secs(1))
+                            .await;
+                        let keep = this
+                            .update(cx, |this, cx| {
+                                let running = this
+                                    .thread
+                                    .as_ref()
+                                    .and_then(|open| open.state.view.as_ref())
+                                    .and_then(|view| view.session.as_ref())
+                                    .is_some_and(|session| {
+                                        session.status == OrchestrationSessionStatus::Running
+                                    });
+                                if running {
+                                    cx.notify();
+                                }
+                                running
+                            })
+                            .unwrap_or(false);
+                        if !keep {
+                            break;
+                        }
+                    }
+                }));
+            }
+        } else {
+            self.working_tick = None;
+        }
 
         // Revert targets: a user message reverts to the checkpoint BEFORE the
         // next assistant turn's checkpoint (`checkpointTurnCount - 1`) —
@@ -2317,6 +2511,7 @@ impl ChatApp {
         }
 
         let thread_key = self.dock_thread_key();
+        let workspace_root = self.search_root();
         let hashes = rows
             .iter()
             .map(|row| {
@@ -2324,9 +2519,13 @@ impl ChatApp {
                     view,
                     *row,
                     &self.revert_turn_counts,
-                    &self.expanded_activities,
+                    &self.expanded_work_entries,
                     thread_key.as_deref(),
                     &self.changed_files,
+                    &self.work_entries,
+                    &self.work_toggles,
+                    &self.turn_folds,
+                    workspace_root.as_deref(),
                 )
             })
             .collect();
@@ -2369,6 +2568,7 @@ impl ChatApp {
         };
         // Keep the fingerprint in step, or the next rebuild remeasures again.
         let thread_key = self.dock_thread_key();
+        let workspace_root = self.search_root();
         let hash = self
             .thread
             .as_ref()
@@ -2378,9 +2578,13 @@ impl ChatApp {
                     view,
                     row,
                     &self.revert_turn_counts,
-                    &self.expanded_activities,
+                    &self.expanded_work_entries,
                     thread_key.as_deref(),
                     &self.changed_files,
+                    &self.work_entries,
+                    &self.work_toggles,
+                    &self.turn_folds,
+                    workspace_root.as_deref(),
                 )
             });
         if let Some(hash) = hash {
@@ -2525,106 +2729,337 @@ impl ChatApp {
                         column.into_any_element()
                     }
                 }
-                TimelineRow::Activity(activity_index) => {
-                    let Some(activity) = view.activities.get(activity_index) else {
+                // Electron `SimpleWorkEntryRow`: icon, heading+preview split,
+                // trailing chevron + status glyph, click-to-expand mono body.
+                TimelineRow::Work(entry_index) => {
+                    let Some(entry) = self.work_entries.get(entry_index) else {
                         return div().into_any_element();
                     };
-                    let tone_color = match activity.tone {
-                        OrchestrationThreadActivityTone::Error => cx.theme().danger,
-                        OrchestrationThreadActivityTone::Approval => cx.theme().warning,
-                        _ => cx.theme().foreground.opacity(0.82),
+                    let heading = work_log::work_entry_heading(entry);
+                    let preview = work_log::work_entry_preview(entry)
+                        .filter(|preview| !preview.eq_ignore_ascii_case(&heading));
+                    let failed = work_log::work_entry_indicates_tool_failure(entry);
+                    let success = work_log::work_entry_indicates_tool_success(entry);
+                    let neutral = work_log::work_entry_indicates_tool_neutral_status(entry);
+                    // Electron: activeTurnInProgress = isWorking || the latest
+                    // turn is not settled yet.
+                    let turn_settled = !(running
+                        || view.latest_turn.as_ref().is_some_and(|latest| {
+                            latest.completed_at.is_none()
+                                || latest.state == OrchestrationLatestTurnState::Running
+                        }));
+                    let warning = entry.kind == "runtime.warning";
+                    let destructive = entry.kind == "runtime.error";
+                    let heading_color = if warning {
+                        cx.theme().warning
+                    } else if destructive {
+                        cx.theme().danger
+                    } else {
+                        cx.theme().foreground.opacity(0.82)
                     };
-                    let expanded = self.expanded_activities.contains(&activity.id.0);
-                    let detail = activity_detail(activity);
-                    let activity_id = activity.id.0.clone();
-                    let mut block = v_flex().child(
-                        h_flex()
-                            .id(SharedString::from(format!("act-{}", activity.id.0)))
-                            .px_0p5()
-                            .py_0p5()
-                            .gap_1p5()
-                            .items_center()
-                            .rounded(cx.theme().radius)
-                            .when(detail.is_some(), |this| {
-                                this.cursor_pointer()
-                                    .hover(|style| style.bg(cx.theme().secondary))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if !this.expanded_activities.remove(&activity_id) {
-                                            this.expanded_activities.insert(activity_id.clone());
-                                        }
-                                        // Local UI state, so `rebuild_timeline`
-                                        // never runs — remeasure by hand or the
-                                        // detail block renders into the collapsed
-                                        // row's cached height.
-                                        this.remeasure_row(index, cx);
-                                    }))
-                            })
-                            .child(
-                                Icon::new(activity_icon(&activity.kind.0))
+                    let icon_color = if warning || destructive {
+                        cx.theme().danger
+                    } else if entry.tone == OrchestrationThreadActivityTone::Tool || failed {
+                        cx.theme().muted_foreground.opacity(0.65)
+                    } else if entry.tone == OrchestrationThreadActivityTone::Info
+                        || entry.tone == OrchestrationThreadActivityTone::Approval
+                    {
+                        cx.theme().muted_foreground
+                    } else {
+                        cx.theme().foreground.opacity(0.92)
+                    };
+                    let workspace_root = self.search_root();
+                    let body =
+                        work_log::build_tool_call_expanded_body(entry, workspace_root.as_deref());
+                    let expanded = self.expanded_work_entries.contains(&entry.id);
+                    let entry_id = entry.id.clone();
+                    let mut line = h_flex()
+                        .id(SharedString::from(format!("work-{}", entry.id)))
+                        .px_0p5()
+                        .py_0p5()
+                        .gap_1p5()
+                        .items_center()
+                        .rounded(cx.theme().radius)
+                        .when(body.is_some(), |this| {
+                            this.cursor_pointer()
+                                .hover(|style| style.bg(cx.theme().accent.opacity(0.2)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if !this.expanded_work_entries.remove(&entry_id) {
+                                        this.expanded_work_entries.insert(entry_id.clone());
+                                    }
+                                    // Local UI state, so `rebuild_timeline`
+                                    // never runs — remeasure by hand or the
+                                    // body renders into the collapsed row's
+                                    // cached height.
+                                    this.remeasure_row(index, cx);
+                                }))
+                        })
+                        .child(
+                            h_flex().size_5().flex_shrink_0().justify_center().child(
+                                work_entry_icon(entry)
                                     .size_3p5()
-                                    .text_color(cx.theme().muted_foreground.opacity(0.8)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .font_medium()
-                                    .text_color(tone_color)
-                                    .truncate()
-                                    .child(SharedString::from(activity.summary.0.clone())),
+                                    .text_color(icon_color)
+                                    .opacity(0.8),
                             ),
-                    );
-                    if expanded && let Some(detail) = detail {
-                        // Electron parity: expanded tool detail is 11px
-                        // mono under the row.
+                        )
+                        .child(
+                            h_flex()
+                                .min_w_0()
+                                .flex_1()
+                                .gap_1p5()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(12.))
+                                        .font_medium()
+                                        .text_color(heading_color)
+                                        .child(SharedString::from(heading)),
+                                )
+                                .children(preview.map(|preview| {
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .truncate()
+                                        .text_size(px(12.))
+                                        .text_color(cx.theme().muted_foreground.opacity(0.55))
+                                        .child(SharedString::from(preview))
+                                })),
+                        );
+                    if body.is_some() {
+                        line = line.child(
+                            h_flex().size_4().flex_shrink_0().justify_center().child(
+                                Icon::new(if expanded {
+                                    IconName::ChevronUp
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .size_3()
+                                .text_color(cx.theme().foreground.opacity(0.7)),
+                            ),
+                        );
+                    }
+                    // Status glyph (Electron's trailing cluster): X = failed,
+                    // check = succeeded (or settled neutral), minus = still
+                    // empty while the turn is active.
+                    let status: Option<(Icon, &str)> = if failed {
+                        Some((
+                            Icon::new(IconName::Close).text_color(cx.theme().danger),
+                            "Failed",
+                        ))
+                    } else if success || (turn_settled && neutral) {
+                        Some((Icon::new(IconName::Check), "Completed"))
+                    } else if neutral {
+                        Some((
+                            Icon::new(IconName::Minus)
+                                .text_color(cx.theme().foreground.opacity(0.7)),
+                            "Empty",
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Some((icon, tooltip)) = status {
+                        line = line.child(
+                            div()
+                                .id(SharedString::from(format!("work-status-{}", entry.id)))
+                                .flex_shrink_0()
+                                .tooltip(move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(tooltip).build(window, cx)
+                                })
+                                .child(icon.size_3()),
+                        );
+                    }
+                    let mut block = v_flex().child(line);
+                    if expanded && let Some(body) = body {
+                        // Electron: `ms-7 border-s ps-3` guide line, 11px mono
+                        // payload capped at max-h-64.
                         block = block.child(
                             div()
-                                .id(SharedString::from(format!("act-detail-{}", activity.id.0)))
-                                .ml_5()
-                                .mt_0p5()
-                                .max_h(px(240.))
-                                .overflow_y_scroll()
-                                .rounded(cx.theme().radius)
-                                .bg(cx.theme().secondary)
-                                .px_2p5()
-                                .py_2()
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .whitespace_normal()
-                                .child(SharedString::from(detail)),
+                                .ml_7()
+                                .mt_1()
+                                .pl_3()
+                                .pt_0p5()
+                                .border_l_1()
+                                .border_color(cx.theme().border.opacity(0.45))
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("work-body-{}", entry.id)))
+                                        .max_h(px(256.))
+                                        .overflow_y_scroll()
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .text_size(px(11.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .whitespace_normal()
+                                        .child(SharedString::from(body)),
+                                ),
                         );
                     }
                     block.into_any_element()
                 }
-                TimelineRow::Running => (h_flex()
-                    .gap_1p5()
-                    .items_center()
-                    .px_0p5()
-                    .py_1()
-                    .child(h_flex().gap_1().children((0..3).map(|_| {
-                        div()
-                            .size(px(4.))
-                            .rounded_full()
-                            .bg(cx.theme().muted_foreground.opacity(0.3))
-                    })))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground.opacity(0.7))
-                            .child("Working…"),
-                    ))
-                .into_any_element(),
+                // Electron `WorkGroupToggleTimelineRow`: "+N previous tool
+                // calls" / "Show fewer tool calls".
+                TimelineRow::WorkToggle(toggle_index) => {
+                    let Some(toggle) = self.work_toggles.get(toggle_index) else {
+                        return div().into_any_element();
+                    };
+                    let label = if toggle.expanded {
+                        format!(
+                            "Show fewer {}",
+                            if toggle.only_tool_entries {
+                                "tool calls"
+                            } else {
+                                "log entries"
+                            }
+                        )
+                    } else {
+                        let noun = match (toggle.only_tool_entries, toggle.hidden_count == 1) {
+                            (true, true) => "tool call",
+                            (true, false) => "tool calls",
+                            (false, true) => "log entry",
+                            (false, false) => "log entries",
+                        };
+                        format!("+{} previous {}", toggle.hidden_count, noun)
+                    };
+                    let group_id = toggle.group_id.clone();
+                    let expanded = toggle.expanded;
+                    h_flex()
+                        .id(SharedString::from(format!(
+                            "work-toggle-{}",
+                            toggle.group_id
+                        )))
+                        .w_full()
+                        .gap_1p5()
+                        .px_0p5()
+                        .py_0p5()
+                        .rounded(cx.theme().radius)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(cx.theme().accent.opacity(0.2)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.expanded_work_groups.remove(&group_id) {
+                                this.expanded_work_groups.insert(group_id.clone());
+                            }
+                            this.rebuild_timeline(cx);
+                        }))
+                        .child(
+                            h_flex().size_5().flex_shrink_0().justify_center().child(
+                                Icon::new(if expanded {
+                                    IconName::ChevronUp
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .size_3p5()
+                                .text_color(cx.theme().foreground.opacity(0.7)),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .font_medium()
+                                .text_color(cx.theme().foreground.opacity(0.82))
+                                .child(SharedString::from(label)),
+                        )
+                        .into_any_element()
+                }
+                // Electron `TurnFoldTimelineRow`: "Worked for …" with a
+                // chevron, bottom-ruled.
+                TimelineRow::TurnFold(fold_index) => {
+                    let Some(fold) = self.turn_folds.get(fold_index) else {
+                        return div().into_any_element();
+                    };
+                    let turn_id = fold.turn_id.clone();
+                    let expanded = fold.expanded;
+                    div()
+                        .w_full()
+                        .border_b_1()
+                        .border_color(cx.theme().border.opacity(0.6))
+                        .pb_2()
+                        .pt_1()
+                        .child(
+                            h_flex()
+                                .id(SharedString::from(format!("turn-fold-{}", fold.turn_id)))
+                                .gap_1()
+                                .px_1()
+                                .rounded(cx.theme().radius)
+                                .text_size(px(12.))
+                                .text_color(cx.theme().muted_foreground)
+                                .cursor_pointer()
+                                .hover(|style| style.text_color(cx.theme().foreground))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if !this.expanded_turn_ids.remove(&turn_id) {
+                                        this.expanded_turn_ids.insert(turn_id.clone());
+                                    }
+                                    this.rebuild_timeline(cx);
+                                }))
+                                .child(div().child(fold.label.clone()))
+                                .child(
+                                    Icon::new(if expanded {
+                                        IconName::ChevronDown
+                                    } else {
+                                        IconName::ChevronRight
+                                    })
+                                    .size_3p5(),
+                                ),
+                        )
+                        .into_any_element()
+                }
+                TimelineRow::Running => {
+                    // Electron `WorkingTimelineRow`: pulsing dots + a ticking
+                    // "Working for Ns" (`working_tick` repaints each second).
+                    let label = view
+                        .latest_turn
+                        .as_ref()
+                        .map(|latest| latest.started_at.as_ref().unwrap_or(&latest.requested_at))
+                        .and_then(|start| chrono::DateTime::parse_from_rfc3339(&start.0).ok())
+                        .map(|start| {
+                            let elapsed = chrono::Utc::now()
+                                .signed_duration_since(start)
+                                .num_milliseconds()
+                                .max(0);
+                            format!("Working for {}", work_log::format_duration(elapsed))
+                        })
+                        .unwrap_or_else(|| "Working…".into());
+                    (h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .px_0p5()
+                        .py_1()
+                        .child(h_flex().gap_1().children((0..3).map(|_| {
+                            div()
+                                .size(px(4.))
+                                .rounded_full()
+                                .bg(cx.theme().muted_foreground.opacity(0.3))
+                        })))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground.opacity(0.7))
+                                .child(SharedString::from(label)),
+                        ))
+                    .into_any_element()
+                }
             }
         })();
-        // The old column's `gap_2` becomes per-row padding now that rows are
-        // independent elements; `max_w` keeps the web timeline's centred measure.
+        // Per-row bottom padding (Electron `TimelineRowContent`: pb-2 for
+        // work/work-toggle rows, pb-4 otherwise); `max_w` keeps the web
+        // timeline's centred measure. `list()` lays each row out as its own
+        // layout root, where auto margins resolve to zero — centre with a
+        // flex parent instead of `mx_auto`.
+        let bottom_padding = match row {
+            TimelineRow::Work(_) | TimelineRow::WorkToggle(_) => px(8.),
+            _ => px(16.),
+        };
         div()
             .w_full()
-            .max_w(px(768.))
-            .mx_auto()
-            .px_5()
-            .py_1()
-            .child(body)
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(768.))
+                    .px_5()
+                    .pb(bottom_padding)
+                    .child(body),
+            )
             .into_any_element()
     }
 
@@ -3138,6 +3573,11 @@ impl Render for ChatApp {
         let dock_key = self.dock_open().then(|| self.dock_thread_key()).flatten();
         if dock_key.is_some() {
             self.sync_active_file_surface(false, window, cx);
+        } else {
+            // Closing the dock resets the activation edge, so reopening it
+            // revalidates the files listing (Electron: the panel unmounts
+            // with the dock and revalidates on remount).
+            self.last_dock_active_surface = None;
         }
         // The drawer clamps its height against the live viewport; render_chat
         // has no Window, so the frame's height is captured here.

@@ -40,7 +40,7 @@ use vitre_contracts::{
     ProjectWatchStreamEvent, ProjectWriteFileInput, TrimmedNonEmptyString, VcsFileStatusEntry,
     VcsFileStatusesInput,
 };
-use vitre_rpc::{TypedError, TypedStreamEvent};
+use vitre_rpc::{RpcError, TypedError, TypedStreamEvent};
 use vitre_state::file_buffer::{BufferConflict, DiskChange, FileBuffer};
 use vitre_state::file_tree::{FileTreeModel, FileTreeRow};
 use vitre_state::vcs_tree_status::{TreeVcsDecorations, TreeVcsStatus, build_tree_vcs_decorations};
@@ -154,6 +154,14 @@ pub struct FilesPanel {
     pending_reveal: Option<(String, WirePosition)>,
     /// Bumped on every open/close; async completions for an older file drop.
     open_generation: u64,
+    /// Bumped per listing request; completions for an older request drop.
+    list_generation: u64,
+    /// True while a listing request is running (spares re-entrant
+    /// revalidates from activation edges).
+    listing_in_flight: bool,
+    /// When the last successful listing landed — the SWR staleness input
+    /// (Electron: the listEntries atom's `staleTimeMs: 30_000`).
+    listed_at: Option<std::time::Instant>,
     status: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
@@ -229,6 +237,9 @@ impl FilesPanel {
             diagnostics: HashMap::new(),
             pending_reveal: None,
             open_generation: 0,
+            list_generation: 0,
+            listing_in_flight: false,
+            listed_at: None,
             status: None,
             _subscriptions: subscriptions,
         };
@@ -245,36 +256,102 @@ impl FilesPanel {
 
     /// Re-list entries; on completion also refresh VCS so untracked-directory
     /// expansion sees the tree paths.
+    ///
+    /// Electron gates the listing on the environment being connected (the
+    /// query atom is `Effect.never` until the supervisor phase is
+    /// "connected", and re-executes on a new connection generation). A fetch
+    /// issued before the session exists therefore WAITS for it — without
+    /// this, a Files surface restored at app boot failed instantly with
+    /// `ConnectionClosed` and sat on "Loading files…" until a manual refresh.
     fn refresh_tree(&mut self, cx: &mut Context<Self>) {
+        self.list_generation += 1;
+        self.listing_in_flight = true;
+        let generation = self.list_generation;
         let client = self.client.clone();
         let payload = ProjectListEntriesInput {
             cwd: tnes(&self.cwd),
         };
-        cx.spawn(
-            async move |this, cx| match client.call::<ProjectsListEntries>(&payload).await {
-                Ok(result) => {
-                    let _ = this.update(cx, |panel, cx| {
-                        panel.tree_paths = result
-                            .entries
-                            .iter()
-                            .map(|entry| entry.path.0.clone())
-                            .collect();
-                        panel.tree = Some(FileTreeModel::build(&result.entries));
-                        panel.tree_truncated = result.truncated;
-                        panel.rebuild_decorations();
-                        panel.refresh_vcs(cx);
-                        cx.notify();
-                    });
+        cx.spawn(async move |this, cx| {
+            let mut sessions = client.sessions();
+            loop {
+                if sessions
+                    .wait_for(|session| session.is_some())
+                    .await
+                    .is_err()
+                {
+                    return;
                 }
-                Err(error) => {
-                    let _ = this.update(cx, |panel, cx| {
-                        panel.status = Some(format!("listEntries failed: {error}").into());
-                        cx.notify();
-                    });
+                let outcome = client.call::<ProjectsListEntries>(&payload).await;
+                let stale = this
+                    .read_with(cx, |panel, _| panel.list_generation != generation)
+                    .unwrap_or(true);
+                if stale {
+                    return;
                 }
-            },
-        )
+                match outcome {
+                    Ok(result) => {
+                        let _ = this.update(cx, |panel, cx| {
+                            panel.listing_in_flight = false;
+                            panel.listed_at = Some(std::time::Instant::now());
+                            if panel
+                                .status
+                                .as_deref()
+                                .is_some_and(|status| status.starts_with("listEntries failed"))
+                            {
+                                panel.status = None;
+                            }
+                            panel.tree_paths = result
+                                .entries
+                                .iter()
+                                .map(|entry| entry.path.0.clone())
+                                .collect();
+                            panel.tree = Some(FileTreeModel::build(&result.entries));
+                            panel.tree_truncated = result.truncated;
+                            panel.rebuild_decorations();
+                            panel.refresh_vcs(cx);
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    // The session died between the gate and the call — wait
+                    // for the next connection and retry, like Electron's
+                    // per-connection-generation query re-execution.
+                    Err(TypedError::Rpc(
+                        RpcError::ConnectionClosed | RpcError::Ws(_) | RpcError::Transport(_),
+                    )) => {
+                        if sessions.changed().await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = this.update(cx, |panel, cx| {
+                            panel.listing_in_flight = false;
+                            panel.status = Some(format!("listEntries failed: {error}").into());
+                            cx.notify();
+                        });
+                        return;
+                    }
+                }
+            }
+        })
         .detach();
+    }
+
+    /// Refetch the listing when it is missing or older than 30 seconds,
+    /// keeping the current tree rendered meanwhile — the Electron SWR
+    /// semantics (`staleTime: 30_000`, `revalidateOnMount: true`) applied on
+    /// surface activation instead of React remount.
+    pub fn revalidate_if_stale(&mut self, cx: &mut Context<Self>) {
+        const TREE_STALE_AFTER: Duration = Duration::from_secs(30);
+        if self.listing_in_flight {
+            return;
+        }
+        if self
+            .listed_at
+            .is_none_or(|at| at.elapsed() >= TREE_STALE_AFTER)
+        {
+            self.refresh_tree(cx);
+        }
     }
 
     fn refresh_vcs(&mut self, cx: &mut Context<Self>) {

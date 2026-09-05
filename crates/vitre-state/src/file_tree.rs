@@ -57,14 +57,64 @@ fn normalize(path: &str) -> &str {
     path.strip_suffix('/').unwrap_or(path)
 }
 
-/// Directories before files, then case-insensitive alphabetical, ties broken
-/// case-sensitively. Flattened chains sort by their top segment's name (the
-/// chain is a single child node of its parent in the underlying tree).
+/// Directories before files, then case-insensitive NATURAL name order (digit
+/// runs compare numerically, so `file2` precedes `file10`), ties broken by
+/// the full lowercase compare and then case-sensitively — the sort
+/// `@pierre/trees` applies in Electron (`comparePreparedEntries` /
+/// `createSegmentSortKey`). Flattened chains sort by their top segment's
+/// name (the chain is a single child node of its parent in the tree).
 fn cmp_siblings(a: &Node, b: &Node) -> std::cmp::Ordering {
     b.is_dir
         .cmp(&a.is_dir)
+        .then_with(|| cmp_natural_ci(&a.name, &b.name))
         .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         .then_with(|| a.name.cmp(&b.name))
+}
+
+/// Case-insensitive natural comparison: names split into alternating
+/// non-digit / digit token runs; digit runs compare by numeric value (longer
+/// run of equal value ≙ leading zeros — falls through to the lowercase
+/// tiebreak above), other runs compare lexically on the lowercased text.
+fn cmp_natural_ci(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut a_chars = a.chars().flat_map(char::to_lowercase).peekable();
+    let mut b_chars = b.chars().flat_map(char::to_lowercase).peekable();
+    loop {
+        match (a_chars.peek().copied(), b_chars.peek().copied()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                if x.is_ascii_digit() && y.is_ascii_digit() {
+                    // Compare the whole digit runs numerically. The values
+                    // accumulate like the JS tokenizer's `value*10 + digit`;
+                    // u128 gives headroom far past any real file name.
+                    let mut a_value: u128 = 0;
+                    while let Some(digit) = a_chars.peek().and_then(|c| c.to_digit(10)) {
+                        a_value = a_value.saturating_mul(10).saturating_add(u128::from(digit));
+                        a_chars.next();
+                    }
+                    let mut b_value: u128 = 0;
+                    while let Some(digit) = b_chars.peek().and_then(|c| c.to_digit(10)) {
+                        b_value = b_value.saturating_mul(10).saturating_add(u128::from(digit));
+                        b_chars.next();
+                    }
+                    match a_value.cmp(&b_value) {
+                        Ordering::Equal => {}
+                        unequal => return unequal,
+                    }
+                } else {
+                    match x.cmp(&y) {
+                        Ordering::Equal => {
+                            a_chars.next();
+                            b_chars.next();
+                        }
+                        unequal => return unequal,
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Inserts `path` (and any missing ancestors, synthesized as directories) and
@@ -326,6 +376,25 @@ mod tests {
             vec!["Docs", "src", "Alpha.txt", "Apple", "apple", "zeta.txt"]
         );
         assert!(rows.iter().all(|r| r.depth == 0));
+    }
+
+    #[test]
+    fn sibling_sort_is_natural_numeric() {
+        let model = FileTreeModel::build(&[
+            file("file10.txt"),
+            file("file2.txt"),
+            file("file1.txt"),
+            file("2.log"),
+            file("10.log"),
+        ]);
+        let rows = model.visible_rows(&HashSet::new());
+        let names: Vec<&str> = rows.iter().map(|r| r.display_name.as_str()).collect();
+        // Digit runs compare numerically (Electron's @pierre/trees natural
+        // sort): 2 < 10, file2 < file10.
+        assert_eq!(
+            names,
+            vec!["2.log", "10.log", "file1.txt", "file2.txt", "file10.txt"]
+        );
     }
 
     #[test]

@@ -16,6 +16,10 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../icons/chevrons-down-up.svg"),
     ),
     (
+        "icons/circle-alert.svg",
+        include_bytes!("../icons/circle-alert.svg"),
+    ),
+    (
         "icons/cloud-upload.svg",
         include_bytes!("../icons/cloud-upload.svg"),
     ),
@@ -90,6 +94,7 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../icons/wrap-text.svg"),
     ),
     ("icons/wrench.svg", include_bytes!("../icons/wrench.svg")),
+    ("icons/zap.svg", include_bytes!("../icons/zap.svg")),
 ];
 
 impl AssetSource for VitreAssets {
@@ -112,6 +117,7 @@ impl AssetSource for VitreAssets {
 pub enum VitreIcon {
     Bug,
     ChevronsDownUp,
+    CircleAlert,
     CloudUpload,
     Columns2,
     Download,
@@ -136,6 +142,7 @@ pub enum VitreIcon {
     Trash2,
     WrapText,
     Wrench,
+    Zap,
 }
 
 impl IconNamed for VitreIcon {
@@ -143,6 +150,7 @@ impl IconNamed for VitreIcon {
         match self {
             Self::Bug => "icons/bug.svg".into(),
             Self::ChevronsDownUp => "icons/chevrons-down-up.svg".into(),
+            Self::CircleAlert => "icons/circle-alert.svg".into(),
             Self::CloudUpload => "icons/cloud-upload.svg".into(),
             Self::Columns2 => "icons/columns-2.svg".into(),
             Self::Download => "icons/download.svg".into(),
@@ -167,6 +175,7 @@ impl IconNamed for VitreIcon {
             Self::Trash2 => "icons/trash-2.svg".into(),
             Self::WrapText => "icons/wrap-text.svg".into(),
             Self::Wrench => "icons/wrench.svg".into(),
+            Self::Zap => "icons/zap.svg".into(),
         }
     }
 }

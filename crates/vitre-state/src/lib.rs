@@ -46,6 +46,7 @@ pub mod thread_sync;
 pub mod turn_diff_tree;
 pub mod vcs_tree_status;
 pub mod wire_opt;
+pub mod work_log;
 pub mod worktree_cleanup;
 
 pub use shell::apply_shell_stream_event;
