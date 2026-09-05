@@ -23,7 +23,13 @@ import * as Schema from "effect/Schema";
 
 import type { ProjectEntry } from "@t3tools/contracts";
 
-const IGNORED_SUPPLEMENT_MAX_ENTRIES = 5000;
+/**
+ * Walk-work ceiling, not a UX limit: dependency/cache stores are already
+ * collapsed unexpanded, so what this budget bounds is legitimate build
+ * output and generated code the user may want to see. Sized so real
+ * workspaces never truncate.
+ */
+const IGNORED_SUPPLEMENT_MAX_ENTRIES = 50_000;
 const GIT_LS_FILES_TIMEOUT_MS = 15_000;
 const GIT_LS_FILES_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 

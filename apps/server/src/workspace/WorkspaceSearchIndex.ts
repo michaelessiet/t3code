@@ -14,7 +14,13 @@ import type {
 
 import * as WorkspaceIgnoredEntries from "./WorkspaceIgnoredEntries.ts";
 
-const WORKSPACE_INDEX_MAX_ENTRIES = 25_000;
+/**
+ * Payload-safety ceiling, not a UX limit: the file explorer must list every
+ * entry in any realistic workspace (a monorepo with several full worktree
+ * checkouts is ~30–50k entries). Only truly pathological roots (a filesystem
+ * scan gone wrong) should ever trip this and surface the truncation banner.
+ */
+const WORKSPACE_INDEX_MAX_ENTRIES = 250_000;
 const WORKSPACE_INDEX_PAGE_SIZE = WORKSPACE_INDEX_MAX_ENTRIES + 2;
 const WORKSPACE_INDEX_SCAN_TIMEOUT = "15 seconds";
 const WORKSPACE_INDEX_IDLE_TTL = "15 minutes";
