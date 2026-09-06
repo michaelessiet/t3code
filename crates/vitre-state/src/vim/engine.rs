@@ -344,7 +344,40 @@ impl VimEngine {
         }
     }
 
-    /// The selection the editor should paint: a one-character block in normal
+    /// The range the host editor should paint as *selected*.
+    ///
+    /// Normal mode's one-character "selection" is the block cursor, which the
+    /// editor paints separately from [`Self::caret_cell`]; painting it as a
+    /// selection as well would only wash the block out in the muted selection
+    /// colour, which is what made the caret hard to find inside a visual
+    /// selection in the first place.
+    pub fn editor_selection(&self, text: &str) -> Range<usize> {
+        match self.mode {
+            VimMode::Normal => self.cursor..self.cursor,
+            _ => self.selection(text),
+        }
+    }
+
+    /// The one-character cell the caret sits *on*, for a block cursor.
+    ///
+    /// `None` while inserting, where vim shows the ordinary thin caret between
+    /// two characters. An empty range means there is no character to cover —
+    /// the caret is on a newline or at the end of the buffer — and the painter
+    /// widens the cell to one character itself.
+    pub fn caret_cell(&self, text: &str) -> Option<Range<usize>> {
+        if self.mode.is_inserting() {
+            return None;
+        }
+        Some(block_at(text, self.cursor))
+    }
+
+    /// Whether a multi-key command is half-typed. vim squashes the block
+    /// cursor to half height to show it.
+    pub fn has_pending_keys(&self) -> bool {
+        !self.pending_keys.is_empty()
+    }
+
+    /// The selection an operator applies to: a one-character block in normal
     /// mode, the visual range in visual mode, a bare caret while inserting.
     pub fn selection(&self, text: &str) -> Range<usize> {
         match self.mode {

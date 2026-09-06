@@ -89,6 +89,14 @@ impl Buffer {
     fn selection(&self) -> std::ops::Range<usize> {
         self.engine.selection(&self.text)
     }
+
+    fn editor_selection(&self) -> std::ops::Range<usize> {
+        self.engine.editor_selection(&self.text)
+    }
+
+    fn caret_cell(&self) -> Option<std::ops::Range<usize>> {
+        self.engine.caret_cell(&self.text)
+    }
 }
 
 fn parse_keys(sequence: &str) -> Vec<VimKey> {
@@ -829,6 +837,56 @@ fn insert_mode_paints_a_bare_caret() {
     let mut buffer = Buffer::new("abc").at(1);
     buffer.keys("i");
     assert_eq!(buffer.selection(), 1..1);
+}
+
+#[test]
+fn normal_mode_leaves_the_editor_selection_empty() {
+    // The block cursor paints the character; painting it as a selection too
+    // would only wash the block out in the muted selection colour.
+    let buffer = Buffer::new("abc").at(1);
+    assert_eq!(buffer.editor_selection(), 1..1);
+    assert_eq!(buffer.caret_cell(), Some(1..2));
+}
+
+#[test]
+fn visual_mode_keeps_the_block_at_the_head_of_the_selection() {
+    let mut buffer = Buffer::new("abcdef").at(1);
+    buffer.keys("vll");
+    assert_eq!(buffer.editor_selection(), 1..4);
+    // The caret is the last character of the selection, not the gap past it.
+    assert_eq!(buffer.caret_cell(), Some(3..4));
+}
+
+#[test]
+fn visual_line_mode_keeps_the_block_on_the_caret_character() {
+    let mut buffer = Buffer::new("abc\ndef\nghi").at(5);
+    buffer.keys("V");
+    assert_eq!(buffer.editor_selection(), 4..7);
+    assert_eq!(buffer.caret_cell(), Some(5..6));
+}
+
+#[test]
+fn an_empty_line_still_has_a_block_cell() {
+    // Empty, because there is no character to cover: the painter widens it to
+    // one character itself, the way codemirror-vim pads with a `\u{a0}`.
+    let buffer = Buffer::new("a\n\nb").at(2);
+    assert_eq!(buffer.caret_cell(), Some(2..2));
+}
+
+#[test]
+fn insert_mode_has_no_block_cell() {
+    let mut buffer = Buffer::new("abc").at(1);
+    buffer.keys("i");
+    assert_eq!(buffer.caret_cell(), None);
+}
+
+#[test]
+fn a_half_typed_command_reports_pending_keys() {
+    let mut buffer = Buffer::new("abc def").at(0);
+    buffer.keys("d");
+    assert!(buffer.engine.has_pending_keys());
+    buffer.keys("w");
+    assert!(!buffer.engine.has_pending_keys());
 }
 
 // ---- unicode --------------------------------------------------------------

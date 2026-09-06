@@ -17,15 +17,15 @@ use std::time::Duration;
 
 use gpui::{
     App, Context, Entity, Focusable as _, MouseButton, PromptLevel, SharedString, Subscription,
-    WeakEntity, Window, actions, div, prelude::*, px,
+    WeakEntity, Window, actions, div, prelude::*, px, rgb,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{
-        DefinitionProvider as _, Editor, EditorState, HoverProvider as _, Input, InputEvent,
-        InputState, Redo, RopeExt as _, Undo,
+        BlockCursor, DefinitionProvider as _, Editor, EditorState, HoverProvider as _, Input,
+        InputEvent, InputState, Redo, RopeExt as _, Undo,
     },
     menu::{ContextMenuExt as _, PopupMenuItem},
     v_flex,
@@ -60,6 +60,16 @@ const AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 /// A server-completed watch stream must not resubscribe in a hot loop
 /// (vitre-client's `RESUBSCRIBE_AFTER_COMPLETION`).
 const RESUBSCRIBE_AFTER_COMPLETION: Duration = Duration::from_secs(2);
+
+/// codemirror-vim's `.cm-fat-cursor` default, which is what Electron paints:
+/// T3 never overrides it (`apps/web/src/components/files/codemirror/theme.ts`
+/// restyles `.cm-cursor` only). Deliberately not a theme token — a modal caret
+/// that borrows the foreground or selection colour is exactly the caret that
+/// disappears into a visual selection.
+const BLOCK_CURSOR_COLOR: u32 = 0xff9696;
+
+/// codemirror-vim's `hCoeff` for a half-typed command (`vim.status` non-empty).
+const PENDING_BLOCK_CURSOR_HEIGHT: f32 = 0.5;
 
 actions!(
     vitre,
@@ -1604,29 +1614,41 @@ impl FilesPanel {
     }
 
     /// Push the engine's caret and mode into the editor: the selection it
-    /// should paint (a one-character block in normal mode) and the key
+    /// should paint, the block cursor sitting on the caret, and the key
     /// context its bindings are matched against.
     fn sync_vim_view(&mut self, cx: &mut Context<Self>) {
         let rope = self.editor.read(cx).text().clone();
         let Some(vim) = self.vim.as_mut() else {
             self.editor.update(cx, |state, cx| {
                 state.set_extra_key_context(None, cx);
-                state.set_caret_hidden(false, cx);
+                state.set_block_cursor(None, cx);
             });
             return;
         };
         vim.invalidate();
         let text = vim.text(&rope);
-        let selection = vim.engine.selection(&text);
+        let selection = vim.engine.editor_selection(&text);
         let mode = vim.engine.mode();
         let context = vim::key_context(Some(mode));
+        // vim squashes the block to half height while a multi-key command is
+        // half-typed, so `d` waiting for its motion is visible in the caret
+        // rather than only in the status line.
+        let height = if vim.engine.has_pending_keys() {
+            PENDING_BLOCK_CURSOR_HEIGHT
+        } else {
+            1.0
+        };
+        let block = vim
+            .engine
+            .caret_cell(&text)
+            .map(|cell| BlockCursor::new(cell, rgb(BLOCK_CURSOR_COLOR)).with_height(height));
         self.editor.update(cx, |state, cx| {
             state.set_selected_range(selection, cx);
             state.set_extra_key_context(context, cx);
-            // Normal and visual mode report the caret as a one-character
-            // selection; hiding the thin caret is what turns that into vim's
-            // block cursor (codemirror-vim's `cm-fat-cursor`).
-            state.set_caret_hidden(!mode.is_inserting(), cx);
+            // The caret is a solid block on the character rather than a bar
+            // between two, so it stays readable inside a visual selection —
+            // codemirror-vim's `cm-fat-cursor`, which is what Electron paints.
+            state.set_block_cursor(block, cx);
         });
     }
 
@@ -1654,7 +1676,7 @@ impl FilesPanel {
 
         // A mouse click, a drag or an LSP jump moved the caret behind the
         // engine's back.
-        if selection != vim.engine.selection(&text) {
+        if selection != vim.engine.editor_selection(&text) {
             vim.engine.sync_selection(&text, selection.clone());
         }
 

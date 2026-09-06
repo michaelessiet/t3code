@@ -5,7 +5,7 @@
 use gpui::TextAlign;
 use gpui::{
     Action, App, AppContext, Bounds, ClipboardItem, Context, Edges, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
+    EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, KeyBinding,
     KeyContext, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ParentElement as _, Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString,
     Styled as _, Subscription, UTF16Selection, Window, actions, div, point,
@@ -109,6 +109,60 @@ actions!(
         GoToDefinition,
     ]
 );
+
+/// A solid one-character block painted *under* the glyph the caret sits on,
+/// the way vim, neovim and codemirror-vim's `cm-fat-cursor` draw a modal
+/// caret. The character keeps its own colour on top of it.
+///
+/// The embedder owns the position and the colour; while one is set the input
+/// suppresses its own thin blinking caret. See
+/// [`InputBaseState::set_block_cursor`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockCursor {
+    range: Range<usize>,
+    color: Hsla,
+    height: f32,
+}
+
+impl BlockCursor {
+    /// A full-height block covering `range`.
+    ///
+    /// An *empty* range still paints one character wide: a modal caret sitting
+    /// on a newline or past the last column covers no glyph of its own, and
+    /// has to stay as findable as one that does. codemirror-vim gets the same
+    /// effect by putting a `\u{a0}` inside the block element.
+    pub fn new(range: Range<usize>, color: impl Into<Hsla>) -> Self {
+        Self {
+            range,
+            color: color.into(),
+            height: 1.0,
+        }
+    }
+
+    /// Scale the block's height, anchored to the bottom of the line. vim
+    /// squashes the block to half height while a multi-key command is pending
+    /// and to a bottom bar in replace mode; codemirror-vim spells those
+    /// `hCoeff` 0.5 and 0.2.
+    pub fn with_height(mut self, height: f32) -> Self {
+        self.height = height.clamp(0.05, 1.0);
+        self
+    }
+
+    /// Byte range of the covered character, empty at a newline or the end of
+    /// the buffer.
+    pub fn range(&self) -> Range<usize> {
+        self.range.clone()
+    }
+
+    pub fn color(&self) -> Hsla {
+        self.color
+    }
+
+    /// Fraction of the line height the block occupies, bottom-anchored.
+    pub fn height(&self) -> f32 {
+        self.height
+    }
+}
 
 #[derive(Clone)]
 pub enum InputEvent {
@@ -294,9 +348,9 @@ pub struct InputBaseState<M: InputModeKind> {
     /// Extra key-context entries the embedder wants on this input's dispatch
     /// node, merged with `CONTEXT`. See [`Self::set_extra_key_context`].
     pub(super) extra_key_context: Option<KeyContext>,
-    /// Suppress the thin blinking caret while a selection paints the caret
-    /// instead. See [`Self::set_caret_hidden`].
-    pub(super) caret_hidden: bool,
+    /// Modal block cursor painted in place of the thin blinking caret.
+    /// See [`Self::set_block_cursor`].
+    pub(super) block_cursor: Option<BlockCursor>,
     pub(super) soft_wrap: bool,
     pub(super) wrapping_indent: WrappingIndent,
     pub(super) scroll_beyond_last_line: Option<usize>,
@@ -618,7 +672,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             searchable: false,
             replaceable: true,
             extra_key_context: None,
-            caret_hidden: false,
+            block_cursor: None,
             soft_wrap: true,
             wrapping_indent: WrappingIndent::default(),
             scroll_beyond_last_line: None,
@@ -704,18 +758,22 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx.notify();
     }
 
-    /// Hide the thin blinking caret while the selection is non-empty, so a
-    /// one-character selection reads as a block cursor rather than a
-    /// highlighted character with a caret stuck to its edge.
+    /// Paint a modal block cursor instead of the thin blinking caret.
     ///
-    /// This is what a modal keymap needs to draw vim's on-the-character
-    /// caret; an empty selection still shows the ordinary caret, because
-    /// otherwise an empty line would have no visible cursor at all.
-    pub fn set_caret_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
-        if self.caret_hidden == hidden {
+    /// A modal keymap (Vitre's vim mode) owns where the caret *is*, and needs
+    /// it to read as a block sitting on a character rather than a bar between
+    /// two of them — otherwise it is indistinguishable from the visual
+    /// selection it sits inside. The block paints under the text, so the
+    /// character keeps its own syntax colour, and hollows out to an outline
+    /// when the input is not focused.
+    ///
+    /// The block is dropped on any mouse interaction: a pointer moves the
+    /// caret out from under it, so it is stale until the embedder syncs again.
+    pub fn set_block_cursor(&mut self, cursor: Option<BlockCursor>, cx: &mut Context<Self>) {
+        if self.block_cursor == cursor {
             return;
         }
-        self.caret_hidden = hidden;
+        self.block_cursor = cursor;
         cx.notify();
     }
 
@@ -1736,6 +1794,9 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx: &mut Context<Self>,
     ) {
         self.undo_manager.break_transaction_coalescing();
+        // A pointer moves the caret out from under an embedder-positioned
+        // block cursor, so the block is stale until the embedder syncs again.
+        self.block_cursor = None;
         // Input has its own text selection; suppress the window-level text
         // selection (Root) so it does not start a drag from here.
         crate::global_state::GlobalState::suppress_text_selection(cx);
@@ -2369,7 +2430,7 @@ impl<M: InputModeKind> InputBaseState<M> {
 
     /// Returns the true to let InputElement to render cursor, when Input is focused and current BlinkCursor is visible.
     pub(crate) fn show_cursor(&self, window: &Window, cx: &App) -> bool {
-        if self.caret_hidden && !self.selected_range().is_empty() {
+        if self.block_cursor.is_some() {
             return false;
         }
         (self.focus_handle.is_focused(window) || M::is_context_menu_open(self, cx))

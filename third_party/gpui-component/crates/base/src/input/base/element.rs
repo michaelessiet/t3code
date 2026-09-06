@@ -835,6 +835,103 @@ impl<M: InputModeKind> TextElement<M> {
         paths
     }
 
+    /// Lay out the modal block cursor: a solid one-character cell painted
+    /// under the glyph, rather than the thin caret between two glyphs.
+    ///
+    /// Unlike [`Self::layout_match_range`] this returns bounds rather than a
+    /// path, and an *empty* range still produces a cell one character wide —
+    /// a modal caret on a newline or past the last column covers no glyph of
+    /// its own but still has to be findable.
+    fn layout_block_cursor(
+        &self,
+        last_layout: &LastLayout,
+        bounds: &Bounds<Pixels>,
+        char_advance: Pixels,
+        cx: &App,
+    ) -> Option<(Bounds<Pixels>, Hsla)> {
+        let state = self.state.read(cx);
+        let block = state.block_cursor.as_ref()?;
+        // A masked field must not leak where its characters begin and end.
+        if state.masked {
+            return None;
+        }
+
+        let range = block.range();
+        if range.start < last_layout.visible_range_offset.start
+            || range.start > last_layout.visible_range_offset.end
+        {
+            return None;
+        }
+
+        let line_height = last_layout.line_height;
+        let line_number_width = last_layout.line_number_width;
+        let mut offset_y = last_layout.visible_top;
+
+        for (prev_lines_offset, line) in last_layout
+            .visible_line_byte_offsets
+            .iter()
+            .zip(last_layout.lines.iter())
+        {
+            let prev_lines_offset = *prev_lines_offset;
+            // `position_for_index` takes a line-local offset, so an offset
+            // belonging to another line has to be rejected up front: saturating
+            // the subtraction would silently fold it onto this line's column 0.
+            if range.start < prev_lines_offset || range.start > prev_lines_offset + line.len() {
+                offset_y += line.size(line_height).height;
+                continue;
+            }
+
+            let start =
+                line.position_for_index(range.start - prev_lines_offset, last_layout, false)?;
+            // Fall back to one character's advance whenever the end does not
+            // resolve to a wider cell on the same wrapped row: an empty range,
+            // a cell split across a soft wrap, a range running past the line.
+            let end_x = range
+                .end
+                .checked_sub(prev_lines_offset)
+                .filter(|_| range.end > range.start)
+                .and_then(|local| line.position_for_index(local, last_layout, false))
+                .filter(|end| end.y == start.y && end.x > start.x)
+                .map(|end| end.x)
+                .unwrap_or(start.x + char_advance);
+
+            let height = line_height * block.height();
+            let origin = bounds.origin
+                + point(
+                    line_number_width + start.x,
+                    offset_y + start.y + (line_height - height),
+                );
+            return Some((
+                Bounds::new(origin, size(end_x - start.x, height)),
+                block.color(),
+            ));
+        }
+
+        None
+    }
+
+    /// Advance of a single space in the input's font, the width a block cursor
+    /// falls back to when it covers no glyph.
+    fn layout_char_advance(style: &TextStyle, text_size: Pixels, window: &mut Window) -> Pixels {
+        let text = SharedString::new_static(" ");
+        window
+            .text_system()
+            .shape_line(
+                text.clone(),
+                text_size,
+                &[TextRun {
+                    len: text.len(),
+                    font: style.font(),
+                    color: style.color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                None,
+            )
+            .width
+    }
+
     fn layout_selections(
         &self,
         last_layout: &LastLayout,
@@ -1592,6 +1689,8 @@ pub(super) struct PrepaintState {
     /// row index (zero based), no wrap, same line as the cursor.
     current_row: Option<usize>,
     selection_path: Option<Path<Pixels>>,
+    /// Modal block cursor bounds and colour, painted under the text.
+    block_cursor: Option<(Bounds<Pixels>, Hsla)>,
     hover_highlight_path: Option<Path<Pixels>>,
     search_match_paths: Vec<(Path<Pixels>, bool)>,
     document_color_paths: Vec<(Path<Pixels>, Hsla)>,
@@ -2008,6 +2107,15 @@ impl<M: InputModeKind> Element for TextElement<M> {
 
         let search_match_paths = self.layout_search_matches(&last_layout, &mut bounds, cx);
         let selection_path = self.layout_selections(&last_layout, &mut bounds, window, cx);
+        // Only shaped when a modal keymap actually asked for a block, so an
+        // ordinary input pays nothing for it.
+        let block_cursor = self
+            .state
+            .read(cx)
+            .block_cursor
+            .is_some()
+            .then(|| Self::layout_char_advance(&style, text_size, window))
+            .and_then(|advance| self.layout_block_cursor(&last_layout, &bounds, advance, cx));
         let hover_highlight_path = self.layout_hover_highlight(&last_layout, &mut bounds, cx);
         let document_color_paths =
             self.layout_document_colors(&document_colors, &last_layout, &bounds, cx);
@@ -2087,6 +2195,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
             cursor_scroll_offset,
             current_row,
             selection_path,
+            block_cursor,
             search_match_paths,
             hover_highlight_path,
             hover_definition_hitbox,
@@ -2196,6 +2305,23 @@ impl<M: InputModeKind> Element for TextElement<M> {
             // Paint hover highlight
             if let Some(path) = prepaint.hover_highlight_path.take() {
                 window.paint_path(path, secondary_selection);
+            }
+        }
+
+        // Paint the modal block cursor *under* the text, so the character it
+        // covers keeps its own syntax colour on top of it — the block reads as
+        // a cursor sitting on a glyph rather than as another selection. Unfocused
+        // it hollows out to an outline instead of vanishing, so the caret stays
+        // findable when the editor is not the focused pane.
+        if let Some((cursor_bounds, color)) = prepaint.block_cursor {
+            if focused && window.is_window_active() {
+                window.paint_quad(fill(cursor_bounds, color));
+            } else {
+                window.paint_quad(gpui::outline(
+                    cursor_bounds,
+                    color,
+                    gpui::BorderStyle::Solid,
+                ));
             }
         }
 
