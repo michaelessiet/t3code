@@ -7,6 +7,7 @@ mod files;
 mod lsp;
 mod palette;
 mod sidebar_prefs;
+mod vim;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -179,6 +180,12 @@ fn main() {
                 theme.dark_theme = dark;
             }
         }
+
+        // Vim mode: the preference plus the modal keymap. Bound after
+        // `gpui_component::init` on purpose — gpui breaks same-depth binding
+        // ties by registration order, which is what lets vim claim `escape`
+        // and friends back from the input's own keymap (see `vim`).
+        vim::init(cx, &home);
 
         // Editor commands. `file.save` is `mod+s` in Electron's
         // DEFAULT_KEYBINDINGS; formatting is a fixed editor chord there

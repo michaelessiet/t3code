@@ -1015,6 +1015,11 @@ impl ChatApp {
             }
             PaletteAction::ToggleFilesPanel => self.toggle_right_panel(window, cx),
             PaletteAction::ToggleTerminal => self.terminal_toggle(cx),
+            // The files panel follows the preference through its global
+            // observer, so flipping it here is the whole handler.
+            PaletteAction::ToggleVimMode => {
+                crate::vim::VimPrefs::toggle(cx);
+            }
             PaletteAction::NewFile | PaletteAction::NewFolder => {
                 self.dock_open_files_surface(window, cx);
                 let Some(files) = self.files.clone() else {

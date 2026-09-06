@@ -103,6 +103,9 @@ libc = "0.2"
 # editor's provider traits speak one resolved crate.
 lsp-types = { version = "0.97.0", features = ["proposed"] }
 percent-encoding = "2"
+# Vim `/` search and `:s` substitution. Already in the graph transitively at
+# this version, so this adds no new crate.
+regex = "1"
 # Same pin as the vendored gpui-component fork's rope, so the editor buffers
 # and the LSP wire-position math share one resolved crate.
 ropey = { version = "=2.0.0-beta.1", features = [

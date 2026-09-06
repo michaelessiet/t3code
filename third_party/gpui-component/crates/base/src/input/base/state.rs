@@ -6,9 +6,10 @@ use gpui::TextAlign;
 use gpui::{
     Action, App, AppContext, Bounds, ClipboardItem, Context, Edges, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString, Styled as _, Subscription,
-    UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _, px,
+    KeyContext, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement as _, Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString,
+    Styled as _, Subscription, UTF16Selection, Window, actions, div, point,
+    prelude::FluentBuilder as _, px,
 };
 use ropey::{Rope, RopeSlice};
 use serde::Deserialize;
@@ -290,6 +291,12 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) search_session: super::SearchSession,
     pub(super) searchable: bool,
     pub(super) replaceable: bool,
+    /// Extra key-context entries the embedder wants on this input's dispatch
+    /// node, merged with `CONTEXT`. See [`Self::set_extra_key_context`].
+    pub(super) extra_key_context: Option<KeyContext>,
+    /// Suppress the thin blinking caret while a selection paints the caret
+    /// instead. See [`Self::set_caret_hidden`].
+    pub(super) caret_hidden: bool,
     pub(super) soft_wrap: bool,
     pub(super) wrapping_indent: WrappingIndent,
     pub(super) scroll_beyond_last_line: Option<usize>,
@@ -610,6 +617,8 @@ impl<M: InputModeKind> InputBaseState<M> {
             search_session: super::SearchSession::default(),
             searchable: false,
             replaceable: true,
+            extra_key_context: None,
+            caret_hidden: false,
             soft_wrap: true,
             wrapping_indent: WrappingIndent::default(),
             scroll_beyond_last_line: None,
@@ -680,6 +689,36 @@ impl<M: InputModeKind> InputBaseState<M> {
 
     /// Set whether search UI allows replacement, default is true.
     #[doc(hidden)]
+    /// Add key-context entries to the node the input's own bindings are
+    /// matched against, so an embedder can layer a modal keymap (Vitre's vim
+    /// mode) over this input.
+    ///
+    /// Bindings live at the same dispatch depth as the input's own, and gpui
+    /// breaks depth ties by registration order, so an embedder that binds
+    /// after `gpui_component::init` wins the keys it claims.
+    pub fn set_extra_key_context(&mut self, context: Option<KeyContext>, cx: &mut Context<Self>) {
+        if self.extra_key_context == context {
+            return;
+        }
+        self.extra_key_context = context;
+        cx.notify();
+    }
+
+    /// Hide the thin blinking caret while the selection is non-empty, so a
+    /// one-character selection reads as a block cursor rather than a
+    /// highlighted character with a caret stuck to its edge.
+    ///
+    /// This is what a modal keymap needs to draw vim's on-the-character
+    /// caret; an empty selection still shows the ordinary caret, because
+    /// otherwise an empty line would have no visible cursor at all.
+    pub fn set_caret_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
+        if self.caret_hidden == hidden {
+            return;
+        }
+        self.caret_hidden = hidden;
+        cx.notify();
+    }
+
     pub fn replaceable(mut self, allow: bool) -> Self {
         self.replaceable = allow;
         self
@@ -2330,6 +2369,9 @@ impl<M: InputModeKind> InputBaseState<M> {
 
     /// Returns the true to let InputElement to render cursor, when Input is focused and current BlinkCursor is visible.
     pub(crate) fn show_cursor(&self, window: &Window, cx: &App) -> bool {
+        if self.caret_hidden && !self.selected_range().is_empty() {
+            return false;
+        }
         (self.focus_handle.is_focused(window) || M::is_context_menu_open(self, cx))
             && !self.disabled
             && self.blink_cursor.read(cx).visible()
@@ -3055,9 +3097,15 @@ impl<M: InputModeKind> Render for InputBaseState<M> {
             self._pending_update = false;
         }
 
+        let mut key_context = KeyContext::new_with_defaults();
+        key_context.add(CONTEXT);
+        if let Some(extra) = self.extra_key_context.as_ref() {
+            key_context.extend(extra);
+        }
+
         let element = div()
             .id("input-state")
-            .key_context(CONTEXT)
+            .key_context(key_context)
             .track_focus(&self.focus_handle)
             .when(self.is_editable(), |this| {
                 this.on_action(window.listener_for(&entity, InputBaseState::backspace))

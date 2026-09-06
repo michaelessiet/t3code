@@ -23,7 +23,10 @@ use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Editor, EditorState, Input, InputEvent, InputState},
+    input::{
+        DefinitionProvider as _, Editor, EditorState, HoverProvider as _, Input, InputEvent,
+        InputState, Redo, RopeExt as _, Undo,
+    },
     menu::{ContextMenuExt as _, PopupMenuItem},
     v_flex,
 };
@@ -44,9 +47,11 @@ use vitre_rpc::{RpcError, TypedError, TypedStreamEvent};
 use vitre_state::file_buffer::{BufferConflict, DiskChange, FileBuffer};
 use vitre_state::file_tree::{FileTreeModel, FileTreeRow};
 use vitre_state::vcs_tree_status::{TreeVcsDecorations, TreeVcsStatus, build_tree_vcs_decorations};
+use vitre_state::vim::{VimDocument, VimEffect};
 
 use crate::lsp::bridge::{self, LspBridge};
 use crate::lsp::positions::{WirePosition, wire_to_offset};
+use crate::vim::{self, ToggleVimMode, VimKeystroke, VimPrefs, VimSession};
 
 /// Electron default: autosave on, `afterDelay`, 500ms
 /// (`packages/contracts/src/settings.ts` `DEFAULT_AUTO_SAVE_DELAY_MS`).
@@ -147,6 +152,9 @@ pub struct FilesPanel {
     edit: Option<TreeEdit>,
     editor: Entity<EditorState>,
     lsp: Rc<LspBridge>,
+    /// Modal editing state, present only while the `vimMode` preference is
+    /// on. `None` is the default, matching Electron.
+    vim: Option<VimSession>,
     /// Latest diagnostics per relative path (latest event wins, empty
     /// clears — the Electron per-file replacement semantics).
     diagnostics: HashMap<String, Vec<LspDiagnostic>>,
@@ -174,15 +182,18 @@ impl FilesPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let editor = cx.new(|cx| EditorState::new(window, cx).line_number(true));
-        let subscriptions = vec![cx.subscribe_in(
-            &editor,
-            window,
-            |this: &mut Self, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.editor_edited(window, cx);
-                }
-            },
-        )];
+        let subscriptions = vec![
+            cx.subscribe_in(
+                &editor,
+                window,
+                |this: &mut Self, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.editor_edited(window, cx);
+                    }
+                },
+            ),
+            cx.observe_global::<VimPrefs>(|this: &mut Self, cx| this.sync_vim_enabled(cx)),
+        ];
 
         let lsp = LspBridge::new(client.clone(), cwd.clone(), editor.downgrade());
         let panel_for_show: WeakEntity<Self> = cx.weak_entity();
@@ -234,6 +245,7 @@ impl FilesPanel {
             edit: None,
             editor,
             lsp,
+            vim: VimPrefs::is_enabled(cx).then(VimSession::new),
             diagnostics: HashMap::new(),
             pending_reveal: None,
             open_generation: 0,
@@ -646,6 +658,7 @@ impl FilesPanel {
                     let position = bridge::editor_position(state.text(), offset);
                     state.set_cursor_position(position, window, cx);
                 });
+                self.vim_adopt_caret(cx);
             }
             if focus {
                 self.focus_editor(window, cx);
@@ -708,6 +721,11 @@ impl FilesPanel {
                             debounce: 0,
                         });
                         panel.apply_diagnostics_to_editor(cx);
+                        // A new buffer starts in normal mode with a fresh
+                        // caret, as vim does when it opens a file.
+                        if let Some(vim) = panel.vim.as_mut() {
+                            vim.reset();
+                        }
                         // Cross-file definition target: convert the WIRE
                         // position against the loaded text and move there.
                         if let Some((target, position)) = panel.pending_reveal.take()
@@ -719,6 +737,7 @@ impl FilesPanel {
                                 state.set_cursor_position(position, window, cx);
                             });
                         }
+                        panel.vim_adopt_caret(cx);
                         panel.status = None;
                         cx.notify();
                     });
@@ -745,6 +764,9 @@ impl FilesPanel {
     }
 
     fn editor_edited(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(vim) = self.vim.as_mut() {
+            vim.invalidate();
+        }
         self.lsp.document_edited(cx);
         let generation = self.open_generation;
         let Some(open) = &mut self.open else {
@@ -1545,6 +1567,256 @@ impl FilesPanel {
             )
     }
 
+    // ---- vim mode ---------------------------------------------------------
+
+    /// Follow the `vimMode` preference after it flips.
+    fn sync_vim_enabled(&mut self, cx: &mut Context<Self>) {
+        let enabled = VimPrefs::is_enabled(cx);
+        if enabled == self.vim.is_some() {
+            return;
+        }
+        self.vim = enabled.then(VimSession::new);
+        if let Some(vim) = self.vim.as_mut() {
+            // Adopt whatever the editor's caret is right now, so vim starts in
+            // normal mode over the character the user was looking at.
+            let rope = self.editor.read(cx).text().clone();
+            let caret = self.editor.read(cx).selected_range().start;
+            let text = vim.text(&rope);
+            vim.engine.sync_cursor(&text, caret);
+        }
+        self.sync_vim_view(cx);
+        cx.notify();
+    }
+
+    /// Take the editor's caret as the engine's, for a jump the engine did
+    /// not drive: go-to-definition, a revealed line, a file opened at a
+    /// position. Without this [`Self::sync_vim_view`] would immediately
+    /// paint the *stale* engine caret back over the jump target.
+    fn vim_adopt_caret(&mut self, cx: &mut Context<Self>) {
+        let rope = self.editor.read(cx).text().clone();
+        let caret = self.editor.read(cx).selected_range().start;
+        if let Some(vim) = self.vim.as_mut() {
+            vim.invalidate();
+            let text = vim.text(&rope);
+            vim.engine.sync_cursor(&text, caret);
+        }
+        self.sync_vim_view(cx);
+    }
+
+    /// Push the engine's caret and mode into the editor: the selection it
+    /// should paint (a one-character block in normal mode) and the key
+    /// context its bindings are matched against.
+    fn sync_vim_view(&mut self, cx: &mut Context<Self>) {
+        let rope = self.editor.read(cx).text().clone();
+        let Some(vim) = self.vim.as_mut() else {
+            self.editor.update(cx, |state, cx| {
+                state.set_extra_key_context(None, cx);
+                state.set_caret_hidden(false, cx);
+            });
+            return;
+        };
+        vim.invalidate();
+        let text = vim.text(&rope);
+        let selection = vim.engine.selection(&text);
+        let mode = vim.engine.mode();
+        let context = vim::key_context(Some(mode));
+        self.editor.update(cx, |state, cx| {
+            state.set_selected_range(selection, cx);
+            state.set_extra_key_context(context, cx);
+            // Normal and visual mode report the caret as a one-character
+            // selection; hiding the thin caret is what turns that into vim's
+            // block cursor (codemirror-vim's `cm-fat-cursor`).
+            state.set_caret_hidden(!mode.is_inserting(), cx);
+        });
+    }
+
+    /// Feed one key to the engine and apply what it asks for.
+    fn vim_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = vim::engine_key(key) else {
+            return;
+        };
+        if self.vim.is_none() {
+            return;
+        }
+        let (rope, selection, visible_lines) = {
+            let state = self.editor.read(cx);
+            (
+                state.text().clone(),
+                state.selected_range(),
+                // Before the first layout there is no viewport; `H`/`M`/`L`
+                // and the half-page scrolls fall back to a screenful.
+                state.visible_row_range().unwrap_or(0..40),
+            )
+        };
+
+        let vim = self.vim.as_mut().expect("checked above");
+        let text = vim.text(&rope);
+
+        // A mouse click, a drag or an LSP jump moved the caret behind the
+        // engine's back.
+        if selection != vim.engine.selection(&text) {
+            vim.engine.sync_selection(&text, selection.clone());
+        }
+
+        // Insert mode is about to end: the editor owned text input while it
+        // lasted (IME composition has to reach the platform untouched), so
+        // recover what was typed for `.`.
+        let was_inserting = vim.engine.mode().is_inserting();
+        if was_inserting {
+            let inserted = vim.take_inserted(&text, selection.end);
+            vim.engine.record_inserted_text(&inserted);
+        }
+
+        let response = vim.engine.handle_key(
+            &VimDocument {
+                text: &text,
+                visible_lines,
+            },
+            key,
+        );
+        if !response.handled {
+            return;
+        }
+        let caret = vim.engine.cursor();
+        let effects = response.effects;
+        let entered_insert = !was_inserting && vim.engine.mode().is_inserting();
+
+        let readonly = self.open.as_ref().is_some_and(|open| open.truncated);
+        for effect in effects {
+            match effect {
+                VimEffect::Edit {
+                    range,
+                    text,
+                    cursor,
+                } => {
+                    // A truncated read is a partial buffer the server would
+                    // reject anyway; motions still work, edits do not.
+                    if readonly {
+                        continue;
+                    }
+                    self.editor.update(cx, |state, cx| {
+                        state.set_selected_range(range, cx);
+                        state.replace(text, window, cx);
+                        state.set_selected_range(cursor..cursor, cx);
+                    });
+                }
+                VimEffect::Undo | VimEffect::Redo => {
+                    let undo = matches!(effect, VimEffect::Undo);
+                    let handle = self.editor.read(cx).focus_handle(cx);
+                    if undo {
+                        handle.dispatch_action(&Undo, window, cx);
+                    } else {
+                        handle.dispatch_action(&Redo, window, cx);
+                    }
+                }
+                // `:w` — Electron routes it to the same save coordinator the
+                // `file.save` command uses.
+                VimEffect::Save => self.save_now(window, cx),
+                VimEffect::Quit => self.close_file(cx),
+                VimEffect::ShowHover => self.vim_show_hover(caret, window, cx),
+                VimEffect::GoToDefinition => self.vim_go_to_definition(caret, window, cx),
+                VimEffect::Format => self.format_document(window, cx),
+                // The caret follows the selection we set below, and
+                // `set_selected_range` already scrolls it into view.
+                VimEffect::ScrollToCursor => {}
+            }
+        }
+
+        self.sync_vim_view(cx);
+        if entered_insert && let Some(vim) = self.vim.as_mut() {
+            vim.begin_insert(vim.engine.cursor());
+        }
+        cx.notify();
+    }
+
+    /// `gh` — the LSP hover popover at the caret, Electron's `lspHover`
+    /// action. The mouse path debounces; a deliberate keystroke does not.
+    fn vim_show_hover(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let rope = self.editor.read(cx).text().clone();
+        let task = self.lsp.hover(&rope, offset, window, cx);
+        let editor = self.editor.downgrade();
+        cx.spawn(async move |_, cx| {
+            let Ok(Some(hover)) = task.await else {
+                return;
+            };
+            let _ = editor.update(cx, |state, cx| {
+                let symbol_range = hover
+                    .range
+                    .map(|range| {
+                        state.text().position_to_offset(&range.start)
+                            ..state.text().position_to_offset(&range.end)
+                    })
+                    .or_else(|| state.text().word_range(offset))
+                    .unwrap_or(offset..offset);
+                state.present_hover(symbol_range, hover, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// `gd` and `<C-]>` — Electron's `lspDefinition` action. The fork's own
+    /// `GoToDefinition` only fires for a location a modifier-hover already
+    /// resolved, so the jump is driven from the provider directly.
+    fn vim_go_to_definition(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let rope = self.editor.read(cx).text().clone();
+        let task = self.lsp.definitions(&rope, offset, window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(links) = task.await else {
+                return;
+            };
+            let Some(link) = links.into_iter().next() else {
+                return;
+            };
+            let _ = this.update_in(cx, |panel, window, cx| {
+                let Some(target) = bridge::relative_path_from_uri(&panel.cwd, &link.target_uri)
+                else {
+                    return;
+                };
+                // Same-file targets already carry editor coordinates;
+                // cross-file ones stay in WIRE units until their file loads
+                // (see the LspBridge definition provider).
+                if panel.lsp.current_document().as_deref() == Some(target.as_str()) {
+                    panel.editor.update(cx, |state, cx| {
+                        state.set_cursor_position(link.target_selection_range.start, window, cx);
+                    });
+                    panel.vim_adopt_caret(cx);
+                    return;
+                }
+                panel.pending_reveal = Some((
+                    target.clone(),
+                    WirePosition {
+                        line: link.target_selection_range.start.line,
+                        character: link.target_selection_range.start.character,
+                    },
+                ));
+                panel.open_file(target, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The vim message line: Electron mounts `@replit/codemirror-vim` without
+    /// `status`, so there is no persistent mode banner — only the panel that
+    /// appears while a `:` or `/` command is being typed, and for the message
+    /// a command leaves behind.
+    fn render_vim_status(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
+        let status = self.vim.as_ref()?.engine.status();
+        let line = status.command_line.or(status.message)?;
+        Some(
+            div()
+                .px_2()
+                .py_0p5()
+                .flex_shrink_0()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().secondary)
+                .font_family(cx.theme().mono_font_family.clone())
+                .text_xs()
+                .text_color(cx.theme().foreground)
+                .child(line),
+        )
+    }
+
     fn render_editor_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let open = self.open.as_ref();
         let conflict = open.and_then(|open| open.buffer.conflict());
@@ -1572,6 +1844,7 @@ impl FilesPanel {
                         .size_full(),
                 ),
             )
+            .children(self.render_vim_status(cx))
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1671,6 +1944,13 @@ impl Render for FilesPanel {
             }))
             .on_action(cx.listener(|panel, _: &FormatDocument, window, cx| {
                 panel.format_document(window, cx);
+            }))
+            .on_action(cx.listener(|panel, action: &VimKeystroke, window, cx| {
+                panel.vim_key(&action.key, window, cx);
+            }))
+            .on_action(cx.listener(|panel, _: &ToggleVimMode, _, cx| {
+                VimPrefs::toggle(cx);
+                panel.sync_vim_enabled(cx);
             }))
             .bg(cx.theme().background)
             .border_l_1()

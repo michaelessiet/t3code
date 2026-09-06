@@ -33,3 +33,8 @@ vitre-state.workspace = true
 vitre-rpc.workspace = true
 vitre-sidecar.workspace = true
 wry.workspace = true
+
+[dev-dependencies]
+# Windowed tests: the vim keymap's arbitration against the input's own
+# bindings is only meaningful through gpui's real dispatch pipeline.
+gpui = { workspace = true, features = ["test-support"] }

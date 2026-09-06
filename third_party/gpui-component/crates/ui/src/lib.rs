@@ -88,11 +88,11 @@ pub mod tree;
 pub use crate::Disableable;
 pub use element_ext::*;
 pub use global_state::GlobalState;
+pub use gpui_base::POPUP_PRIORITY;
 pub use gpui_base::animation;
 pub(crate) use gpui_base::measurement_enabled as measure_enable;
 #[doc(hidden)]
 pub(crate) use gpui_base::resize_handle;
-pub use gpui_base::POPUP_PRIORITY;
 pub use gpui_base::{
     AxisExt, Edges, FocusTrapElement, InteractiveElementExt, LengthExt, Measure, OngoingScrollExt,
     Placement, Side, measure, measure_if,

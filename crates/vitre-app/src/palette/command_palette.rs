@@ -94,6 +94,10 @@ pub enum PaletteAction {
     ToggleTerminal,
     NewFile,
     NewFolder,
+    /// Electron exposes this as a Settings → Editor switch; Vitre has no
+    /// settings panel yet, so the palette is where the `vimMode` preference
+    /// lives.
+    ToggleVimMode,
 }
 
 pub enum CommandPaletteEvent {
@@ -1727,6 +1731,21 @@ fn action_items(
             )
             .shortcut(shortcut_for(&TerminalToggle, window))
             .action(PaletteAction::ToggleTerminal),
+        );
+        items.push(
+            PaletteItem::new(
+                "Toggle vim mode",
+                IconName::SquareTerminal,
+                &[
+                    "vim",
+                    "modal",
+                    "normal mode",
+                    "editor",
+                    "toggle",
+                    "keybindings",
+                ],
+            )
+            .action(PaletteAction::ToggleVimMode),
         );
         items.push(
             PaletteItem::new(
