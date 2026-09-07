@@ -21,7 +21,11 @@ pub(super) struct LastLayout {
     pub(super) line_height: Pixels,
     pub(super) wrap_width: Option<Pixels>,
     pub(super) wrapping_indent: WrappingIndent,
+    /// Total gutter width, *including* the diff marker column.
     pub(super) line_number_width: Pixels,
+    /// Leading slice of [`Self::line_number_width`] the git-diff marker
+    /// column occupies; zero when no gutter is set.
+    pub(super) diff_gutter_width: Pixels,
     pub(super) cursor_bounds: Option<Bounds<Pixels>>,
     pub(super) text_align: TextAlign,
     pub(super) content_width: Pixels,

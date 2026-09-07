@@ -16,16 +16,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, Context, Entity, Focusable as _, MouseButton, PromptLevel, SharedString, Subscription,
-    WeakEntity, Window, actions, div, prelude::*, px, rgb,
+    AnyElement, App, Context, Entity, Focusable as _, MouseButton, PromptLevel, SharedString,
+    Subscription, WeakEntity, Window, actions, div, prelude::*, px, rgb,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{
-        BlockCursor, DefinitionProvider as _, Editor, EditorState, HoverProvider as _, Input,
-        InputEvent, InputState, Redo, RopeExt as _, Undo,
+        BlockCursor, BlockOverlay, DefinitionProvider as _, Editor, EditorState, Escape,
+        HoverProvider as _, Input, InputEvent, InputState, Redo, RopeExt as _, Undo,
     },
     menu::{ContextMenuExt as _, PopupMenuItem},
     v_flex,
@@ -34,14 +34,14 @@ use vitre_client::EnvironmentClient;
 use vitre_contracts::methods::{
     LspFormat, LspSubscribeDiagnostics, ProjectsListEntries, ProjectsMutateEntry, ProjectsReadFile,
     ProjectsSubscribeWorkspaceChanges, ProjectsWriteFile,
-    ProjectsWriteFileError as WriteFileErrorUnion, VcsGetFileStatuses,
+    ProjectsWriteFileError as WriteFileErrorUnion, VcsGetFileBaseline, VcsGetFileStatuses,
 };
 use vitre_contracts::{
     LspDiagnostic, LspDiagnosticsStreamEvent, LspFormattingInput, LspSubscribeDiagnosticsInput,
     ProjectFileFailure, ProjectListEntriesInput, ProjectMutateEntryInput,
     ProjectMutateEntryInputCreateKind, ProjectReadFileInput, ProjectWatchInput,
-    ProjectWatchStreamEvent, ProjectWriteFileInput, TrimmedNonEmptyString, VcsFileStatusEntry,
-    VcsFileStatusesInput,
+    ProjectWatchStreamEvent, ProjectWriteFileInput, TrimmedNonEmptyString, VcsFileBaselineInput,
+    VcsFileStatusEntry, VcsFileStatusesInput,
 };
 use vitre_rpc::{RpcError, TypedError, TypedStreamEvent};
 use vitre_state::file_buffer::{BufferConflict, DiskChange, FileBuffer};
@@ -49,6 +49,7 @@ use vitre_state::file_tree::{FileTreeModel, FileTreeRow};
 use vitre_state::vcs_tree_status::{TreeVcsDecorations, TreeVcsStatus, build_tree_vcs_decorations};
 use vitre_state::vim::{VimDocument, VimEffect};
 
+use crate::git_gutter::{GitGutterState, RECOMPUTE_DEBOUNCE};
 use crate::lsp::bridge::{self, LspBridge};
 use crate::lsp::positions::{WirePosition, wire_to_offset};
 use crate::vim::{self, ToggleVimMode, VimKeystroke, VimPrefs, VimSession};
@@ -82,6 +83,12 @@ actions!(
         /// this on the editor itself (`Shift-Alt-f` in `useLspBridge.ts`), not
         /// as a rebindable command.
         FormatDocument,
+        /// Move the caret to the next git hunk, wrapping at the end of the
+        /// file (Electron's `Alt-F5`).
+        GotoNextHunk,
+        /// Move the caret to the previous git hunk, wrapping at the start of
+        /// the file (Electron's `Shift-Alt-F5`).
+        GotoPreviousHunk,
     ]
 );
 
@@ -165,6 +172,8 @@ pub struct FilesPanel {
     /// Modal editing state, present only while the `vimMode` preference is
     /// on. `None` is the default, matching Electron.
     vim: Option<VimSession>,
+    /// Git diff gutter for the open file: baseline, hunks, open peek.
+    git: GitGutterState,
     /// Latest diagnostics per relative path (latest event wins, empty
     /// clears — the Electron per-file replacement semantics).
     diagnostics: HashMap<String, Vec<LspDiagnostic>>,
@@ -196,10 +205,12 @@ impl FilesPanel {
             cx.subscribe_in(
                 &editor,
                 window,
-                |this: &mut Self, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        this.editor_edited(window, cx);
+                |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::Change => this.editor_edited(window, cx),
+                    InputEvent::DiffGutterClick { line } => {
+                        this.toggle_hunk_peek(*line, cx);
                     }
+                    _ => {}
                 },
             ),
             cx.observe_global::<VimPrefs>(|this: &mut Self, cx| this.sync_vim_enabled(cx)),
@@ -249,6 +260,7 @@ impl FilesPanel {
             tree_truncated: false,
             tree_paths: Vec::new(),
             expanded: HashSet::new(),
+            git: GitGutterState::default(),
             vcs_entries: Vec::new(),
             vcs: TreeVcsDecorations::default(),
             open: None,
@@ -390,6 +402,9 @@ impl FilesPanel {
             let _ = this.update(cx, |panel, cx| {
                 panel.vcs_entries = result.entries;
                 panel.rebuild_decorations();
+                // Every status emission is a chance the open file's HEAD or
+                // index blob moved: this is the git gutter's refresh trigger.
+                panel.refresh_baseline(cx);
                 cx.notify();
             });
         })
@@ -398,6 +413,173 @@ impl FilesPanel {
 
     fn rebuild_decorations(&mut self) {
         self.vcs = build_tree_vcs_decorations(&self.vcs_entries, &self.tree_paths);
+    }
+
+    // ---- git diff gutter --------------------------------------------------
+
+    /// Fetch the HEAD + index baselines for the open file.
+    ///
+    /// Electron refreshes these on every workspace-watch event naming the
+    /// file *and* on every VCS status emission — commit, branch switch,
+    /// discard, stage/unstage. Both funnel through `refresh_vcs` here. The
+    /// status stream carries no HEAD sha, so the refresh is unconditional and
+    /// the oid key inside [`GitGutterState`] is what keeps it cheap.
+    fn refresh_baseline(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = &self.open else {
+            return;
+        };
+        let generation = self.open_generation;
+        let client = self.client.clone();
+        let payload = VcsFileBaselineInput {
+            cwd: tnes(&self.cwd),
+            relative_path: tnes(&open.relative_path),
+        };
+        cx.spawn(async move |this, cx| {
+            // No repository, or a transient failure, leaves the gutter exactly
+            // as it is — the way Electron's baseline atom does on error.
+            let Ok(result) = client.call::<VcsGetFileBaseline>(&payload).await else {
+                return;
+            };
+            let _ = this.update(cx, |panel, cx| {
+                if panel.open_generation != generation {
+                    return;
+                }
+                if !panel.git.set_baseline(Some(&result)) {
+                    return;
+                }
+                panel.recompute_gutter(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Re-diff the buffer against the baseline and push the result at the
+    /// editor.
+    fn recompute_gutter(&mut self, cx: &mut Context<Self>) {
+        let text = self.editor.read(cx).text().to_string();
+        self.git.recompute(&text);
+        self.apply_gutter(cx);
+    }
+
+    /// Push the current markers and peek at the editor.
+    ///
+    /// The colours are Electron's: `--success` for added lines, `--warning`
+    /// for modified, `--destructive` for the deletion wedges.
+    fn apply_gutter(&mut self, cx: &mut Context<Self>) {
+        let gutter = self
+            .git
+            .gutter(cx.theme().success, cx.theme().warning, cx.theme().danger);
+        let overlay = self.hunk_peek_overlay(cx);
+        self.editor.update(cx, |state, cx| {
+            state.set_diff_gutter(gutter, cx);
+            state.set_block_overlay(overlay, cx);
+        });
+    }
+
+    /// Re-diff once the edit storm settles.
+    ///
+    /// Electron debounces the same 250ms and maps the old markers through the
+    /// edits meanwhile; here they simply hold still for that quarter second,
+    /// which is the one visible difference.
+    fn schedule_gutter_recompute(&mut self, cx: &mut Context<Self>) {
+        if !self.git.has_baseline() {
+            return;
+        }
+        let generation = self.open_generation;
+        let debounce = self.git.arm_debounce();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RECOMPUTE_DEBOUNCE).await;
+            let _ = this.update(cx, |panel, cx| {
+                if panel.open_generation != generation || !panel.git.debounce_is_current(debounce) {
+                    return;
+                }
+                panel.recompute_gutter(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Gutter marker click: open that hunk's peek, or close it if it is the
+    /// one already open.
+    fn toggle_hunk_peek(&mut self, line: usize, cx: &mut Context<Self>) {
+        if let Some(index) = self.git.toggle_peek_at_line(line) {
+            self.scroll_to_chunk(index, cx);
+        }
+        self.apply_gutter(cx);
+    }
+
+    /// Peek back/forward: move to the adjacent hunk, wrapping at both ends.
+    fn step_hunk_peek(&mut self, step: isize, cx: &mut Context<Self>) {
+        if let Some(index) = self.git.step_peek(step) {
+            self.scroll_to_chunk(index, cx);
+        }
+        self.apply_gutter(cx);
+    }
+
+    fn close_hunk_peek(&mut self, cx: &mut Context<Self>) {
+        if self.git.close_peek() {
+            self.apply_gutter(cx);
+        }
+    }
+
+    /// Bring a hunk into view without disturbing the selection — the caret
+    /// belongs to the user, not to the peek.
+    fn scroll_to_chunk(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(offset) = self.git.chunk_offset(index) else {
+            return;
+        };
+        self.editor.update(cx, |state, cx| {
+            state.scroll_to_center(offset, cx);
+        });
+    }
+
+    /// Peek `Revert`: put the hunk back to its HEAD contents.
+    fn revert_hunk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((range, insert)) = self.git.peek_revert_edit() else {
+            return;
+        };
+        self.editor.update(cx, |state, cx| {
+            let text = state.text().clone();
+            let edit = bridge::editor_offset_edit(&text, range, insert);
+            state.apply_lsp_edits(&vec![edit], window, cx);
+        });
+        self.git.close_peek();
+        // `apply_lsp_edits` replaces text silently, so the editor emits no
+        // change event: tell the buffer and the LSP document by hand, as the
+        // formatting path does.
+        self.editor_edited(window, cx);
+        // The replacement moved the caret behind vim's back, so the block
+        // cursor has to be re-seated on it like every other programmatic edit.
+        self.vim_adopt_caret(cx);
+        // A revert re-diffs at once rather than waiting out the debounce
+        // (Electron schedules the recompute with a 0ms delay here).
+        self.recompute_gutter(cx);
+    }
+
+    /// `Alt-F5` / `Shift-Alt-F5`: move the caret to the next/previous hunk.
+    /// Unlike the peek this *does* move the selection, as Electron does.
+    fn goto_hunk(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let caret = self.editor.read(cx).selected_range().start;
+        let Some(offset) = self.git.goto_offset(caret, forward) else {
+            return;
+        };
+        self.editor.update(cx, |state, cx| {
+            let position = bridge::editor_position(state.text(), offset);
+            state.set_cursor_position(position, window, cx);
+        });
+        self.vim_adopt_caret(cx);
+    }
+
+    /// The hunk peek card, anchored under the last line of its hunk.
+    fn hunk_peek_overlay(&self, cx: &mut Context<Self>) -> Option<BlockOverlay> {
+        let index = self.git.peek_index()?;
+        let line = self.git.peek_anchor_line()?;
+        let count = self.git.chunk_count();
+        let original: SharedString = self.git.peek_original_text()?.into();
+        let panel = cx.weak_entity();
+        Some(BlockOverlay::new(line, move |_, cx| {
+            render_hunk_peek(&panel, index, count, &original, cx)
+        }))
     }
 
     /// Durable workspace watch: resubscribes on every new session, exactly
@@ -731,6 +913,11 @@ impl FilesPanel {
                             debounce: 0,
                         });
                         panel.apply_diagnostics_to_editor(cx);
+                        // The previous file's hunks say nothing about this
+                        // one: drop them, hide the column, fetch again.
+                        panel.git.clear();
+                        panel.apply_gutter(cx);
+                        panel.refresh_baseline(cx);
                         // A new buffer starts in normal mode with a fresh
                         // caret, as vim does when it opens a file.
                         if let Some(vim) = panel.vim.as_mut() {
@@ -770,6 +957,8 @@ impl FilesPanel {
         self.open_generation += 1;
         self.open = None;
         self.lsp.close_document(cx);
+        self.git.clear();
+        self.apply_gutter(cx);
         cx.notify();
     }
 
@@ -777,6 +966,8 @@ impl FilesPanel {
         if let Some(vim) = self.vim.as_mut() {
             vim.invalidate();
         }
+        self.close_hunk_peek(cx);
+        self.schedule_gutter_recompute(cx);
         self.lsp.document_edited(cx);
         let generation = self.open_generation;
         let Some(open) = &mut self.open else {
@@ -990,6 +1181,9 @@ impl FilesPanel {
                     // restore diagnostics that set_value cleared.
                     panel.lsp.document_edited(cx);
                     panel.apply_diagnostics_to_editor(cx);
+                    // `set_value` replaces the text silently, so nothing else
+                    // asks for the diff markers to be recomputed.
+                    panel.recompute_gutter(cx);
                 }
                 cx.notify();
             });
@@ -1028,6 +1222,7 @@ impl FilesPanel {
                 });
                 panel.lsp.document_edited(cx);
                 panel.apply_diagnostics_to_editor(cx);
+                panel.recompute_gutter(cx);
                 cx.notify();
             });
         })
@@ -1956,6 +2151,175 @@ impl FilesPanel {
     }
 }
 
+/// The hunk peek card: Electron's `.cm-gitDiffPeek` widget, rendered as a
+/// block overlay under the hunk's last line.
+///
+/// The one structural difference from CodeMirror is that this floats over the
+/// following lines instead of pushing them down — see [`BlockOverlay`].
+///
+/// The card swallows mouse-down, which is CodeMirror's `ignoreEvent(): true` on
+/// the widget: clicking anywhere in the card must not move the caret into the
+/// text underneath. Because the editor's own mouse-down handler sits on the
+/// Input's root container — an ancestor, so it bubbles later — stopping here is
+/// enough, and it leaves the buttons' click handlers (which fire on mouse-up)
+/// untouched.
+fn render_hunk_peek(
+    panel: &WeakEntity<FilesPanel>,
+    index: usize,
+    count: usize,
+    original: &SharedString,
+    cx: &mut App,
+) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let mut card = v_flex().flex_1().min_w_0().child(
+        h_flex()
+            .justify_between()
+            .items_center()
+            // A narrow editor pane wraps the actions to their own row rather
+            // than pushing them past the card's edge.
+            .flex_wrap()
+            .gap_2()
+            .px_2()
+            .py_0p5()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .text_size(px(11.))
+            .text_color(muted)
+            // The label yields first when the editor pane is narrow, so the
+            // actions stay reachable instead of being clipped by the card.
+            .child(div().min_w_0().truncate().child(SharedString::from(format!(
+                "Hunk {} of {}",
+                index + 1,
+                count
+            ))))
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .gap_1()
+                    .items_center()
+                    .child(
+                        Button::new("git-peek-prev")
+                            .xsmall()
+                            .outline()
+                            .label("\u{2039}")
+                            .tooltip("Previous change")
+                            .on_click({
+                                let panel = panel.clone();
+                                move |_, _: &mut Window, cx: &mut App| {
+                                    let _ = panel.update(cx, |panel, cx| {
+                                        panel.step_hunk_peek(-1, cx);
+                                    });
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("git-peek-next")
+                            .xsmall()
+                            .outline()
+                            .label("\u{203a}")
+                            .tooltip("Next change")
+                            .on_click({
+                                let panel = panel.clone();
+                                move |_, _: &mut Window, cx: &mut App| {
+                                    let _ = panel.update(cx, |panel, cx| {
+                                        panel.step_hunk_peek(1, cx);
+                                    });
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("git-peek-revert")
+                            .xsmall()
+                            .outline()
+                            .label("Revert")
+                            .tooltip("Revert this change")
+                            .on_click({
+                                let panel = panel.clone();
+                                move |_, window: &mut Window, cx: &mut App| {
+                                    let _ = panel.update(cx, |panel, cx| {
+                                        panel.revert_hunk(window, cx);
+                                    });
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("git-peek-close")
+                            .xsmall()
+                            .outline()
+                            .label("\u{2715}")
+                            .tooltip("Close")
+                            .on_click({
+                                let panel = panel.clone();
+                                move |_, _: &mut Window, cx: &mut App| {
+                                    let _ = panel.update(cx, |panel, cx| {
+                                        panel.close_hunk_peek(cx);
+                                    });
+                                }
+                            }),
+                    ),
+            ),
+    );
+    card = if original.is_empty() {
+        card.child(
+            div()
+                .px_3()
+                .py_1p5()
+                .text_size(px(11.))
+                .text_color(muted)
+                .child("Added lines \u{2014} no previous content"),
+        )
+    } else {
+        let mono = cx.theme().mono_font_family.clone();
+        let deleted = cx.theme().danger.opacity(0.08);
+        card.child(
+            v_flex()
+                .id("git-peek-body")
+                .py_1()
+                .max_h(px(200.))
+                .overflow_y_scroll()
+                .font_family(mono)
+                .text_size(px(12.))
+                .text_color(cx.theme().foreground)
+                .children(original.lines().map(|line| {
+                    div()
+                        .px_3()
+                        .bg(deleted)
+                        .whitespace_nowrap()
+                        // An empty line still needs to occupy one row.
+                        .child(SharedString::from(if line.is_empty() {
+                            " ".to_string()
+                        } else {
+                            line.to_string()
+                        }))
+                })),
+        )
+    };
+    h_flex()
+        .on_mouse_down(MouseButton::Left, |_, _: &mut Window, cx: &mut App| {
+            cx.stop_propagation();
+        })
+        .items_start()
+        .my_1()
+        .max_w(px(720.))
+        .overflow_hidden()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().popover)
+        .text_color(cx.theme().popover_foreground)
+        // Electron paints the card's left edge in `--destructive`; gpui has one
+        // border color per element, so the accent is a strip instead.
+        .child(
+            div()
+                .w(px(3.))
+                .flex_shrink_0()
+                .self_stretch()
+                .bg(cx.theme().danger.opacity(0.6)),
+        )
+        .child(card)
+        .into_any_element()
+}
+
 impl Render for FilesPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let file_open = self.open.is_some();
@@ -1966,6 +2330,18 @@ impl Render for FilesPanel {
             }))
             .on_action(cx.listener(|panel, _: &FormatDocument, window, cx| {
                 panel.format_document(window, cx);
+            }))
+            .on_action(cx.listener(|panel, _: &GotoNextHunk, window, cx| {
+                panel.goto_hunk(true, window, cx);
+            }))
+            .on_action(cx.listener(|panel, _: &GotoPreviousHunk, window, cx| {
+                panel.goto_hunk(false, window, cx);
+            }))
+            // Escape closes the peek, as it does in Electron's gutter keymap.
+            // The input handles its own Escape first (completion, IME) and
+            // propagates; with no peek open this is a no-op.
+            .on_action(cx.listener(|panel, _: &Escape, _, cx| {
+                panel.close_hunk_peek(cx);
             }))
             .on_action(cx.listener(|panel, action: &VimKeystroke, window, cx| {
                 panel.vim_key(&action.key, window, cx);

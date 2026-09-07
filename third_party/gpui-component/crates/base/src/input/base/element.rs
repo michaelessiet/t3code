@@ -2,8 +2,8 @@ use crate::input::{InputExtras as _, InputModeKind};
 use gpui::Corners;
 use gpui::Half;
 use gpui::{
-    AnyElement, App, Bounds, Edges, Element, ElementId, ElementInputHandler, Entity,
-    GlobalElementId,
+    AnyElement, App, AvailableSpace, Bounds, Edges, Element, ElementId, ElementInputHandler,
+    Entity, GlobalElementId,
 };
 use gpui::{
     HighlightStyle, Hitbox, HitboxBehavior, Hsla, InteractiveElement, IntoElement, LayoutId,
@@ -21,7 +21,7 @@ use crate::{
 };
 
 use super::{
-    InputBaseState, TextDecoration,
+    DiffGutter, DiffMarkerKind, DiffWedge, InputBaseState, InputEvent, TextDecoration,
     layout::{LastLayout, WhitespaceIndicators},
     mode::LayoutMode,
 };
@@ -69,6 +69,31 @@ pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(10.);
 const FOLD_ICON_WIDTH: Pixels = px(14.);
 const FOLD_ICON_HITBOX_WIDTH: Pixels = px(18.);
 const MAX_HIGHLIGHT_LINE_LENGTH: usize = 10_000;
+
+/// Width of the git-diff marker column, painted left of the line numbers.
+/// Electron's `.cm-gitDiffGutter` is 10px wide holding a 4px bar inset 6px
+/// from its left edge, the inset keeping the clickable bars clear of the
+/// panel/sidebar resize handles that overlay the editor's first few pixels.
+const DIFF_GUTTER_WIDTH: Pixels = px(10.);
+const DIFF_GUTTER_BAR_INSET: Pixels = px(6.);
+const DIFF_GUTTER_BAR_WIDTH: Pixels = px(4.);
+/// The deletion wedge: a right-pointing triangle, Electron's
+/// `border-left: 6px` over `border-top/bottom: 4px`.
+const DIFF_WEDGE_WIDTH: Pixels = px(6.);
+const DIFF_WEDGE_HEIGHT: Pixels = px(8.);
+/// A staged wedge is dimmed rather than hollowed — a 1px triangle outline
+/// reads as noise at this size.
+const DIFF_STAGED_WEDGE_OPACITY: f32 = 0.5;
+/// Overview ruler: change marks over the scrollbar track, Electron's
+/// `--app-scrollbar-width` default with its `minHeight` floor so a one-line
+/// change in a long file is still visible.
+const DIFF_OVERVIEW_WIDTH: Pixels = px(6.);
+const DIFF_OVERVIEW_MIN_HEIGHT: Pixels = px(3.);
+const DIFF_OVERVIEW_OPACITY: f32 = 0.7;
+const DIFF_OVERVIEW_STAGED_OPACITY: f32 = 0.45;
+/// Electron's `.cm-gitDiffPeek` box model: `margin: 4px 12px`, `maxWidth: 720px`.
+const BLOCK_OVERLAY_INSET: Pixels = px(12.);
+const BLOCK_OVERLAY_MAX_WIDTH: Pixels = px(720.);
 const FOLD_CHEVRON_RIGHT_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"#;
 const FOLD_CHEVRON_DOWN_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"#;
 
@@ -394,6 +419,31 @@ fn empty_bottom_height(
         Some(rows) => rows as f32 * line_height,
         None => viewport_height.half().max(BOTTOM_MARGIN_ROWS * line_height),
     }
+}
+
+/// One prepainted piece of the git-diff marker column, in window coordinates.
+enum DiffGutterPaint {
+    /// A change bar; `staged` hollows it out to a 1px ring.
+    Bar {
+        bounds: Bounds<Pixels>,
+        color: Hsla,
+        staged: bool,
+    },
+    /// A deletion wedge, anchored at the middle of its left edge.
+    Wedge { origin: Point<Pixels>, color: Hsla },
+}
+
+/// Layout information for the git-diff gutter.
+#[derive(Default)]
+struct DiffGutterLayout {
+    marks: Vec<DiffGutterPaint>,
+    /// One transparent click target per marked line, prepainted like the fold
+    /// icons so its listener registers deeper than the input's own
+    /// mouse-down and can stop it moving the caret.
+    hits: Vec<AnyElement>,
+    /// Overview-ruler marks as (top, height) fractions of the scrollable
+    /// height, resolved against the viewport at paint time.
+    overview: Vec<(f32, f32, Hsla)>,
 }
 
 /// Layout information for fold icons.
@@ -1044,14 +1094,17 @@ impl<M: InputModeKind> TextElement<M> {
         (visible_range, visible_buffer_lines, visible_top)
     }
 
-    /// Return (line_number_width, line_number_len)
+    /// Return (line_number_width, line_number_len, diff_gutter_width), where
+    /// `line_number_width` is the *whole* gutter — the diff marker column is
+    /// a leading slice of it, so every text-position calculation downstream
+    /// keeps working off one number.
     fn layout_line_numbers(
         state: &InputBaseState<M>,
         text: &Rope,
         font_size: Pixels,
         style: &TextStyle,
         window: &mut Window,
-    ) -> (Pixels, usize) {
+    ) -> (Pixels, usize, Pixels) {
         let total_lines = text.lines_len();
         // One extra column beyond the widest line number, so right-aligned
         // numbers keep a gap from the left edge.
@@ -1084,7 +1137,16 @@ impl<M: InputModeKind> TextElement<M> {
             line_number_width += FOLD_ICON_HITBOX_WIDTH
         }
 
-        (line_number_width, line_number_len)
+        // Reserved whether or not the gutter currently has markers, so a file
+        // going clean does not shift its text sideways.
+        let diff_gutter_width = if state.diff_gutter.is_some() {
+            DIFF_GUTTER_WIDTH
+        } else {
+            px(0.)
+        };
+        line_number_width += diff_gutter_width;
+
+        (line_number_width, line_number_len, diff_gutter_width)
     }
 
     /// Layout shaped lines for whitespace indicators (space and tab).
@@ -1225,6 +1287,235 @@ impl<M: InputModeKind> TextElement<M> {
             .collect();
 
         (first_line, ghost_lines)
+    }
+
+    /// Contiguous same-kind markers collapsed into one run per change, as
+    /// `(kind, staged, first_line, last_line)`.
+    ///
+    /// A marker carrying both a bar and a deletion wedge stays one run of its
+    /// bar kind: the ruler shows one mark per change, not one per line.
+    fn diff_overview_runs(
+        gutter: &DiffGutter,
+    ) -> Vec<(Option<DiffMarkerKind>, bool, usize, usize)> {
+        let mut runs: Vec<(Option<DiffMarkerKind>, bool, usize, usize)> = Vec::new();
+        for marker in gutter.all() {
+            if let Some(last) = runs.last_mut()
+                && last.0 == marker.marker_kind()
+                && last.1 == marker.is_staged()
+                && marker.line() <= last.3 + 1
+            {
+                last.3 = last.3.max(marker.line());
+                continue;
+            }
+            runs.push((
+                marker.marker_kind(),
+                marker.is_staged(),
+                marker.line(),
+                marker.line(),
+            ));
+        }
+        runs
+    }
+
+    fn diff_marker_color(gutter: &DiffGutter, kind: Option<DiffMarkerKind>) -> Hsla {
+        match kind {
+            Some(DiffMarkerKind::Added) => gutter.added(),
+            Some(DiffMarkerKind::Modified) => gutter.modified(),
+            None => gutter.deleted(),
+        }
+    }
+
+    /// Lay out the git-diff marker column and its overview-ruler marks.
+    ///
+    /// `origin_x` is the *unscrolled* left edge: the column is gutter chrome
+    /// and must not slide with horizontal scrolling, exactly like the fold
+    /// icons that take the same argument.
+    fn layout_diff_gutter(
+        &self,
+        origin_x: Pixels,
+        bounds: &Bounds<Pixels>,
+        last_layout: &LastLayout,
+        current_row: Option<usize>,
+        ghost_lines_height: Pixels,
+        scroll_height: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> DiffGutterLayout {
+        struct MarkedLine {
+            buffer_line: usize,
+            offset_y: Pixels,
+            height: Pixels,
+        }
+
+        let line_height = last_layout.line_height;
+        let marker_x = origin_x + DIFF_GUTTER_BAR_INSET;
+
+        let (mut layout, marked) = {
+            let state = self.state.read(cx);
+            let Some(gutter) = state.diff_gutter.as_ref() else {
+                return DiffGutterLayout::default();
+            };
+
+            let mut layout = DiffGutterLayout::default();
+            if scroll_height > px(0.) {
+                layout.overview = Self::diff_overview_runs(gutter)
+                    .into_iter()
+                    .map(|(kind, staged, first, last)| {
+                        let top = line_height * state.display_map.buffer_line_to_display_row(first);
+                        let bottom_row = state
+                            .display_map
+                            .buffer_line_to_display_row_range(last)
+                            .map(|range| range.end)
+                            .unwrap_or_else(|| {
+                                state.display_map.buffer_line_to_display_row(last) + 1
+                            });
+                        let bottom = line_height * bottom_row;
+                        let opacity = if staged {
+                            DIFF_OVERVIEW_STAGED_OPACITY
+                        } else {
+                            DIFF_OVERVIEW_OPACITY
+                        };
+                        (
+                            (top / scroll_height).clamp(0., 1.),
+                            ((bottom - top) / scroll_height).clamp(0., 1.),
+                            Self::diff_marker_color(gutter, kind).opacity(opacity),
+                        )
+                    })
+                    .collect();
+            }
+
+            let mut marked = Vec::new();
+            let mut offset_y = last_layout.visible_top;
+            for (line, &buffer_line) in last_layout
+                .lines
+                .iter()
+                .zip(last_layout.visible_buffer_lines.iter())
+            {
+                let height = line.size(line_height).height;
+                if let Some(marker) = gutter.marker_at(buffer_line) {
+                    let top = bounds.origin.y + offset_y;
+                    if let Some(kind) = marker.marker_kind() {
+                        layout.marks.push(DiffGutterPaint::Bar {
+                            bounds: Bounds::new(
+                                point(marker_x, top),
+                                size(DIFF_GUTTER_BAR_WIDTH, height),
+                            ),
+                            color: Self::diff_marker_color(gutter, Some(kind)),
+                            staged: marker.is_staged(),
+                        });
+                    }
+                    if let Some(wedge) = marker.marker_wedge() {
+                        let centre_y = match wedge {
+                            DiffWedge::Above => top,
+                            DiffWedge::Below => top + height,
+                        };
+                        let color = if marker.is_staged() {
+                            gutter.deleted().opacity(DIFF_STAGED_WEDGE_OPACITY)
+                        } else {
+                            gutter.deleted()
+                        };
+                        layout.marks.push(DiffGutterPaint::Wedge {
+                            origin: point(marker_x, centre_y),
+                            color,
+                        });
+                    }
+                    marked.push(MarkedLine {
+                        buffer_line,
+                        offset_y,
+                        height,
+                    });
+                }
+                offset_y += height;
+                if ghost_lines_height > px(0.) && current_row == Some(buffer_line) {
+                    offset_y += ghost_lines_height;
+                }
+            }
+            (layout, marked)
+        }; // state is dropped here
+
+        for line in marked {
+            let mut hit = gpui::div()
+                .id(("diff-gutter", line.buffer_line))
+                .w(DIFF_GUTTER_WIDTH)
+                .h(line.height)
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, {
+                    let state = self.state.clone();
+                    let buffer_line = line.buffer_line;
+                    move |_, _: &mut Window, cx: &mut App| {
+                        // The column is chrome: a click on it opens the hunk
+                        // peek and must not also drop the caret on that line.
+                        cx.stop_propagation();
+                        state.update(cx, |_, cx| {
+                            cx.emit(InputEvent::DiffGutterClick { line: buffer_line });
+                        });
+                    }
+                })
+                .into_any_element();
+            let origin = point(origin_x, bounds.origin.y + line.offset_y);
+            hit.prepaint_as_root(
+                origin,
+                size(DIFF_GUTTER_WIDTH, line.height).into(),
+                window,
+                cx,
+            );
+            layout.hits.push(hit);
+        }
+
+        layout
+    }
+
+    /// Lay out the embedder's block overlay under its anchor line.
+    ///
+    /// `None` when the anchor has scrolled out of the viewport: the card
+    /// belongs to a document position, and CodeMirror's block widget likewise
+    /// leaves the screen with the line it is attached to.
+    fn layout_block_overlay(
+        &self,
+        origin_x: Pixels,
+        bounds: &Bounds<Pixels>,
+        last_layout: &LastLayout,
+        current_row: Option<usize>,
+        ghost_lines_height: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        let overlay = self.state.read(cx).block_overlay.clone()?;
+        let line_height = last_layout.line_height;
+
+        let mut offset_y = last_layout.visible_top;
+        let mut anchor = None;
+        for (line, &buffer_line) in last_layout
+            .lines
+            .iter()
+            .zip(last_layout.visible_buffer_lines.iter())
+        {
+            offset_y += line.size(line_height).height;
+            if ghost_lines_height > px(0.) && current_row == Some(buffer_line) {
+                offset_y += ghost_lines_height;
+            }
+            if buffer_line == overlay.line() {
+                anchor = Some(offset_y);
+                break;
+            }
+        }
+        let top = anchor?;
+
+        let left = origin_x + last_layout.line_number_width + BLOCK_OVERLAY_INSET;
+        let width = (bounds.size.width - last_layout.line_number_width - BLOCK_OVERLAY_INSET * 2.)
+            .min(BLOCK_OVERLAY_MAX_WIDTH);
+        if width <= px(0.) {
+            return None;
+        }
+
+        let mut element = overlay.build(window, cx);
+        element.prepaint_as_root(
+            point(left, bounds.origin.y + top),
+            size(AvailableSpace::Definite(width), AvailableSpace::MinContent),
+            window,
+            cx,
+        );
+        Some(element)
     }
 
     /// Return (line_number_width, line_number_len)
@@ -1696,6 +1987,10 @@ pub(super) struct PrepaintState {
     document_color_paths: Vec<(Path<Pixels>, Hsla)>,
     hover_definition_hitbox: Option<Hitbox>,
     indent_guides_path: Option<Path<Pixels>>,
+    /// Git-diff marker column, its click targets and its ruler marks.
+    diff_gutter: DiffGutterLayout,
+    /// The embedder's card, anchored under a buffer line and painted last.
+    block_overlay: Option<AnyElement>,
     bounds: Bounds<Pixels>,
     /// Fold icon layout data
     fold_icon_layout: FoldIconLayout,
@@ -1841,7 +2136,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         };
 
         // Calculate the width of the line numbers
-        let (line_number_width, line_number_len) =
+        let (line_number_width, line_number_len, diff_gutter_width) =
             Self::layout_line_numbers(&state, &text, text_size, &text_style, window);
 
         let mut bounds = bounds;
@@ -1922,6 +2217,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
             wrap_width,
             wrapping_indent,
             line_number_width,
+            diff_gutter_width,
             lines: Rc::new(vec![]),
             cursor_bounds: None,
             text_align: state.text_align,
@@ -2185,6 +2481,25 @@ impl<M: InputModeKind> Element for TextElement<M> {
             )));
         let fold_icon_layout =
             self.layout_fold_icons(original_x, &bounds, &last_layout, window, cx);
+        let diff_gutter = self.layout_diff_gutter(
+            original_x,
+            &bounds,
+            &last_layout,
+            current_row,
+            ghost_lines_height,
+            scroll_size.height,
+            window,
+            cx,
+        );
+        let block_overlay = self.layout_block_overlay(
+            original_x,
+            &bounds,
+            &last_layout,
+            current_row,
+            ghost_lines_height,
+            window,
+            cx,
+        );
 
         PrepaintState {
             bounds,
@@ -2201,6 +2516,8 @@ impl<M: InputModeKind> Element for TextElement<M> {
             hover_definition_hitbox,
             document_color_paths,
             indent_guides_path,
+            diff_gutter,
+            block_overlay,
             fold_icon_layout,
             ghost_first_line,
             ghost_lines,
@@ -2441,7 +2758,12 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 .iter()
                 .zip(prepaint.last_layout.visible_buffer_lines.iter())
             {
-                let p = point(input_bounds.origin.x, origin.y + offset_y);
+                // Line numbers start after the diff marker column, which
+                // owns the leading slice of the gutter width.
+                let p = point(
+                    input_bounds.origin.x + prepaint.last_layout.diff_gutter_width,
+                    origin.y + offset_y,
+                );
                 let is_active = prepaint.current_row == Some(buffer_line);
 
                 let height = line_height * lines.len() as f32;
@@ -2467,6 +2789,54 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 if !prepaint.ghost_lines.is_empty() && prepaint.current_row == Some(buffer_line) {
                     offset_y += prepaint.ghost_lines_height;
                 }
+            }
+        }
+
+        // Paint the git-diff marker column, on top of the gutter background
+        // painted above — that background is what keeps the column opaque
+        // while the text scrolls horizontally underneath it.
+        for mark in prepaint.diff_gutter.marks.iter() {
+            match mark {
+                DiffGutterPaint::Bar {
+                    bounds,
+                    color,
+                    staged,
+                } => {
+                    if *staged {
+                        // Staged hunks render hollow, Electron's inset ring.
+                        window.paint_quad(gpui::outline(*bounds, *color, gpui::BorderStyle::Solid));
+                    } else {
+                        window.paint_quad(fill(*bounds, *color));
+                    }
+                }
+                DiffGutterPaint::Wedge { origin, color } => {
+                    let mut builder = gpui::PathBuilder::fill();
+                    builder.move_to(point(origin.x, origin.y - DIFF_WEDGE_HEIGHT.half()));
+                    builder.line_to(point(origin.x + DIFF_WEDGE_WIDTH, origin.y));
+                    builder.line_to(point(origin.x, origin.y + DIFF_WEDGE_HEIGHT.half()));
+                    if let Ok(path) = builder.build() {
+                        window.paint_path(path, *color);
+                    }
+                }
+            }
+        }
+        for hit in prepaint.diff_gutter.hits.iter_mut() {
+            hit.paint(window, cx);
+        }
+
+        // Overview ruler: change marks over the scrollbar track, so a change
+        // outside the viewport is still findable. Non-interactive by design —
+        // capturing clicks here would break dragging the scrollbar thumb.
+        if !prepaint.diff_gutter.overview.is_empty() {
+            let strip_x = input_bounds.origin.x + input_bounds.size.width - DIFF_OVERVIEW_WIDTH;
+            let strip_height = input_bounds.size.height;
+            for (top_fraction, height_fraction, color) in prepaint.diff_gutter.overview.iter() {
+                let top = input_bounds.origin.y + strip_height * *top_fraction;
+                let height = (strip_height * *height_fraction).max(DIFF_OVERVIEW_MIN_HEIGHT);
+                window.paint_quad(fill(
+                    Bounds::new(point(strip_x, top), size(DIFF_OVERVIEW_WIDTH, height)),
+                    *color,
+                ));
             }
         }
 
@@ -2512,6 +2882,13 @@ impl<M: InputModeKind> Element for TextElement<M> {
                     _ = first_line.paint(p, line_height, text_align, None, window, cx);
                 }
             }
+        }
+
+        // The embedder's card paints last so it sits above the lines it
+        // overlays, and after the state update above so a card that reads the
+        // input's geometry sees this frame's values.
+        if let Some(overlay) = prepaint.block_overlay.as_mut() {
+            overlay.paint(window, cx);
         }
 
         self.paint_mouse_listeners(window, cx);

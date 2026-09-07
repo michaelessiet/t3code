@@ -164,12 +164,193 @@ impl BlockCursor {
     }
 }
 
+/// What a git-diff gutter marker says happened to a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffMarkerKind {
+    Added,
+    Modified,
+}
+
+/// Which side of a line a deletion wedge hangs off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffWedge {
+    Above,
+    Below,
+}
+
+/// One buffer line's git-diff decoration.
+///
+/// A marker can be a bar, a deletion wedge, or both: a hunk that replaced
+/// more lines than it left behind draws a bar on its last surviving line and
+/// hangs the deletion under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffMarker {
+    line: usize,
+    kind: Option<DiffMarkerKind>,
+    staged: bool,
+    wedge: Option<DiffWedge>,
+}
+
+impl DiffMarker {
+    /// An empty marker on zero-based buffer line `line`.
+    pub fn new(line: usize) -> Self {
+        Self {
+            line,
+            kind: None,
+            staged: false,
+            wedge: None,
+        }
+    }
+
+    pub fn kind(mut self, kind: Option<DiffMarkerKind>) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// Staged markers render hollow, the way Electron swaps the bar's fill for
+    /// an inset ring.
+    pub fn staged(mut self, staged: bool) -> Self {
+        self.staged = staged;
+        self
+    }
+
+    pub fn wedge(mut self, wedge: Option<DiffWedge>) -> Self {
+        self.wedge = wedge;
+        self
+    }
+
+    pub fn line(&self) -> usize {
+        self.line
+    }
+
+    pub fn is_staged(&self) -> bool {
+        self.staged
+    }
+
+    pub fn marker_kind(&self) -> Option<DiffMarkerKind> {
+        self.kind
+    }
+
+    pub fn marker_wedge(&self) -> Option<DiffWedge> {
+        self.wedge
+    }
+}
+
+/// The editor's git-diff gutter: a marker column painted to the *left* of the
+/// line numbers, plus the matching marks on the scrollbar's overview ruler.
+///
+/// Setting one (even with no markers) reserves the column, so a file going
+/// clean does not shift the text sideways. The embedder owns the colours; the
+/// base layer has no opinion about what "added" looks like.
+///
+/// See [`InputBaseState::set_diff_gutter`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiffGutter {
+    markers: Vec<DiffMarker>,
+    added: Hsla,
+    modified: Hsla,
+    deleted: Hsla,
+}
+
+impl DiffGutter {
+    pub fn new(
+        added: impl Into<Hsla>,
+        modified: impl Into<Hsla>,
+        deleted: impl Into<Hsla>,
+    ) -> Self {
+        Self {
+            markers: Vec::new(),
+            added: added.into(),
+            modified: modified.into(),
+            deleted: deleted.into(),
+        }
+    }
+
+    /// Replace the markers. Sorted on the way in so painting a viewport is a
+    /// binary search per line rather than a scan of the whole file.
+    pub fn markers(mut self, mut markers: Vec<DiffMarker>) -> Self {
+        markers.sort_by_key(|marker| marker.line);
+        self.markers = markers;
+        self
+    }
+
+    pub fn added(&self) -> Hsla {
+        self.added
+    }
+
+    pub fn modified(&self) -> Hsla {
+        self.modified
+    }
+
+    pub fn deleted(&self) -> Hsla {
+        self.deleted
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.markers.is_empty()
+    }
+
+    /// Marker on zero-based buffer line `line`, if any.
+    pub(super) fn marker_at(&self, line: usize) -> Option<&DiffMarker> {
+        self.markers
+            .binary_search_by_key(&line, |marker| marker.line)
+            .ok()
+            .map(|index| &self.markers[index])
+    }
+
+    pub(super) fn all(&self) -> &[DiffMarker] {
+        &self.markers
+    }
+}
+
+/// An embedder-rendered card anchored under a buffer line — the editor's own
+/// geometry, the embedder's content.
+///
+/// Backs Vitre's git-hunk peek. Unlike CodeMirror's block widget it *overlays*
+/// the lines below rather than pushing them down, because the display map's
+/// row arithmetic is shared with folding, wrapping and the LSP hover popover:
+/// a block that changed line heights would have to be threaded through all of
+/// them. The card is painted last, so it sits above the text.
+#[derive(Clone)]
+pub struct BlockOverlay {
+    line: usize,
+    render: Rc<dyn Fn(&mut Window, &mut App) -> gpui::AnyElement>,
+}
+
+impl BlockOverlay {
+    /// Anchor `render` under zero-based buffer line `line`.
+    pub fn new(
+        line: usize,
+        render: impl Fn(&mut Window, &mut App) -> gpui::AnyElement + 'static,
+    ) -> Self {
+        Self {
+            line,
+            render: Rc::new(render),
+        }
+    }
+
+    pub fn line(&self) -> usize {
+        self.line
+    }
+
+    pub(super) fn build(&self, window: &mut Window, cx: &mut App) -> gpui::AnyElement {
+        (self.render)(window, cx)
+    }
+}
+
 #[derive(Clone)]
 pub enum InputEvent {
     Change,
-    PressEnter { secondary: bool, shift: bool },
+    PressEnter {
+        secondary: bool,
+        shift: bool,
+    },
     Focus,
     Blur,
+    /// A git-diff gutter marker was clicked, on a zero-based buffer line.
+    DiffGutterClick {
+        line: usize,
+    },
 }
 
 pub(super) const CONTEXT: &str = "Input";
@@ -351,6 +532,10 @@ pub struct InputBaseState<M: InputModeKind> {
     /// Modal block cursor painted in place of the thin blinking caret.
     /// See [`Self::set_block_cursor`].
     pub(super) block_cursor: Option<BlockCursor>,
+    /// See [`Self::set_diff_gutter`].
+    pub(super) diff_gutter: Option<DiffGutter>,
+    /// See [`Self::set_block_overlay`].
+    pub(super) block_overlay: Option<BlockOverlay>,
     pub(super) soft_wrap: bool,
     pub(super) wrapping_indent: WrappingIndent,
     pub(super) scroll_beyond_last_line: Option<usize>,
@@ -673,6 +858,8 @@ impl<M: InputModeKind> InputBaseState<M> {
             replaceable: true,
             extra_key_context: None,
             block_cursor: None,
+            diff_gutter: None,
+            block_overlay: None,
             soft_wrap: true,
             wrapping_indent: WrappingIndent::default(),
             scroll_beyond_last_line: None,
@@ -774,6 +961,31 @@ impl<M: InputModeKind> InputBaseState<M> {
             return;
         }
         self.block_cursor = cursor;
+        cx.notify();
+    }
+
+    /// Show a git-diff marker column to the left of the line numbers.
+    ///
+    /// `None` removes the column entirely; `Some` reserves it whether or not
+    /// it currently has markers, so a file that goes clean does not shift its
+    /// text sideways. Clicking a marker emits
+    /// [`InputEvent::DiffGutterClick`] and does *not* move the caret — the
+    /// column is chrome, not text.
+    pub fn set_diff_gutter(&mut self, gutter: Option<DiffGutter>, cx: &mut Context<Self>) {
+        if self.diff_gutter == gutter {
+            return;
+        }
+        self.diff_gutter = gutter;
+        cx.notify();
+    }
+
+    /// Anchor an embedder-rendered card under a buffer line.
+    ///
+    /// Always notifies: the card is a closure, so the base layer cannot tell
+    /// whether its contents changed, and it is only ever set when one is
+    /// opened, moved or closed.
+    pub fn set_block_overlay(&mut self, overlay: Option<BlockOverlay>, cx: &mut Context<Self>) {
+        self.block_overlay = overlay;
         cx.notify();
     }
 
@@ -1954,6 +2166,36 @@ impl<M: InputModeKind> InputBaseState<M> {
         };
         offset.x = offset.x.clamp(safe_x_range.start, safe_x_range.end);
         self.scroll_handle.set_offset(offset);
+        cx.notify();
+    }
+
+    /// Scroll a byte offset to the middle of the viewport *without* moving
+    /// the caret.
+    ///
+    /// The editor's own navigation scrolls as a side effect of moving the
+    /// caret, so nothing internal needs this. An embedder jumping to a
+    /// document position whose selection it does not own — Vitre's git-hunk
+    /// peek — has no other way to ask. Centring, rather than the nearest-edge
+    /// scroll [`Self::scroll_to`] does, is what makes such a jump legible:
+    /// the target arrives with context above and below it.
+    pub fn scroll_to_center(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let Some(last_layout) = self.last_layout.as_ref() else {
+            return;
+        };
+        let Some(bounds) = self.last_bounds.as_ref() else {
+            return;
+        };
+        let line_height = last_layout.line_height;
+        let row = self.text.offset_to_point(offset).row;
+        let row_offset_y = line_height * self.display_map.buffer_line_to_display_row(row);
+
+        let mut scroll_offset = self.scroll_handle.offset();
+        scroll_offset.y = -(row_offset_y - bounds.size.height / 2. + line_height / 2.);
+        // Same clamp `scroll_to` applies, so paint never shows an over-scrolled
+        // frame before the post-paint clamp pulls it back.
+        let safe_y_min = (-self.scroll_size.height + self.input_bounds.size.height).min(px(0.));
+        scroll_offset.y = scroll_offset.y.clamp(safe_y_min, px(0.));
+        self.deferred_scroll_offset = Some(scroll_offset);
         cx.notify();
     }
 

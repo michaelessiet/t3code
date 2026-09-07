@@ -98,6 +98,10 @@ wry = { version = "0.53.3", package = "lb-wry" }
 anyhow = "1"
 futures = "0.3"
 getrandom = "0.3"
+# Line diffs for the editor's git gutter (Apache-2.0). The histogram
+# algorithm is the same family git itself uses, so hunk boundaries agree
+# with `git diff`. `unified_diff` printing is off: we render hunks ourselves.
+imara-diff = { version = "0.2", default-features = false }
 libc = "0.2"
 # Same pin as the vendored gpui-component fork, so our LSP providers and the
 # editor's provider traits speak one resolved crate.

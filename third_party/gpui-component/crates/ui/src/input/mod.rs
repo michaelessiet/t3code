@@ -15,9 +15,10 @@ pub struct Tree;
 /// through the concrete state of their control, never across the public API.
 pub(crate) use gpui_base::input::InputBaseState;
 pub use gpui_base::input::{
-    Backspace, BlockCursor, BufferPoint, CodeActionItem, CodeActionProvider, CompletionMenuOptions,
-    CompletionProvider, Copy, Cut, DefinitionProvider, Delete, DeleteToBeginningOfLine,
-    DeleteToEndOfLine, DeleteToNextWordEnd, DeleteToPreviousWordStart, DisplayMap, DisplayPoint,
+    Backspace, BlockCursor, BlockOverlay, BufferPoint, CodeActionItem, CodeActionProvider,
+    CompletionMenuOptions, CompletionProvider, Copy, Cut, DefinitionProvider, Delete,
+    DeleteToBeginningOfLine, DeleteToEndOfLine, DeleteToNextWordEnd, DeleteToPreviousWordStart,
+    DiffGutter, DiffMarker, DiffMarkerKind, DiffWedge, DisplayMap, DisplayPoint,
     DocumentColorProvider, DocumentRangeSemanticTokensProvider, EditorState, Enter, Escape,
     FoldRange, GoToDefinition, HighlightStyleResolver, HoverPopoverState, HoverProvider, Indent,
     IndentInline, InputEdit, InputEvent, InputHighlighter, InputHighlighterFactory, InputState,

@@ -4,6 +4,7 @@
 mod assets;
 mod chat;
 mod files;
+mod git_gutter;
 mod lsp;
 mod palette;
 mod sidebar_prefs;
@@ -195,6 +196,10 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new(&modified("s"), files::SaveFile, None),
             KeyBinding::new("shift-alt-f", files::FormatDocument, None),
+            // Git hunk navigation, the chords Electron's git gutter binds on
+            // the editor itself (`gitDiffGutter.ts`), not rebindable commands.
+            KeyBinding::new("alt-f5", files::GotoNextHunk, None),
+            KeyBinding::new("shift-alt-f5", files::GotoPreviousHunk, None),
         ]);
 
         // Palette surfaces and the workspace commands their rows advertise.

@@ -28,6 +28,7 @@ pub mod diff_panel;
 pub mod diff_patch;
 pub mod file_buffer;
 pub mod file_tree;
+pub mod git_gutter;
 pub mod lsp_gating;
 pub mod project_grouping;
 pub mod project_scripts;

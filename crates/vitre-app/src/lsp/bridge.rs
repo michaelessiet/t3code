@@ -537,6 +537,23 @@ pub fn wire_position(position: &WireLspPosition) -> WirePosition {
     }
 }
 
+/// A buffer edit already expressed in byte offsets — the git gutter's hunk
+/// revert, which computes its range against the buffer itself rather than
+/// receiving one from a server.
+pub fn editor_offset_edit(
+    text: &Rope,
+    range: std::ops::Range<usize>,
+    new_text: String,
+) -> TextEdit {
+    TextEdit {
+        range: lsp_types::Range {
+            start: editor_position(text, range.start),
+            end: editor_position(text, range.end),
+        },
+        new_text,
+    }
+}
+
 pub fn editor_text_edit(text: &Rope, edit: &LspTextEdit) -> TextEdit {
     TextEdit {
         range: editor_range(text, &edit.range),
