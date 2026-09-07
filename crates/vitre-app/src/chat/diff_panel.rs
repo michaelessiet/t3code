@@ -521,7 +521,7 @@ impl DiffPanel {
                     }
                 }
             }
-            let result = result.map_err(|error| format!("{error}"));
+            let result = result.map_err(|error| error.user_message());
             let _ = this.update(cx, |panel, cx| panel.apply_preview(generation, result, cx));
         })
         .detach();
@@ -587,7 +587,7 @@ impl DiffPanel {
                     })
                     .await
                     .map(|result| result.diff.0)
-                    .map_err(|error| format!("{error}"))
+                    .map_err(|error| error.user_message())
             } else {
                 client
                     .call::<OrchestrationGetTurnDiff>(&OrchestrationTurnDiffRange {
@@ -598,7 +598,7 @@ impl DiffPanel {
                     })
                     .await
                     .map(|result| result.diff.0)
-                    .map_err(|error| format!("{error}"))
+                    .map_err(|error| error.user_message())
             };
             let _ = this.update(cx, |panel, cx| {
                 panel.apply_turn_diff(generation, result, cx)

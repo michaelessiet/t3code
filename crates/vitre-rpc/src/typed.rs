@@ -21,7 +21,12 @@ use crate::session::{RpcSession, StreamEvent, Subscription};
 pub enum TypedError<E> {
     /// The handler failed with its contract-declared error union (an
     /// `Exit.Failure` whose cause is typed `Fail` entries).
-    #[error("rpc failed with a contract error")]
+    ///
+    /// `Debug` rather than a fixed string: the payload *is* the diagnosis, and
+    /// a constant here is what made every contract failure in the app read
+    /// "rpc failed with a contract error". For text a user should see, prefer
+    /// [`TypedError::user_message`].
+    #[error("rpc failed: {0:?}")]
     Failed(E),
     /// Transport-, protocol- or defect-level failure.
     #[error(transparent)]
@@ -36,6 +41,47 @@ impl<E> TypedError<E> {
             self,
             TypedError::Rpc(RpcError::Ws(_) | RpcError::ConnectionClosed | RpcError::Transport(_))
         )
+    }
+}
+
+impl<E: serde::Serialize> TypedError<E> {
+    /// The failure as text to put in front of a user.
+    ///
+    /// Every contract error in the generated unions carries a mandatory
+    /// `message` — Effect's `TaggedError` builds it server-side, e.g.
+    /// `ProjectReadFileError`'s "Failed to read workspace file 'x' in 'y'." —
+    /// and that string is exactly what Electron renders, so surfacing it
+    /// verbatim is the parity-correct choice. Re-serializing to get at it is
+    /// lossless: the unions are `#[serde(untagged)]`, so a member encodes back
+    /// to its own wire object, and `Unknown` holds the raw JSON already.
+    pub fn user_message(&self) -> String {
+        match self {
+            TypedError::Rpc(error) => error.to_string(),
+            TypedError::Failed(typed) => serde_json::to_value(typed)
+                .map(|value| describe_fail(&value))
+                .unwrap_or_else(|error| format!("rpc failed, undescribable: {error}")),
+        }
+    }
+}
+
+/// `message`, else `detail`, else the tag, else the payload — the ladder the
+/// generated unions make possible, ending at something that at least names the
+/// failure rather than the transport.
+fn describe_fail(value: &serde_json::Value) -> String {
+    let text = ["message", "detail"]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    let tag = value
+        .get("_tag")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty());
+    match (tag, text) {
+        (_, Some(text)) => text.to_string(),
+        (Some(tag), None) => tag.to_string(),
+        (None, None) => format!("rpc failed: {value}"),
     }
 }
 
@@ -186,6 +232,48 @@ mod tests {
             }
             other => panic!("expected Unknown typed failure, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn user_message_prefers_the_servers_own_message() {
+        let error = failed(json!([
+            {"_tag": "Fail", "error": {
+                "_tag": "EnvironmentAuthorizationError",
+                "message": "missing scope",
+                "requiredScope": "orchestration:read",
+            }}
+        ]));
+        // What Electron shows for the same failure — not the tag, and not a
+        // Rust `Debug` dump of the decoded struct.
+        assert_eq!(
+            classify::<ServerGetConfigError>(error).user_message(),
+            "missing scope"
+        );
+    }
+
+    #[test]
+    fn user_message_falls_back_to_the_tag_then_the_payload() {
+        let tagged = failed(json!([
+            {"_tag": "Fail", "error": {"_tag": "SomeFutureError", "count": 3}}
+        ]));
+        assert_eq!(
+            classify::<OrchestrationSubscribeShellError>(tagged).user_message(),
+            "SomeFutureError"
+        );
+
+        // A future error union member with neither a tag nor a message still
+        // has to say *something*, or the UI is back where it started.
+        let untagged = failed(json!([{"_tag": "Fail", "error": {"count": 3}}]));
+        assert_eq!(
+            classify::<OrchestrationSubscribeShellError>(untagged).user_message(),
+            "rpc failed: {\"count\":3}"
+        );
+    }
+
+    #[test]
+    fn user_message_defers_to_the_transport_error_for_non_contract_failures() {
+        let error: TypedError<ServerGetConfigError> = TypedError::Rpc(RpcError::ConnectionClosed);
+        assert_eq!(error.user_message(), RpcError::ConnectionClosed.to_string());
     }
 
     #[test]

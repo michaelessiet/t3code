@@ -428,7 +428,7 @@ impl QuickSearch {
                         this.reveal(line, cx);
                     }
                     Err(error) => {
-                        this.preview_state = PreviewFile::Error(format!("{error}").into());
+                        this.preview_state = PreviewFile::Error(error.user_message().into());
                     }
                 }
                 cx.notify();
@@ -896,7 +896,7 @@ async fn fetch(
                                 .collect(),
                             None,
                         ),
-                        Err(error) => (Vec::new(), Some(format!("{error}").into())),
+                        Err(error) => (Vec::new(), Some(error.user_message().into())),
                     }
                 }
             };
@@ -921,7 +921,7 @@ async fn fetch(
                         .collect(),
                     None,
                 ),
-                Err(error) => (Vec::new(), Some(SharedString::from(format!("{error}")))),
+                Err(error) => (Vec::new(), Some(SharedString::from(error.user_message()))),
             };
 
             let (file_items, file_error) = match cwd {
@@ -947,7 +947,7 @@ async fn fetch(
                                 .collect(),
                             None,
                         ),
-                        Err(error) => (Vec::new(), Some(SharedString::from(format!("{error}")))),
+                        Err(error) => (Vec::new(), Some(SharedString::from(error.user_message()))),
                     }
                 }
             };

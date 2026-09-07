@@ -162,6 +162,18 @@ impl RevealTarget {
     }
 }
 
+/// A file the panel asked for and could not get.
+///
+/// Electron keeps the surface: the breadcrumb, the right-panel tab and the
+/// tree aside all render off the requested path, and only the content area is
+/// replaced by the server's message (`FilePreviewPanel.tsx`'s error branch).
+/// Vitre used to leave the *previous* file on screen and put a banner above
+/// it, so the error read as if it were about the file you were looking at.
+struct OpenError {
+    relative_path: String,
+    message: SharedString,
+}
+
 struct OpenFile {
     relative_path: String,
     buffer: FileBuffer,
@@ -247,6 +259,9 @@ pub struct FilesPanel {
     /// Latest diagnostics per relative path (latest event wins, empty
     /// clears — the Electron per-file replacement semantics).
     diagnostics: HashMap<String, Vec<LspDiagnostic>>,
+    /// The last open that failed, kept until another open supersedes it.
+    /// Mutually exclusive with [`Self::open`].
+    open_error: Option<OpenError>,
     /// Cross-file go-to-definition target, applied once that file loads.
     pending_reveal: Option<(String, RevealTarget)>,
     /// The reveal the tree has already followed, as (generation, path).
@@ -358,6 +373,7 @@ impl FilesPanel {
             lsp,
             vim: EditorPrefs::vim_mode(cx).then(VimSession::new),
             diagnostics: HashMap::new(),
+            open_error: None,
             pending_reveal: None,
             open_generation: 0,
             list_generation: 0,
@@ -453,7 +469,9 @@ impl FilesPanel {
                     Err(error) => {
                         let _ = this.update(cx, |panel, cx| {
                             panel.listing_in_flight = false;
-                            panel.status = Some(format!("listEntries failed: {error}").into());
+                            panel.status = Some(
+                                format!("listEntries failed: {}", error.user_message()).into(),
+                            );
                             cx.notify();
                         });
                         return;
@@ -1074,6 +1092,8 @@ impl FilesPanel {
         }
         self.open_generation += 1;
         self.reveal_generation += 1;
+        // Whatever failed before is not what we are loading now.
+        self.open_error = None;
         let generation = self.open_generation;
         let client = self.client.clone();
         let payload = ProjectReadFileInput {
@@ -1102,6 +1122,7 @@ impl FilesPanel {
                                 .open_document(&path, result.contents.0.clone(), cx);
                             panel.lsp.refresh_server_status(cx);
                         }
+                        panel.open_error = None;
                         panel.open = Some(OpenFile {
                             relative_path: path.clone(),
                             buffer: FileBuffer::open(revision),
@@ -1142,12 +1163,11 @@ impl FilesPanel {
                     });
                 }
                 Err(error) => {
-                    let _ = this.update(cx, |panel, cx| {
+                    let _ = this.update_in(cx, |panel, window, cx| {
                         if panel.open_generation != generation {
                             return;
                         }
-                        panel.status = Some(format!("open failed: {error}").into());
-                        cx.notify();
+                        panel.fail_open(path, error.user_message().into(), window, cx);
                     });
                 }
             }
@@ -1155,9 +1175,38 @@ impl FilesPanel {
         .detach();
     }
 
+    /// Show `message` in place of the buffer, attributed to `path`.
+    ///
+    /// The previous file goes with it — clicking a file in Electron swaps the
+    /// surface's path immediately, so its content is gone whether the new read
+    /// succeeds or not, and keeping it here is what let an error about one file
+    /// paint over another.
+    fn fail_open(
+        &mut self,
+        path: String,
+        message: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open = None;
+        self.pending_reveal = None;
+        self.lsp.close_document(cx);
+        self.git.clear();
+        self.apply_gutter(cx);
+        self.clear_reveal_highlight(cx);
+        self.editor
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.open_error = Some(OpenError {
+            relative_path: path,
+            message,
+        });
+        cx.notify();
+    }
+
     fn close_file(&mut self, cx: &mut Context<Self>) {
         self.open_generation += 1;
         self.open = None;
+        self.open_error = None;
         self.lsp.close_document(cx);
         self.git.clear();
         self.apply_gutter(cx);
@@ -1338,7 +1387,14 @@ impl FilesPanel {
                     }
                     Err(error) => {
                         open.buffer.save_failed();
-                        panel.status = Some(format!("save failed: {error}").into());
+                        panel.status = Some(
+                            format!(
+                                "save failed ({}): {}",
+                                open.relative_path,
+                                error.user_message()
+                            )
+                            .into(),
+                        );
                     }
                 }
                 cx.notify();
@@ -1704,7 +1760,8 @@ impl FilesPanel {
                 }
                 Err(error) => {
                     let _ = this.update(cx, |panel, cx| {
-                        panel.status = Some(format!("operation failed: {error}").into());
+                        panel.status =
+                            Some(format!("operation failed: {}", error.user_message()).into());
                         cx.notify();
                     });
                 }
@@ -1759,9 +1816,22 @@ impl FilesPanel {
     }
 
     fn close_if_within(&mut self, path: &str, cx: &mut Context<Self>) {
-        let within = self.open.as_ref().is_some_and(|open| {
-            open.relative_path == path || open.relative_path.starts_with(&format!("{path}/"))
-        });
+        let is_within =
+            |candidate: &str| candidate == path || candidate.starts_with(&format!("{path}/"));
+        // A failed-open surface for something inside the deleted path is just
+        // as stale as an open buffer would be.
+        if self
+            .open_error
+            .as_ref()
+            .is_some_and(|error| is_within(&error.relative_path))
+        {
+            self.open_error = None;
+            cx.notify();
+        }
+        let within = self
+            .open
+            .as_ref()
+            .is_some_and(|open| is_within(&open.relative_path));
         if within {
             self.close_file(cx);
         }
@@ -2421,7 +2491,29 @@ impl FilesPanel {
         )
     }
 
-    fn render_editor_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_editor_area(&self, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(failed) = self.open_error.as_ref() {
+            // Electron: one centred line of destructive text where the editor
+            // would be, carrying the server's own message and nothing else —
+            // no icon, no title, no retry button.
+            return v_flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .px_8()
+                        .max_w(px(480.))
+                        .text_sm()
+                        .text_center()
+                        .text_color(cx.theme().danger)
+                        .debug_selector(|| "files-open-error".into())
+                        .child(failed.message.clone()),
+                )
+                .into_any_element();
+        }
         let open = self.open.as_ref();
         let conflict = open.and_then(|open| open.buffer.conflict());
         let truncated = open.is_some_and(|open| open.truncated);
@@ -2449,13 +2541,19 @@ impl FilesPanel {
                 ),
             )
             .children(self.render_vim_status(cx))
+            .into_any_element()
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let open_path = self
             .open
             .as_ref()
-            .map(|open| open.relative_path.replace('/', " › "));
+            .map(|open| open.relative_path.as_str())
+            .or(self
+                .open_error
+                .as_ref()
+                .map(|failed| failed.relative_path.as_str()))
+            .map(|path| path.replace('/', " › "));
         let dirty = self
             .open
             .as_ref()
@@ -2733,7 +2831,9 @@ fn render_hunk_peek(
 
 impl Render for FilesPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let file_open = self.open.is_some();
+        // A file that failed to open still holds the surface: breadcrumb,
+        // toggle and aside behave as they do for a file that loaded.
+        let file_open = self.open.is_some() || self.open_error.is_some();
         v_flex()
             .size_full()
             .on_action(cx.listener(|panel, _: &SaveFile, window, cx| {
@@ -2816,7 +2916,9 @@ impl Render for FilesPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::language_for_path;
+    use super::*;
+    use gpui::TestAppContext;
+    use vitre_sidecar::SupervisorStatus;
 
     #[test]
     fn language_for_path_uses_extension_and_known_names() {
@@ -2825,5 +2927,89 @@ mod tests {
         assert_eq!(language_for_path("Makefile"), "make");
         assert_eq!(language_for_path("LICENSE"), "text");
         assert_eq!(language_for_path(".gitignore"), "text");
+    }
+
+    /// A read that fails must not read as an error about whatever file happens
+    /// to be on screen.
+    ///
+    /// This is the bug the `.mcp.json` report was: `open_file`'s failure arm
+    /// wrote a panel-global status line and left `open` alone, so a failed open
+    /// of a *restored* surface (a path recorded against another workspace root)
+    /// painted "open failed: …" over an unrelated, perfectly healthy buffer,
+    /// naming neither file. Electron swaps the surface to the path you asked
+    /// for and replaces only the content area, which is what this asserts.
+    #[gpui::test]
+    fn a_failed_open_takes_over_the_surface_it_asked_for(cx: &mut TestAppContext) {
+        // The panel fires a listing and a watch subscription on construction.
+        // A supervisor that never reaches `Ready` parks both forever, which is
+        // exactly what this test wants: the transition under test is driven by
+        // hand, with no server in the loop.
+        let runtime = tokio::runtime::Runtime::new().expect("a tokio runtime");
+        let guard = runtime.enter();
+        let (sidecar, status) = tokio::sync::watch::channel(SupervisorStatus::Idle);
+        let client = Arc::new(EnvironmentClient::start(status));
+        drop(guard);
+        // The client is inert from here on: its background tasks are aborted,
+        // so nothing ever wakes the panel's foreground tasks from a tokio
+        // worker — which gpui's test scheduler rejects as non-deterministic.
+        runtime.shutdown_background();
+
+        cx.update(gpui_component::init);
+        let (panel, cx) = cx.add_window_view(|window, cx| {
+            FilesPanel::new(client, "/tmp/project".into(), window, cx)
+        });
+
+        // A file is open and showing its contents.
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.open = Some(OpenFile {
+                    relative_path: "src/a.rs".into(),
+                    buffer: FileBuffer::open(None),
+                    truncated: false,
+                    debounce: 0,
+                });
+                panel
+                    .editor
+                    .update(cx, |state, cx| state.set_value("fn a() {}", window, cx));
+            });
+        });
+
+        // Another file's read fails.
+        let message = "Failed to read workspace file 'src/b.rs' in '/tmp/project'.";
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.fail_open("src/b.rs".into(), message.into(), window, cx);
+            });
+        });
+
+        panel.read_with(cx, |panel, cx| {
+            assert!(
+                panel.open.is_none(),
+                "the previous file must not survive another file's failed open"
+            );
+            let failed = panel
+                .open_error
+                .as_ref()
+                .expect("the failure is attributed to the path that failed");
+            assert_eq!(failed.relative_path, "src/b.rs");
+            assert_eq!(failed.message.as_ref(), message);
+            assert!(
+                panel.editor.read(cx).text().to_string().is_empty(),
+                "the old buffer's text must go with it"
+            );
+            assert!(
+                panel.status.is_none(),
+                "a per-file failure is not a panel-wide status line"
+            );
+        });
+
+        // And it is what the content area actually paints.
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            cx.debug_bounds("files-open-error").is_some(),
+            "the server's message replaces the editor"
+        );
+
+        drop(sidecar);
     }
 }
