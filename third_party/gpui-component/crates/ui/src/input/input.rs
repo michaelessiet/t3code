@@ -633,7 +633,13 @@ impl RenderOnce for Input {
             // `gap`, stealing those pixels from the input's width and
             // re-wrapping every soft-wrapped line the moment a popover
             // appeared.
-            .child(div().absolute().children(overlays.floating))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .children(overlays.floating),
+            )
             .render(window, cx)
     }
 }
@@ -1147,5 +1153,93 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let after = cx.update(|_, cx| state.read(cx).input_bounds().size);
         assert_eq!(before, after, "dismissing a hover must restore the size");
+    }
+
+    /// ...and the wrapper that keeps them out of the flow must sit at the
+    /// input's own origin.
+    ///
+    /// The completion and code-action menus position themselves with
+    /// `left`/`top` relative to their parent, computed against
+    /// `input_bounds()`. An `absolute` wrapper with neither offset set takes
+    /// its *static* position instead — the end of the input's flex row — which
+    /// pushed both menus a whole editor's width to the right, off the visible
+    /// panel. The hover popover was immune (it paints through
+    /// `with_absolute_element_offset`), which is why only these two vanished.
+    #[gpui::test]
+    fn completion_menu_paints_over_the_editor(cx: &mut gpui::TestAppContext) {
+        use crate::input::{Editor, EditorState};
+        use gpui::{AppContext as _, Render, point};
+        use lsp_types::CompletionItem;
+
+        struct EditorProbe {
+            state: Entity<EditorState>,
+        }
+
+        impl Render for EditorProbe {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                Editor::new(&self.state).appearance(false).size_full()
+            }
+        }
+
+        cx.update(crate::init);
+        let (probe, cx) = cx.add_window_view(|window, cx| EditorProbe {
+            state: cx.new(|cx| EditorState::new(window, cx).line_number(true)),
+        });
+        let state = probe.read_with(cx, |probe, _| probe.state.clone());
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.set_value("fn main() {\n    println!(\"hello\");\n}\n", window, cx);
+            });
+        });
+        // The menu anchors on the caret, which only has bounds once laid out.
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        cx.update(|_, cx| {
+            state.update(cx, |state, cx| {
+                state.present_completion_items(
+                    0,
+                    "",
+                    vec![CompletionItem {
+                        label: "println".into(),
+                        ..Default::default()
+                    }],
+                    cx,
+                );
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let (caret, line_height) = cx
+            .update(|_, cx| state.read(cx).cursor_layout())
+            .expect("a laid-out editor has caret bounds");
+        let popover = cx
+            .debug_bounds("completion-menu-popover")
+            .expect("an open completion menu paints its popover");
+        // What the menu asks for: 4px left of the caret, one line below it
+        // (`CompletionMenu::origin`). Both are window coordinates, so this is
+        // the whole chain — offset, wrapper, deferred draw — end to end.
+        let wanted = point(
+            caret.origin.x - px(4.),
+            caret.origin.y + line_height + px(4.),
+        );
+        // The offsets are measured from the text area but painted from the
+        // input row, so the row's own padding sits between them — upstream
+        // behaviour, and an order of magnitude smaller than the mis-anchoring
+        // this guards against (which lands the menu half a viewport away).
+        let slack = px(16.);
+        assert!(
+            (popover.origin.x - wanted.x).abs() <= slack
+                && (popover.origin.y - wanted.y).abs() <= slack,
+            "the menu must paint just under the caret: popover at {:?}, wanted {:?} \
+             (caret {:?}, line height {:?})",
+            popover.origin,
+            wanted,
+            caret.origin,
+            line_height
+        );
     }
 }

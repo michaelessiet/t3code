@@ -416,6 +416,10 @@ impl Render for CompletionMenu {
                 .absolute()
                 .left(pos.x)
                 .top(pos.y)
+                // `pos` is relative to the input this menu belongs to, so a
+                // test can only tell "anchored to the caret" from "anchored to
+                // wherever the wrapper landed" by looking at painted bounds.
+                .debug_selector(|| "completion-menu-popover".into())
                 .flex()
                 .flex_row()
                 .gap(POPOVER_GAP)

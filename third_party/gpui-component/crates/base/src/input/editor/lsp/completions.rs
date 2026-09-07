@@ -6,7 +6,7 @@ use lsp_types::{
     InlineCompletionItem, InlineCompletionResponse, InlineCompletionTriggerKind,
 };
 use ropey::Rope;
-use std::{ops::Range, time::Duration};
+use std::{ops::Range, rc::Rc, time::Duration};
 
 use crate::input::InputBaseState;
 
@@ -143,12 +143,44 @@ impl InputBaseState<EditorMode> {
         self.schedule_inline_completion(window, cx);
 
         let start = range.end;
-        let new_offset = self.cursor();
 
         if !provider.is_completion_trigger(start, new_text, cx) {
             return;
         }
 
+        self.request_completions(provider, start, false, window, cx);
+    }
+
+    /// Open the completion menu at the caret because the user asked for it —
+    /// CodeMirror's `startCompletion`, which Electron binds to `mod+i`.
+    ///
+    /// Unlike the typing path this consults neither `is_completion_trigger`
+    /// nor the offset an earlier query anchored at: an explicit invoke starts
+    /// a fresh query at the cursor, and the provider decides what a bare
+    /// position there completes to.
+    pub fn show_completions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(provider) = self.extras.lsp.completion_provider.clone() else {
+            return;
+        };
+        self.extras
+            .context_menu_content
+            .completion
+            .trigger_start_offset = None;
+        self.request_completions(provider, self.cursor(), true, window, cx);
+    }
+
+    /// Ask `provider` for completions and open the menu with whatever comes
+    /// back. `explicit` distinguishes a user invoke from the typing path; it
+    /// reaches the provider as the LSP trigger kind.
+    fn request_completions(
+        &mut self,
+        provider: Rc<dyn CompletionProvider>,
+        start: usize,
+        explicit: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let new_offset = self.cursor();
         let start_offset = self
             .extras
             .context_menu_content
@@ -179,7 +211,11 @@ impl InputBaseState<EditorMode> {
             .clone_from(&query);
 
         let completion_context = CompletionContext {
-            trigger_kind: lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER,
+            trigger_kind: if explicit {
+                lsp_types::CompletionTriggerKind::INVOKED
+            } else {
+                lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER
+            },
             trigger_character: Some(query),
         };
 

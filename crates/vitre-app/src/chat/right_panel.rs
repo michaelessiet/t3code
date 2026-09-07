@@ -34,6 +34,7 @@ use vitre_contracts::TurnId;
 use vitre_state::right_panel::{PERSISTED_VERSION, RightPanelMap, RightPanelSurface, SurfaceKind};
 
 use crate::assets::VitreIcon;
+use crate::files::RevealTarget;
 use crate::lsp::positions::WirePosition;
 
 use super::ChatApp;
@@ -397,6 +398,7 @@ impl ChatApp {
                 id,
                 relative_path,
                 reveal_line,
+                reveal_end_line,
                 reveal_request_id,
                 ..
             } => {
@@ -416,9 +418,14 @@ impl ChatApp {
                 // an already-revealed tab re-opens the file where it was.
                 let position = if fresh {
                     self.applied_reveals.insert(applied_key, reveal_request_id);
-                    reveal_line.map(|line| WirePosition {
-                        line: line.saturating_sub(1),
-                        character: 0,
+                    // The store keeps both bounds one-based, as Electron's
+                    // surface does; the editor works in zero-based lines.
+                    reveal_line.map(|line| RevealTarget {
+                        position: WirePosition {
+                            line: line.saturating_sub(1),
+                            character: 0,
+                        },
+                        end_line: reveal_end_line.map(|line| line.saturating_sub(1)),
                     })
                 } else {
                     None

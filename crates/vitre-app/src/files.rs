@@ -21,12 +21,12 @@ use gpui::{
     rgb,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _,
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{
         BlockCursor, BlockOverlay, DefinitionProvider as _, Editor, EditorState, Escape,
-        HoverProvider as _, Input, InputEvent, InputState, Redo, RopeExt as _, Undo,
+        HoverProvider as _, Input, InputEvent, InputState, LineHighlight, Redo, RopeExt as _, Undo,
     },
     menu::{ContextMenuExt as _, PopupMenuItem},
     v_flex,
@@ -52,8 +52,8 @@ use vitre_state::vim::{VimDocument, VimEffect};
 
 use crate::git_gutter::{GitGutterState, RECOMPUTE_DEBOUNCE};
 use crate::lsp::bridge::{self, LspBridge};
-use crate::lsp::positions::{WirePosition, wire_to_offset};
-use crate::vim::{self, ToggleVimMode, VimKeystroke, VimPrefs, VimSession};
+use crate::lsp::positions::{self as positions, WirePosition, wire_to_offset};
+use crate::vim::{self, EditorPrefs, ToggleVimMode, VimKeystroke, VimSession};
 
 /// Electron default: autosave on, `afterDelay`, 500ms
 /// (`packages/contracts/src/settings.ts` `DEFAULT_AUTO_SAVE_DELAY_MS`).
@@ -72,6 +72,10 @@ const BLOCK_CURSOR_COLOR: u32 = 0xff9696;
 
 /// codemirror-vim's `hCoeff` for a half-typed command (`vim.status` non-empty).
 const PENDING_BLOCK_CURSOR_HEIGHT: f32 = 0.5;
+
+/// `MAX_REVEALED_LINES` (`revealLine.ts`): highlighting an enormous range
+/// would only bury the start the user jumped to.
+const MAX_REVEALED_LINES: usize = 500;
 
 actions!(
     vitre,
@@ -107,6 +111,13 @@ actions!(
         /// Open the focused file, or fold/unfold the focused directory —
         /// what Electron gets for free from rows being `<button>`s.
         TreeActivate,
+        /// Jump to the definition of the symbol under the caret. Electron
+        /// binds `F12` on the editor itself (`lspBridge.ts`), next to
+        /// mod-click and vim `gd`; all three run the same jump.
+        GoToDefinition,
+        /// Open the completion menu at the caret — Electron's
+        /// `editor.showCompletions` command, `mod+i` when `editorFocus`.
+        ShowCompletions,
     ]
 );
 
@@ -125,6 +136,29 @@ pub(crate) fn language_for_path(path: &str) -> String {
             "makefile" => "make".into(),
             _ => "text".into(),
         },
+    }
+}
+
+/// Where a reveal should land: a position, plus the last line of the range
+/// when the request named one.
+///
+/// Electron's `revealLine`/`revealEndLine` pair (`rightPanelStore.ts`), which
+/// `revealEditorLine` turns into a selection over the range, a highlight on
+/// every line of it, and a centred scroll to the first.
+#[derive(Clone, Copy)]
+pub struct RevealTarget {
+    pub position: WirePosition,
+    /// Zero-based last line of the range.
+    pub end_line: Option<u32>,
+}
+
+impl RevealTarget {
+    /// A reveal that names a single position.
+    pub fn at(position: WirePosition) -> Self {
+        Self {
+            position,
+            end_line: None,
+        }
     }
 }
 
@@ -162,6 +196,15 @@ fn parent_dir(path: &str) -> &str {
     path.rsplit_once('/')
         .map(|(parent, _)| parent)
         .unwrap_or("")
+}
+
+/// The `.cm-reveal-line` background (`theme.ts` `REVEAL_LINE_BACKGROUND`):
+/// `--primary` at 10% in light, 16% in dark.
+fn reveal_line_color(cx: &App) -> gpui::Hsla {
+    let theme = cx.theme();
+    theme
+        .primary
+        .opacity(if theme.is_dark() { 0.16 } else { 0.10 })
 }
 
 fn join_path(parent: &str, name: &str) -> String {
@@ -205,7 +248,17 @@ pub struct FilesPanel {
     /// clears — the Electron per-file replacement semantics).
     diagnostics: HashMap<String, Vec<LspDiagnostic>>,
     /// Cross-file go-to-definition target, applied once that file loads.
-    pending_reveal: Option<(String, WirePosition)>,
+    pending_reveal: Option<(String, RevealTarget)>,
+    /// The reveal the tree has already followed, as (generation, path).
+    /// Electron keys the same effect on `revealRequestId` so a background
+    /// entry refresh never yanks the scroll back to the open file.
+    tree_revealed: Option<(u64, String)>,
+    /// Bumped by every open and every explicit reveal — the counter
+    /// `tree_revealed` is keyed on.
+    reveal_generation: u64,
+    /// Whether the tree aside is showing. Electron reads
+    /// `t3code.fileExplorerOpen` at mount and defaults it on.
+    explorer_open: bool,
     /// Bumped on every open/close; async completions for an older file drop.
     open_generation: u64,
     /// Bumped per listing request; completions for an older request drop.
@@ -240,7 +293,7 @@ impl FilesPanel {
                     _ => {}
                 },
             ),
-            cx.observe_global::<VimPrefs>(|this: &mut Self, cx| this.sync_vim_enabled(cx)),
+            cx.observe_global::<EditorPrefs>(|this: &mut Self, cx| this.sync_vim_enabled(cx)),
         ];
 
         let lsp = LspBridge::new(client.clone(), cwd.clone(), editor.downgrade());
@@ -267,12 +320,15 @@ impl FilesPanel {
                 let Some(panel) = panel_for_show.upgrade() else {
                     return true;
                 };
-                let reveal = params.selection.map(|range| WirePosition {
-                    line: range.start.line,
-                    character: range.start.character,
+                let reveal = params.selection.map(|range| {
+                    RevealTarget::at(WirePosition {
+                        line: range.start.line,
+                        character: range.start.character,
+                    })
                 });
                 panel.update(cx, |panel, cx| {
-                    panel.pending_reveal = reveal.map(|position| (target.clone(), position));
+                    panel.pending_reveal =
+                        reveal.map(|target_position| (target.clone(), target_position));
                     panel.open_file(target.clone(), window, cx);
                 });
                 true
@@ -290,6 +346,9 @@ impl FilesPanel {
             tree_focus: cx.focus_handle(),
             tree_focused: None,
             tree_scroll: ScrollHandle::new(),
+            tree_revealed: None,
+            reveal_generation: 0,
+            explorer_open: EditorPrefs::file_explorer_open(cx),
             git: GitGutterState::default(),
             vcs_entries: Vec::new(),
             vcs: TreeVcsDecorations::default(),
@@ -297,7 +356,7 @@ impl FilesPanel {
             edit: None,
             editor,
             lsp,
-            vim: VimPrefs::is_enabled(cx).then(VimSession::new),
+            vim: EditorPrefs::vim_mode(cx).then(VimSession::new),
             diagnostics: HashMap::new(),
             pending_reveal: None,
             open_generation: 0,
@@ -373,6 +432,10 @@ impl FilesPanel {
                             panel.tree_truncated = result.truncated;
                             panel.rebuild_decorations();
                             panel.refresh_vcs(cx);
+                            // A reveal that arrived before the listing did
+                            // gets its retry here, as Electron's effect does
+                            // when `treePaths` changes.
+                            panel.follow_open_file_in_tree(cx);
                             cx.notify();
                         });
                         return;
@@ -580,7 +643,7 @@ impl FilesPanel {
         self.editor_edited(window, cx);
         // The replacement moved the caret behind vim's back, so the block
         // cursor has to be re-seated on it like every other programmatic edit.
-        self.vim_adopt_caret(cx);
+        self.vim_adopt_selection(cx);
         // A revert re-diffs at once rather than waiting out the debounce
         // (Electron schedules the recompute with a 0ms delay here).
         self.recompute_gutter(cx);
@@ -597,7 +660,7 @@ impl FilesPanel {
             let position = bridge::editor_position(state.text(), offset);
             state.set_cursor_position(position, window, cx);
         });
-        self.vim_adopt_caret(cx);
+        self.vim_adopt_selection(cx);
     }
 
     /// The hunk peek card, anchored under the last line of its hunk.
@@ -841,11 +904,11 @@ impl FilesPanel {
     pub fn reveal(
         &mut self,
         path: String,
-        position: Option<WirePosition>,
+        target: Option<RevealTarget>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.reveal_inner(path, position, true, window, cx);
+        self.reveal_inner(path, target, true, window, cx);
     }
 
     /// [`Self::reveal`] without stealing keyboard focus — for render-driven
@@ -854,44 +917,146 @@ impl FilesPanel {
     pub fn reveal_unfocused(
         &mut self,
         path: String,
-        position: Option<WirePosition>,
+        target: Option<RevealTarget>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.reveal_inner(path, position, false, window, cx);
+        self.reveal_inner(path, target, false, window, cx);
     }
 
     fn reveal_inner(
         &mut self,
         path: String,
-        position: Option<WirePosition>,
+        target: Option<RevealTarget>,
         focus: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A reveal is an explicit request, so the tree follows it even when
+        // the file was already open and nothing else changes.
+        self.reveal_generation += 1;
         let already_open = self
             .open
             .as_ref()
             .is_some_and(|open| open.relative_path == path);
         if already_open {
-            if let Some(position) = position {
-                self.editor.update(cx, |state, cx| {
-                    let offset = wire_to_offset(state.text(), position);
-                    let position = bridge::editor_position(state.text(), offset);
-                    state.set_cursor_position(position, window, cx);
-                });
-                self.vim_adopt_caret(cx);
+            match target {
+                Some(target) => self.apply_reveal(target, window, cx),
+                // A reveal with no line clears the previous highlight, the
+                // way `revealEditorLine(view, null)` does.
+                None => self.clear_reveal_highlight(cx),
             }
+            self.follow_open_file_in_tree(cx);
             if focus {
                 self.focus_editor(window, cx);
             }
             return;
         }
-        self.pending_reveal = position.map(|position| (path.clone(), position));
+        self.pending_reveal = target.map(|target| (path.clone(), target));
         self.open_file(path, window, cx);
         if focus {
             self.focus_editor(window, cx);
         }
+    }
+
+    /// Select the revealed range, highlight every line of it and centre its
+    /// first line — CodeMirror's `revealEditorLine` (`revealLine.ts`).
+    fn apply_reveal(&mut self, target: RevealTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let color = reveal_line_color(cx);
+        let start = self.editor.update(cx, |state, cx| {
+            let text = state.text().clone();
+            let last_line = positions::last_line(&text);
+            let start_line = (target.position.line as usize).min(last_line);
+            let end_line = target
+                .end_line
+                .map_or(start_line, |line| (line as usize).min(last_line))
+                .max(start_line);
+            let start = wire_to_offset(&text, target.position);
+            if end_line > start_line {
+                // The selection spans the range but stays anchored at its
+                // first line, so typing and vim motions continue from the
+                // line the request named rather than from its end.
+                state.set_selected_range(start..positions::line_end(&text, end_line), cx);
+            } else {
+                let position = bridge::editor_position(&text, start);
+                state.set_cursor_position(position, window, cx);
+            }
+            let last_highlighted = end_line.min(start_line + MAX_REVEALED_LINES - 1);
+            state.set_line_highlight(
+                Some(LineHighlight::new(start_line..last_highlighted + 1, color)),
+                cx,
+            );
+            start
+        });
+        // Vim hears about the jump before the scroll, not after: adopting the
+        // selection re-seats the caret, and every seat scrolls it minimally
+        // into view, which would replace the centring with the target sitting
+        // against whichever edge it came from.
+        self.vim_adopt_selection(cx);
+        self.center_on_reveal(start, window, cx);
+    }
+
+    /// Centre the reveal target, then centre it again on the next frame.
+    ///
+    /// The second pass is what makes this reliable: a reveal usually arrives
+    /// with the file, and until that frame is laid out the geometry still
+    /// describes the buffer that just closed, so the first centre measures
+    /// against the wrong wrapped-line count (and before the very first layout
+    /// it cannot measure at all).
+    fn center_on_reveal(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |state, cx| state.scroll_to_center(offset, cx));
+        let panel = cx.weak_entity();
+        window.on_next_frame(move |_, cx| {
+            let _ = panel.update(cx, |panel, cx| {
+                panel
+                    .editor
+                    .update(cx, |state, cx| state.scroll_to_center(offset, cx));
+            });
+        });
+    }
+
+    fn clear_reveal_highlight(&mut self, cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |state, cx| state.set_line_highlight(None, cx));
+    }
+
+    /// Reveal the open file in the tree: expand its ancestors, park roving
+    /// focus on its row and scroll it into view.
+    ///
+    /// Electron keys this on `revealRequestId` (so a background entry refresh
+    /// never yanks the scroll back to the open file) and skips it outright
+    /// when the row is already the tree's own — which is the case whenever
+    /// the file was opened from the tree in the first place.
+    fn follow_open_file_in_tree(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.open.as_ref().map(|open| open.relative_path.clone()) else {
+            return;
+        };
+        let key = (self.reveal_generation, path.clone());
+        if self.tree_revealed.as_ref() == Some(&key) || self.tree.is_none() {
+            return;
+        }
+        if self.tree_focused.as_deref() == Some(path.as_str()) {
+            self.tree_revealed = Some(key);
+            return;
+        }
+        // Electron's `expand()` opens the entire ancestor chain, not just one
+        // level.
+        let mut parent = parent_dir(&path);
+        while !parent.is_empty() {
+            self.expanded.insert(parent.to_string());
+            parent = parent_dir(parent);
+        }
+        let rows = self.visible_rows();
+        // Absent (entries still loading, or a truncated listing): leave the
+        // request unrecorded so the next listing retries it.
+        let Some(index) = rows.iter().position(|row| row.path == path) else {
+            return;
+        };
+        self.tree_revealed = Some(key);
+        // Electron's `scrollToPath` moves the tree's *virtual* focus only —
+        // keyboard focus stays wherever it was, usually the editor.
+        self.focus_row(&rows, index, cx);
     }
 
     /// Move keyboard focus into the editor buffer.
@@ -908,6 +1073,7 @@ impl FilesPanel {
             return;
         }
         self.open_generation += 1;
+        self.reveal_generation += 1;
         let generation = self.open_generation;
         let client = self.client.clone();
         let payload = ProjectReadFileInput {
@@ -955,16 +1121,22 @@ impl FilesPanel {
                         }
                         // Cross-file definition target: convert the WIRE
                         // position against the loaded text and move there.
-                        if let Some((target, position)) = panel.pending_reveal.take()
-                            && target == path
-                        {
-                            panel.editor.update(cx, |state, cx| {
-                                let offset = wire_to_offset(state.text(), position);
-                                let position = bridge::editor_position(state.text(), offset);
-                                state.set_cursor_position(position, window, cx);
-                            });
+                        // A plain open carries none, and clears the previous
+                        // file's reveal highlight.
+                        match panel.pending_reveal.take() {
+                            Some((target, reveal)) if target == path => {
+                                panel.apply_reveal(reveal, window, cx);
+                            }
+                            _ => {
+                                panel.clear_reveal_highlight(cx);
+                                // Fresh buffer, caret at the top: seat the
+                                // block cursor on it. The reveal branch does
+                                // its own adoption, and re-running it here
+                                // would undo that centring.
+                                panel.vim_adopt_selection(cx);
+                            }
                         }
-                        panel.vim_adopt_caret(cx);
+                        panel.follow_open_file_in_tree(cx);
                         panel.status = None;
                         cx.notify();
                     });
@@ -1971,7 +2143,7 @@ impl FilesPanel {
 
     /// Follow the `vimMode` preference after it flips.
     fn sync_vim_enabled(&mut self, cx: &mut Context<Self>) {
-        let enabled = VimPrefs::is_enabled(cx);
+        let enabled = EditorPrefs::vim_mode(cx);
         if enabled == self.vim.is_some() {
             return;
         }
@@ -1988,17 +2160,22 @@ impl FilesPanel {
         cx.notify();
     }
 
-    /// Take the editor's caret as the engine's, for a jump the engine did
-    /// not drive: go-to-definition, a revealed line, a file opened at a
+    /// Take the editor's selection as the engine's, for a jump the engine did
+    /// not drive: go-to-definition, a revealed range, a file opened at a
     /// position. Without this [`Self::sync_vim_view`] would immediately
     /// paint the *stale* engine caret back over the jump target.
-    fn vim_adopt_caret(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// A non-empty one enters visual mode over it, which is what
+    /// codemirror-vim does from its own `cursorActivity` hook
+    /// (`handleExternalSelection`) for any selection that did not come from a
+    /// vim command — a mouse drag, or a reveal naming a line range.
+    fn vim_adopt_selection(&mut self, cx: &mut Context<Self>) {
         let rope = self.editor.read(cx).text().clone();
-        let caret = self.editor.read(cx).selected_range().start;
+        let selection = self.editor.read(cx).selected_range();
         if let Some(vim) = self.vim.as_mut() {
             vim.invalidate();
             let text = vim.text(&rope);
-            vim.engine.sync_cursor(&text, caret);
+            vim.engine.sync_selection(&text, selection);
         }
         self.sync_vim_view(cx);
     }
@@ -2126,7 +2303,7 @@ impl FilesPanel {
                 VimEffect::Save => self.save_now(window, cx),
                 VimEffect::Quit => self.close_file(cx),
                 VimEffect::ShowHover => self.vim_show_hover(caret, window, cx),
-                VimEffect::GoToDefinition => self.vim_go_to_definition(caret, window, cx),
+                VimEffect::GoToDefinition => self.go_to_definition(caret, window, cx),
                 VimEffect::Format => self.format_document(window, cx),
                 // The caret follows the selection we set below, and
                 // `set_selected_range` already scrolls it into view.
@@ -2166,10 +2343,11 @@ impl FilesPanel {
         .detach();
     }
 
-    /// `gd` and `<C-]>` — Electron's `lspDefinition` action. The fork's own
+    /// Go to the definition at `offset` — Electron's `lspDefinition`, shared
+    /// by `F12`, vim `gd`/`<C-]>` and mod-click. The fork's own
     /// `GoToDefinition` only fires for a location a modifier-hover already
     /// resolved, so the jump is driven from the provider directly.
-    fn vim_go_to_definition(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn go_to_definition(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
         let rope = self.editor.read(cx).text().clone();
         let task = self.lsp.definitions(&rope, offset, window, cx);
         cx.spawn_in(window, async move |this, cx| {
@@ -2191,20 +2369,34 @@ impl FilesPanel {
                     panel.editor.update(cx, |state, cx| {
                         state.set_cursor_position(link.target_selection_range.start, window, cx);
                     });
-                    panel.vim_adopt_caret(cx);
+                    panel.vim_adopt_selection(cx);
                     return;
                 }
                 panel.pending_reveal = Some((
                     target.clone(),
-                    WirePosition {
+                    RevealTarget::at(WirePosition {
                         line: link.target_selection_range.start.line,
                         character: link.target_selection_range.start.character,
-                    },
+                    }),
                 ));
                 panel.open_file(target, window, cx);
             });
         })
         .detach();
+    }
+
+    /// `mod+i` — Electron's `editor.showCompletions`, which calls CodeMirror's
+    /// `startCompletion` on the live view.
+    ///
+    /// Electron gates the command on `editorFocus`; here the action reaches
+    /// the panel from anywhere inside it, so the same gate is the explicit
+    /// focus check.
+    fn show_completions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.editor.read(cx).focus_handle(cx).is_focused(window) {
+            return;
+        }
+        self.editor
+            .update(cx, |state, cx| state.show_completions(window, cx));
     }
 
     /// The vim message line: Electron mounts `@replit/codemirror-vim` without
@@ -2343,6 +2535,30 @@ impl FilesPanel {
                         cx.notify();
                     })),
             )
+            // Electron's `FolderTree` toggle, last in the breadcrumb bar —
+            // which only exists while a file is open, since the aside always
+            // shows when none is.
+            .children(self.open.is_some().then(|| {
+                Button::new("files-toggle-explorer")
+                    .icon(IconName::FolderTree)
+                    .ghost()
+                    .xsmall()
+                    .selected(self.explorer_open)
+                    .tooltip(if self.explorer_open {
+                        "Hide file explorer"
+                    } else {
+                        "Show file explorer"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_explorer(cx)))
+            }))
+    }
+
+    /// Show or hide the tree aside, persisting the choice the way Electron
+    /// persists `t3code.fileExplorerOpen`.
+    fn toggle_explorer(&mut self, cx: &mut Context<Self>) {
+        self.explorer_open = !self.explorer_open;
+        EditorPrefs::set_file_explorer_open(cx, self.explorer_open);
+        cx.notify();
     }
 }
 
@@ -2532,6 +2748,13 @@ impl Render for FilesPanel {
             .on_action(cx.listener(|panel, _: &GotoPreviousHunk, window, cx| {
                 panel.goto_hunk(false, window, cx);
             }))
+            .on_action(cx.listener(|panel, _: &GoToDefinition, window, cx| {
+                let caret = panel.editor.read(cx).selected_range().start;
+                panel.go_to_definition(caret, window, cx);
+            }))
+            .on_action(cx.listener(|panel, _: &ShowCompletions, window, cx| {
+                panel.show_completions(window, cx);
+            }))
             // Escape closes the peek, as it does in Electron's gutter keymap.
             // The input handles its own Escape first (completion, IME) and
             // propagates; with no peek open this is a no-op.
@@ -2542,7 +2765,7 @@ impl Render for FilesPanel {
                 panel.vim_key(&action.key, window, cx);
             }))
             .on_action(cx.listener(|panel, _: &ToggleVimMode, _, cx| {
-                VimPrefs::toggle(cx);
+                EditorPrefs::toggle_vim_mode(cx);
                 panel.sync_vim_enabled(cx);
             }))
             .bg(cx.theme().background)
@@ -2563,25 +2786,30 @@ impl Render for FilesPanel {
                     .min_h_0()
                     .items_stretch()
                     .when(file_open, |this| this.child(self.render_editor_area(cx)))
-                    .child(
-                        // Electron: explorer aside is ~22rem with a left
-                        // border while a file is open, and fills the panel
-                        // when nothing is open.
-                        div()
-                            .h_full()
-                            .min_h_0()
-                            .map(|this| {
-                                if file_open {
-                                    this.w(px(300.))
-                                        .flex_shrink_0()
-                                        .border_l_1()
-                                        .border_color(cx.theme().border)
-                                } else {
-                                    this.flex_1().min_w_0()
-                                }
-                            })
-                            .child(self.render_explorer(cx)),
-                    ),
+                    // Hidden only while a file is open: with none open the
+                    // aside is the whole panel, so Electron shows it whatever
+                    // the toggle says.
+                    .when(self.explorer_open || !file_open, |this| {
+                        this.child(
+                            // Electron: explorer aside is ~22rem with a left
+                            // border while a file is open, and fills the panel
+                            // when nothing is open.
+                            div()
+                                .h_full()
+                                .min_h_0()
+                                .map(|this| {
+                                    if file_open {
+                                        this.w(px(300.))
+                                            .flex_shrink_0()
+                                            .border_l_1()
+                                            .border_color(cx.theme().border)
+                                    } else {
+                                        this.flex_1().min_w_0()
+                                    }
+                                })
+                                .child(self.render_explorer(cx)),
+                        )
+                    }),
             )
     }
 }

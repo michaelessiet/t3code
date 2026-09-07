@@ -1018,7 +1018,7 @@ impl ChatApp {
             // The files panel follows the preference through its global
             // observer, so flipping it here is the whole handler.
             PaletteAction::ToggleVimMode => {
-                crate::vim::VimPrefs::toggle(cx);
+                crate::vim::EditorPrefs::toggle_vim_mode(cx);
             }
             PaletteAction::NewFile | PaletteAction::NewFolder => {
                 self.dock_open_files_surface(window, cx);
@@ -3073,14 +3073,61 @@ impl ChatApp {
     /// low-weight activity rows), rounded-22 composer with circular send.
     fn render_chat(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(open) = &self.thread else {
+            // Electron's `NoActiveThreadState`: the same chrome as a thread
+            // view (a top bar, here at the chat header's height) over a
+            // centred title and description.
             return v_flex()
                 .flex_1()
                 .h_full()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("Select a thread to start chatting")
+                .min_w_0()
+                .bg(cx.theme().background)
+                .child(
+                    h_flex()
+                        .h(px(40.))
+                        .px_5()
+                        .items_center()
+                        .flex_shrink_0()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground.opacity(0.5))
+                                .child("No active thread"),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            v_flex()
+                                .w_full()
+                                .max_w(px(512.))
+                                .px_8()
+                                .py_12()
+                                .items_center()
+                                .text_center()
+                                .child(
+                                    div()
+                                        .text_xl()
+                                        .text_color(cx.theme().foreground)
+                                        .child("Pick a thread to continue"),
+                                )
+                                .child(
+                                    div()
+                                        .mt_2()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground.opacity(0.78))
+                                        .child(
+                                            "Select an existing thread or create a new one to \
+                                             get started.",
+                                        ),
+                                ),
+                        ),
+                )
                 .into_any_element();
         };
         let title = self.thread_title(&open.id);
@@ -3543,13 +3590,31 @@ impl ChatApp {
             // built, so a long thread costs the same per frame as a short one.
             // `py_4` sits outside the scroll area (the old column's padding was
             // inside it) — the difference is invisible at the bottom anchor.
-            div().flex_1().py_4().child(
-                list(
-                    self.timeline_list.clone(),
-                    cx.processor(|this, index, _window, cx| this.render_timeline_row(index, cx)),
+            div().flex_1().py_4().map(|this| {
+                if self.timeline.is_empty() && !running {
+                    // Electron's `MessagesTimeline` empty state: an
+                    // opened thread with nothing in it says so rather
+                    // than rendering a blank list.
+                    return this.child(
+                        h_flex()
+                            .size_full()
+                            .items_center()
+                            .justify_center()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground.opacity(0.3))
+                            .child("Send a message to start the conversation."),
+                    );
+                }
+                this.child(
+                    list(
+                        self.timeline_list.clone(),
+                        cx.processor(|this, index, _window, cx| {
+                            this.render_timeline_row(index, cx)
+                        }),
+                    )
+                    .size_full(),
                 )
-                .size_full(),
-            ),
+            }),
         )
         .children(self.render_branch_toolbar(cx))
         .child(composer)

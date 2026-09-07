@@ -39,25 +39,38 @@ use vitre_state::vim::{VimEngine, VimKey, VimMode};
 
 const FILE_NAME: &str = "editor-state.json";
 
-/// The `vimMode` client setting, persisted under the Vitre home.
+/// The editor surface's own settings, persisted under the Vitre home.
 ///
-/// Electron keeps it in `ClientSettings`; Vitre has no settings sync yet
-/// (that lands with M5), so it lives in its own file with the same default.
-pub struct VimPrefs {
-    enabled: bool,
+/// Electron splits these: `vimMode` is a `ClientSettings` key, and the file
+/// explorer's visibility is browser-local (`t3code.fileExplorerOpen`, read at
+/// mount and defaulting to shown). Vitre has no settings sync yet (that lands
+/// with M5), so both live in one small file with the same defaults.
+pub struct EditorPrefs {
+    vim_mode: bool,
+    file_explorer_open: bool,
     path: PathBuf,
 }
 
-impl Global for VimPrefs {}
+impl Global for EditorPrefs {}
 
-/// On-disk shape, keyed the way the TS contract keys it.
-#[derive(Debug, Default, Serialize, Deserialize)]
+/// On-disk shape, keyed the way each setting's source keys it.
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct StoredPrefs {
     vim_mode: bool,
+    file_explorer_open: bool,
 }
 
-impl VimPrefs {
+impl Default for StoredPrefs {
+    fn default() -> Self {
+        Self {
+            vim_mode: false,
+            file_explorer_open: true,
+        }
+    }
+}
+
+impl EditorPrefs {
     fn load(home: &Path) -> Self {
         let path = home.join(FILE_NAME);
         let stored = std::fs::read_to_string(&path)
@@ -65,36 +78,71 @@ impl VimPrefs {
             .and_then(|contents| serde_json::from_str::<StoredPrefs>(&contents).ok())
             .unwrap_or_default();
         Self {
-            enabled: stored.vim_mode,
+            vim_mode: stored.vim_mode,
+            file_explorer_open: stored.file_explorer_open,
             path,
         }
     }
 
-    pub fn is_enabled(cx: &App) -> bool {
-        cx.try_global::<VimPrefs>()
-            .is_some_and(|prefs| prefs.enabled)
+    pub fn vim_mode(cx: &App) -> bool {
+        cx.try_global::<EditorPrefs>()
+            .is_some_and(|prefs| prefs.vim_mode)
     }
 
-    /// Flip the setting and persist it. Returns the new value.
-    pub fn toggle(cx: &mut App) -> bool {
-        let Some(prefs) = cx.try_global::<VimPrefs>() else {
+    /// Whether the files panel shows its tree aside. Defaults to shown, as
+    /// Electron's missing-localStorage-key fallback does.
+    pub fn file_explorer_open(cx: &App) -> bool {
+        cx.try_global::<EditorPrefs>()
+            .is_none_or(|prefs| prefs.file_explorer_open)
+    }
+
+    /// Flip vim mode and persist it. Returns the new value.
+    pub fn toggle_vim_mode(cx: &mut App) -> bool {
+        let Some(prefs) = cx.try_global::<EditorPrefs>() else {
             return false;
         };
-        let enabled = !prefs.enabled;
-        let path = prefs.path.clone();
-        cx.set_global(VimPrefs {
-            enabled,
+        let vim_mode = !prefs.vim_mode;
+        Self::store(
+            StoredPrefs {
+                vim_mode,
+                file_explorer_open: prefs.file_explorer_open,
+            },
+            prefs.path.clone(),
+            cx,
+        );
+        vim_mode
+    }
+
+    pub fn set_file_explorer_open(cx: &mut App, file_explorer_open: bool) {
+        let Some(prefs) = cx.try_global::<EditorPrefs>() else {
+            return;
+        };
+        if prefs.file_explorer_open == file_explorer_open {
+            return;
+        }
+        Self::store(
+            StoredPrefs {
+                vim_mode: prefs.vim_mode,
+                file_explorer_open,
+            },
+            prefs.path.clone(),
+            cx,
+        );
+    }
+
+    fn store(stored: StoredPrefs, path: PathBuf, cx: &mut App) {
+        cx.set_global(Self {
+            vim_mode: stored.vim_mode,
+            file_explorer_open: stored.file_explorer_open,
             path: path.clone(),
         });
         // Best-effort, like every other Vitre UI preference: a failed write
         // is not worth interrupting the edit session over.
-        let stored = StoredPrefs { vim_mode: enabled };
         if let Ok(contents) = serde_json::to_string_pretty(&stored)
             && let Err(error) = std::fs::write(&path, contents)
         {
             eprintln!("[vitre] failed to persist {FILE_NAME}: {error}");
         }
-        enabled
     }
 }
 
@@ -134,7 +182,7 @@ pub fn key_context(mode: Option<VimMode>) -> Option<KeyContext> {
 }
 
 pub fn init(cx: &mut App, home: &Path) {
-    cx.set_global(VimPrefs::load(home));
+    cx.set_global(EditorPrefs::load(home));
     cx.bind_keys(bindings());
 }
 

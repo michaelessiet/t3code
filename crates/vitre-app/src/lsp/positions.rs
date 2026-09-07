@@ -73,6 +73,18 @@ pub fn wire_range_to_offsets(text: &Rope, start: WirePosition, end: WirePosition
     start_offset..end_offset
 }
 
+/// Last zero-based line index — CodeMirror's `doc.lines - 1`.
+pub fn last_line(text: &Rope) -> usize {
+    text.len_lines(LineType::LF) - 1
+}
+
+/// Byte offset one past the last content byte of zero-based `line`, clamped
+/// to the last line — CodeMirror's `doc.line(n).to`.
+pub fn line_end(text: &Rope, line: usize) -> usize {
+    let line = line.min(last_line(text));
+    line_content_end(text, line, text.line_to_byte_idx(line, LineType::LF))
+}
+
 /// One past the last content byte of `line`: before the trailing `\n` and any
 /// `\r` directly preceding it — CodeMirror's `line.to` (see module docs).
 fn line_content_end(text: &Rope, line: usize, line_start: usize) -> usize {

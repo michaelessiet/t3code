@@ -295,7 +295,7 @@ impl gpui_component::input::CompletionProvider for LspBridge {
         &self,
         text: &Rope,
         offset: usize,
-        _trigger: CompletionContext,
+        trigger: CompletionContext,
         _window: &mut Window,
         cx: &mut App,
     ) -> Task<Result<CompletionResponse>> {
@@ -305,11 +305,13 @@ impl gpui_component::input::CompletionProvider for LspBridge {
         };
         // The Electron gate (lspBridge.ts `completionAnchor`): a trailing
         // word anchors the query at the word start; otherwise only a
-        // member/trigger character fires.
+        // member/trigger character fires — unless the user asked for the menu
+        // (`mod+i`), which anchors at the bare cursor.
+        let explicit = trigger.trigger_kind == lsp_types::CompletionTriggerKind::INVOKED;
         let line_start =
             text.line_to_byte_idx(text.byte_to_line_idx(offset, LineType::LF), LineType::LF);
         let line_before = text.slice(line_start..offset).to_string();
-        let Some(anchor_in_line) = lsp_gating::completion_anchor(&line_before, false) else {
+        let Some(anchor_in_line) = lsp_gating::completion_anchor(&line_before, explicit) else {
             return empty();
         };
         let anchor = editor_position(text, line_start + anchor_in_line);

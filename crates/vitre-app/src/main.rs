@@ -200,6 +200,13 @@ fn main() {
             // the editor itself (`gitDiffGutter.ts`), not rebindable commands.
             KeyBinding::new("alt-f5", files::GotoNextHunk, None),
             KeyBinding::new("shift-alt-f5", files::GotoPreviousHunk, None),
+            // Go to definition. Electron binds `F12` in the editor's own LSP
+            // keymap (`lspBridge.ts`), alongside mod-click and vim `gd`.
+            KeyBinding::new("f12", files::GoToDefinition, None),
+            // `editor.showCompletions`, `mod+i` when `editorFocus` in
+            // DEFAULT_KEYBINDINGS. The `editorFocus` half is the panel's own
+            // check that the buffer holds focus.
+            KeyBinding::new(&modified("i"), files::ShowCompletions, None),
         ]);
 
         // File-tree keyboard navigation. Electron gets the arrows, Home/End

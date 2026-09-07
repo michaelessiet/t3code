@@ -303,6 +303,37 @@ impl DiffGutter {
     }
 }
 
+/// A band of full-width line backgrounds — CodeMirror's `Decoration.line`
+/// carrying a background colour.
+///
+/// Backs Vitre's reveal highlight: the trail a jump (a search hit, a
+/// go-to-definition, a file link naming a range) leaves on the lines it landed
+/// on. Painted over the active-line fill, because the theme rule that wins on
+/// a line which is both is the reveal one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineHighlight {
+    rows: Range<usize>,
+    color: Hsla,
+}
+
+impl LineHighlight {
+    /// Highlight zero-based buffer lines `rows` (end exclusive).
+    pub fn new(rows: Range<usize>, color: impl Into<Hsla>) -> Self {
+        Self {
+            rows,
+            color: color.into(),
+        }
+    }
+
+    pub(super) fn contains(&self, row: usize) -> bool {
+        self.rows.contains(&row)
+    }
+
+    pub(super) fn color(&self) -> Hsla {
+        self.color
+    }
+}
+
 /// An embedder-rendered card anchored under a buffer line — the editor's own
 /// geometry, the embedder's content.
 ///
@@ -536,6 +567,8 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) diff_gutter: Option<DiffGutter>,
     /// See [`Self::set_block_overlay`].
     pub(super) block_overlay: Option<BlockOverlay>,
+    /// See [`Self::set_line_highlight`].
+    pub(super) line_highlight: Option<LineHighlight>,
     pub(super) soft_wrap: bool,
     pub(super) wrapping_indent: WrappingIndent,
     pub(super) scroll_beyond_last_line: Option<usize>,
@@ -860,6 +893,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             block_cursor: None,
             diff_gutter: None,
             block_overlay: None,
+            line_highlight: None,
             soft_wrap: true,
             wrapping_indent: WrappingIndent::default(),
             scroll_beyond_last_line: None,
@@ -986,6 +1020,18 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// opened, moved or closed.
     pub fn set_block_overlay(&mut self, overlay: Option<BlockOverlay>, cx: &mut Context<Self>) {
         self.block_overlay = overlay;
+        cx.notify();
+    }
+
+    /// Paint a band of line backgrounds across `highlight`'s rows.
+    ///
+    /// `None` clears it. The rows are buffer lines, not anchors: an edit above
+    /// the band moves the text under it rather than carrying it along.
+    pub fn set_line_highlight(&mut self, highlight: Option<LineHighlight>, cx: &mut Context<Self>) {
+        if self.line_highlight == highlight {
+            return;
+        }
+        self.line_highlight = highlight;
         cx.notify();
     }
 

@@ -2535,7 +2535,15 @@ impl<M: InputModeKind> Element for TextElement<M> {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (focus_handle, show_cursor, disabled, selected_range, editor_style, editor_paddings) = {
+        let (
+            focus_handle,
+            show_cursor,
+            disabled,
+            selected_range,
+            editor_style,
+            editor_paddings,
+            line_highlight,
+        ) = {
             let state = self.state.read(cx);
             (
                 state.focus_handle.clone(),
@@ -2544,6 +2552,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 state.selected_range,
                 state.editor_style.clone(),
                 state.editor_paddings,
+                state.line_highlight.clone(),
             )
         };
         let focused = focus_handle.is_focused(window);
@@ -2591,6 +2600,32 @@ impl<M: InputModeKind> Element for TextElement<M> {
                             bg_color,
                         ));
                     }
+                }
+                offset_y += height;
+            }
+        }
+
+        // Paint the revealed-line band over the active-line fill: a line that
+        // is both takes the reveal colour, which is how the two CodeMirror
+        // theme rules resolve (`.cm-reveal-line` is declared after
+        // `.cm-activeLine`, and they have equal specificity).
+        if let Some(highlight) = line_highlight.as_ref() {
+            let mut offset_y = invisible_top_padding;
+            for (line, &buffer_line) in prepaint
+                .last_layout
+                .lines
+                .iter()
+                .zip(prepaint.last_layout.visible_buffer_lines.iter())
+            {
+                let height = line_height * line.wrapped_lines.len().max(1) as f32;
+                if highlight.contains(buffer_line) {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(input_bounds.origin.x, origin.y + offset_y),
+                            size(bounds.size.width, height),
+                        ),
+                        highlight.color(),
+                    ));
                 }
                 offset_y += height;
             }
