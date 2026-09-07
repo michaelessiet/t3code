@@ -202,6 +202,30 @@ fn main() {
             KeyBinding::new("shift-alt-f5", files::GotoPreviousHunk, None),
         ]);
 
+        // File-tree keyboard navigation. Electron gets the arrows, Home/End
+        // and Enter from `@pierre/trees` (its roving-focus keydown handler,
+        // plus rows being `<button>`s), and layers the vim motions on top by
+        // re-dispatching them as those same keys — unconditionally, not gated
+        // on the `vimMode` setting, since a tree row is never a text field.
+        // Here both halves are ordinary bindings in the tree's own context,
+        // which is present only while no inline rename/create is being typed.
+        cx.bind_keys([
+            KeyBinding::new("down", files::TreeFocusNext, Some("FileTree")),
+            KeyBinding::new("up", files::TreeFocusPrevious, Some("FileTree")),
+            KeyBinding::new("right", files::TreeExpandOrNext, Some("FileTree")),
+            KeyBinding::new("left", files::TreeCollapseOrParent, Some("FileTree")),
+            KeyBinding::new("home", files::TreeFocusFirst, Some("FileTree")),
+            KeyBinding::new("end", files::TreeFocusLast, Some("FileTree")),
+            KeyBinding::new("enter", files::TreeActivate, Some("FileTree")),
+            KeyBinding::new("space", files::TreeActivate, Some("FileTree")),
+            KeyBinding::new("j", files::TreeFocusNext, Some("FileTree")),
+            KeyBinding::new("k", files::TreeFocusPrevious, Some("FileTree")),
+            KeyBinding::new("l", files::TreeExpandOrNext, Some("FileTree")),
+            KeyBinding::new("h", files::TreeCollapseOrParent, Some("FileTree")),
+            KeyBinding::new("shift-g", files::TreeFocusLast, Some("FileTree")),
+            KeyBinding::new("g g", files::TreeFocusFirst, Some("FileTree")),
+        ]);
+
         // Palette surfaces and the workspace commands their rows advertise.
         // Every chord here is the Electron DEFAULT_KEYBINDINGS default for the
         // named command (`quickSearch.open`, `quickSearch.content`,

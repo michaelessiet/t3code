@@ -16,8 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, Entity, Focusable as _, MouseButton, PromptLevel, SharedString,
-    Subscription, WeakEntity, Window, actions, div, prelude::*, px, rgb,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable as _, MouseButton, PromptLevel,
+    ScrollHandle, SharedString, Subscription, WeakEntity, Window, actions, div, prelude::*, px,
+    rgb,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
@@ -89,6 +90,23 @@ actions!(
         /// Move the caret to the previous git hunk, wrapping at the start of
         /// the file (Electron's `Shift-Alt-F5`).
         GotoPreviousHunk,
+        /// Tree roving focus: down one visible row (`ArrowDown`, vim `j`).
+        TreeFocusNext,
+        /// Tree roving focus: up one visible row (`ArrowUp`, vim `k`).
+        TreeFocusPrevious,
+        /// Tree roving focus: the first visible row (`Home`, vim `gg`).
+        TreeFocusFirst,
+        /// Tree roving focus: the last visible row (`End`, vim `G`).
+        TreeFocusLast,
+        /// Collapse an expanded directory, else move to the parent row
+        /// (`ArrowLeft`, vim `h`).
+        TreeCollapseOrParent,
+        /// Expand a collapsed directory, else move down one row
+        /// (`ArrowRight`, vim `l`).
+        TreeExpandOrNext,
+        /// Open the focused file, or fold/unfold the focused directory —
+        /// what Electron gets for free from rows being `<button>`s.
+        TreeActivate,
     ]
 );
 
@@ -163,6 +181,15 @@ pub struct FilesPanel {
     /// knows" input to VCS untracked-directory expansion.
     tree_paths: Vec<String>,
     expanded: HashSet<String>,
+    /// Keyboard focus for the tree, so arrows and the vim motions have
+    /// somewhere to land (Electron: DOM focus on the row `<button>`).
+    tree_focus: FocusHandle,
+    /// The roving-focus row, by path. Electron's tree keeps this as its
+    /// "focused item" independently of which file is open.
+    tree_focused: Option<String>,
+    /// Tracks the tree's scroll so a keyboard move can bring its row back
+    /// into view.
+    tree_scroll: ScrollHandle,
     vcs_entries: Vec<VcsFileStatusEntry>,
     vcs: TreeVcsDecorations,
     open: Option<OpenFile>,
@@ -260,6 +287,9 @@ impl FilesPanel {
             tree_truncated: false,
             tree_paths: Vec::new(),
             expanded: HashSet::new(),
+            tree_focus: cx.focus_handle(),
+            tree_focused: None,
+            tree_scroll: ScrollHandle::new(),
             git: GitGutterState::default(),
             vcs_entries: Vec::new(),
             vcs: TreeVcsDecorations::default(),
@@ -1242,6 +1272,114 @@ impl FilesPanel {
         cx.notify();
     }
 
+    // ---- tree keyboard navigation ----
+
+    /// The rows the tree is currently showing — the list every keyboard move
+    /// walks, and the same one `render_explorer` renders.
+    fn visible_rows(&self) -> Vec<FileTreeRow> {
+        self.tree
+            .as_ref()
+            .map(|tree| tree.visible_rows(&self.expanded))
+            .unwrap_or_default()
+    }
+
+    fn focused_row_index(&self, rows: &[FileTreeRow]) -> Option<usize> {
+        let path = self.tree_focused.as_deref()?;
+        rows.iter().position(|row| row.path == path)
+    }
+
+    /// Park roving focus on `index` and scroll it back into view.
+    ///
+    /// Electron's tree scrolls the minimum amount to reveal the row, which is
+    /// what `scroll_to_item`'s default strategy does.
+    fn focus_row(&mut self, rows: &[FileTreeRow], index: usize, cx: &mut Context<Self>) {
+        let Some(row) = rows.get(index) else {
+            return;
+        };
+        self.tree_focused = Some(row.path.clone());
+        self.tree_scroll.scroll_to_item(index);
+        cx.notify();
+    }
+
+    /// Where a move starts from: the focused row, or the first one when the
+    /// tree has not been navigated yet.
+    fn move_focus(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let rows = self.visible_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let index = match self.focused_row_index(&rows) {
+            Some(index) => index.saturating_add_signed(delta).min(rows.len() - 1),
+            None => 0,
+        };
+        self.focus_row(&rows, index, cx);
+    }
+
+    fn focus_edge(&mut self, last: bool, cx: &mut Context<Self>) {
+        let rows = self.visible_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let index = if last { rows.len() - 1 } else { 0 };
+        self.focus_row(&rows, index, cx);
+    }
+
+    /// `ArrowRight` / `l`: unfold a folded directory, otherwise step down —
+    /// an expanded directory's "right" is its first child.
+    fn expand_or_next(&mut self, cx: &mut Context<Self>) {
+        let rows = self.visible_rows();
+        let Some(index) = self.focused_row_index(&rows) else {
+            self.move_focus(0, cx);
+            return;
+        };
+        let row = &rows[index];
+        if row.is_dir && !row.expanded {
+            let path = row.path.clone();
+            self.toggle_dir(&path, cx);
+            return;
+        }
+        self.move_focus(1, cx);
+    }
+
+    /// `ArrowLeft` / `h`: fold an unfolded directory, otherwise climb to the
+    /// parent row.
+    fn collapse_or_parent(&mut self, cx: &mut Context<Self>) {
+        let rows = self.visible_rows();
+        let Some(index) = self.focused_row_index(&rows) else {
+            self.move_focus(0, cx);
+            return;
+        };
+        let row = &rows[index];
+        if row.is_dir && row.expanded {
+            let path = row.path.clone();
+            self.toggle_dir(&path, cx);
+            return;
+        }
+        let parent = parent_dir(&row.path).to_string();
+        if parent.is_empty() {
+            return;
+        }
+        if let Some(parent_index) = rows.iter().position(|row| row.path == parent) {
+            self.focus_row(&rows, parent_index, cx);
+        }
+    }
+
+    /// `Enter` / `Space`: what a click on the focused row would do. Electron
+    /// gets this from the browser, whose rows are `<button>`s.
+    fn activate_focused_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.visible_rows();
+        let Some(index) = self.focused_row_index(&rows) else {
+            return;
+        };
+        let row = &rows[index];
+        let path = row.path.clone();
+        if row.is_dir {
+            self.toggle_dir(&path, cx);
+        } else {
+            self.open_file(path, window, cx);
+        }
+    }
+
     fn toggle_dir(&mut self, path: &str, cx: &mut Context<Self>) {
         if !self.expanded.remove(path) {
             self.expanded.insert(path.to_string());
@@ -1494,6 +1632,7 @@ impl FilesPanel {
             .open
             .as_ref()
             .is_some_and(|open| open.relative_path == row.path);
+        let is_focused = self.tree_focused.as_deref() == Some(row.path.as_str());
         let name_color = tint.unwrap_or(cx.theme().foreground);
         let path = row.path.clone();
         let is_dir = row.is_dir;
@@ -1507,7 +1646,11 @@ impl FilesPanel {
         };
         h_flex()
             .id(("file-tree-row", index))
+            .relative()
             .h(px(24.))
+            // The rows are direct children of the scrolling column now, so
+            // they have to refuse to be squeezed into its fixed height.
+            .flex_shrink_0()
             .w_full()
             .pl(px(8. + row.depth as f32 * 12.))
             .pr_2()
@@ -1515,11 +1658,31 @@ impl FilesPanel {
             .items_center()
             .text_sm()
             .cursor_pointer()
+            // Electron rounds its row buttons (`border-radius: 5px` in the
+            // panel's tree CSS), so the fills and the focus ring below match.
+            .rounded(px(5.))
             .when(is_open, |this| this.bg(cx.theme().accent))
             .hover(|this| this.bg(cx.theme().accent.opacity(0.6)))
+            // The roving-focus ring: 1px, drawn just inside the row, exactly
+            // the `outline: 1px solid; outline-offset: -1px` the tree paints
+            // on `data-item-focused`.
+            .when(is_focused, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .border_1()
+                        .border_color(cx.theme().ring)
+                        .rounded(px(5.)),
+                )
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
+                    // A click parks roving focus here too, the way clicking a
+                    // row moves DOM focus onto its button in Electron.
+                    this.tree_focused = Some(path.clone());
+                    this.tree_focus.focus(window, cx);
                     if is_dir {
                         this.toggle_dir(&path, cx);
                     } else {
@@ -1627,6 +1790,7 @@ impl FilesPanel {
         };
         h_flex()
             .h(px(26.))
+            .flex_shrink_0()
             .w_full()
             .pl(px(8. + depth as f32 * 12.))
             .pr_2()
@@ -1690,12 +1854,43 @@ impl FilesPanel {
             .h_full()
             .min_h_0()
             .child(
-                div()
+                v_flex()
                     .id("file-tree-scroll")
+                    .track_focus(&self.tree_focus)
+                    // The tree's keys are only live while nothing in it is
+                    // being typed into — Electron's `isTextEntryTarget`
+                    // guard, expressed as the context simply not being there.
+                    .when(self.edit.is_none(), |this| this.key_context("FileTree"))
+                    .on_action(cx.listener(|panel, _: &TreeFocusNext, _, cx| {
+                        panel.move_focus(1, cx);
+                    }))
+                    .on_action(cx.listener(|panel, _: &TreeFocusPrevious, _, cx| {
+                        panel.move_focus(-1, cx);
+                    }))
+                    .on_action(cx.listener(|panel, _: &TreeFocusFirst, _, cx| {
+                        panel.focus_edge(false, cx);
+                    }))
+                    .on_action(cx.listener(|panel, _: &TreeFocusLast, _, cx| {
+                        panel.focus_edge(true, cx);
+                    }))
+                    .on_action(cx.listener(|panel, _: &TreeExpandOrNext, _, cx| {
+                        panel.expand_or_next(cx);
+                    }))
+                    .on_action(cx.listener(|panel, _: &TreeCollapseOrParent, _, cx| {
+                        panel.collapse_or_parent(cx);
+                    }))
+                    .on_action(cx.listener(|panel, _: &TreeActivate, window, cx| {
+                        panel.activate_focused_row(window, cx);
+                    }))
                     .flex_1()
                     .min_h_0()
+                    .py_1()
+                    // The rows have to be this element's own children for
+                    // `scroll_to_item` to find their bounds.
                     .overflow_y_scroll()
-                    .child(v_flex().py_1().children(items).when(empty, |this| {
+                    .track_scroll(&self.tree_scroll)
+                    .children(items)
+                    .when(empty, |this| {
                         this.child(
                             div()
                                 .p_3()
@@ -1707,7 +1902,7 @@ impl FilesPanel {
                                     "No files"
                                 }),
                         )
-                    })),
+                    }),
             )
             .children(self.tree_truncated.then(|| {
                 div()
