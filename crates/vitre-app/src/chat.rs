@@ -257,6 +257,12 @@ pub struct ChatApp {
     quick_search: Option<Entity<QuickSearch>>,
     /// The open command palette, held for the same reason.
     command_palette: Option<Entity<CommandPalette>>,
+    /// The settings surface, which *replaces* the workspace while open —
+    /// Electron makes settings a route, so the chat it covers keeps running
+    /// (streams, terminals and the open buffer all survive the visit).
+    settings: Option<Entity<crate::settings::SettingsPanel>>,
+    /// Live while `settings` is: closes the surface when it asks to leave.
+    settings_subscription: Option<Subscription>,
     /// The shell's own focus. Actions dispatch along the focus path, and with
     /// nothing focused gpui falls back to the window's root node — which is
     /// above this view, so the palette shortcuts would reach no handler.
@@ -713,7 +719,13 @@ impl ChatApp {
             let mut shell_rx = client.shell();
             if this
                 .update(cx, |app, cx| {
-                    app.client = Some(client);
+                    app.client = Some(client.clone());
+                    // Settings opened in the sub-second window before the
+                    // client existed would otherwise sit on "not connected"
+                    // for as long as it stayed open.
+                    if let Some(settings) = app.settings.clone() {
+                        settings.update(cx, |panel, cx| panel.attach_client(client, cx));
+                    }
                     app.spawn_terminal_metadata_loop(cx);
                     cx.notify();
                 })
@@ -823,6 +835,8 @@ impl ChatApp {
             last_dock_sync_key: None,
             quick_search: None,
             command_palette: None,
+            settings: None,
+            settings_subscription: None,
             focus_handle,
             _subscriptions: subscriptions,
         }
@@ -905,6 +919,35 @@ impl ChatApp {
             return;
         }
         self.open_command_palette(false, window, cx);
+    }
+
+    /// Show the settings surface, or leave it if it is already up (Electron's
+    /// menu item is a no-op once you are on `/settings`).
+    pub fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_some() {
+            self.close_settings(window, cx);
+            return;
+        }
+        let panel = cx.new(|cx| crate::settings::SettingsPanel::new(self.client.clone(), cx));
+        self.settings_subscription = Some(cx.subscribe_in(
+            &panel,
+            window,
+            |this, _, _: &crate::settings::SettingsClosed, window, cx| {
+                this.close_settings(window, cx)
+            },
+        ));
+        // Escape is bound in the panel's own key context, so the surface has
+        // to actually hold focus for it to answer.
+        window.focus(&gpui::Focusable::focus_handle(&panel, cx), cx);
+        self.settings = Some(panel);
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings = None;
+        self.settings_subscription = None;
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
     }
 
     /// The sidebar's FolderPlus button: the palette opened straight into the
@@ -1018,8 +1061,9 @@ impl ChatApp {
             // The files panel follows the preference through its global
             // observer, so flipping it here is the whole handler.
             PaletteAction::ToggleVimMode => {
-                crate::vim::EditorPrefs::toggle_vim_mode(cx);
+                crate::client_settings::ClientSettings::toggle_vim_mode(cx);
             }
+            PaletteAction::OpenSettings => self.toggle_settings(window, cx),
             PaletteAction::NewFile | PaletteAction::NewFolder => {
                 self.dock_open_files_surface(window, cx);
                 let Some(files) = self.files.clone() else {
@@ -3691,6 +3735,11 @@ impl Render for ChatApp {
             .on_action(cx.listener(|this, _: &CommandPaletteToggle, window, cx| {
                 this.toggle_command_palette(window, cx);
             }))
+            .on_action(
+                cx.listener(|this, _: &crate::settings::SettingsOpen, window, cx| {
+                    this.toggle_settings(window, cx);
+                }),
+            )
             .on_action(cx.listener(|this, _: &NewThread, window, cx| {
                 this.new_thread(None, window, cx);
             }))
@@ -3737,8 +3786,13 @@ impl Render for ChatApp {
                     }),
                 )
             })
-            .child(
-                h_flex()
+            .child(match self.settings.as_ref() {
+                // Electron's settings is a route: the workspace unmounts while
+                // you are in there and comes back untouched, because none of
+                // its state lived in the DOM. Same here — the panels are held
+                // by this view, not by the element tree.
+                Some(panel) => panel.clone().into_any_element(),
+                None => h_flex()
                     .size_full()
                     .child(
                         div().flex_1().min_w_0().h_full().child(
@@ -3770,8 +3824,9 @@ impl Render for ChatApp {
                         active_plan
                             .as_ref()
                             .map(|plan| self.render_plan_sidebar(plan, cx)),
-                    ),
-            )
+                    )
+                    .into_any_element(),
+            })
             .children(sheet_layer)
             .children(dialog_layer)
             .children(notification_layer)

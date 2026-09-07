@@ -3,10 +3,12 @@
 
 mod assets;
 mod chat;
+mod client_settings;
 mod files;
 mod git_gutter;
 mod lsp;
 mod palette;
+mod settings;
 mod sidebar_prefs;
 mod vim;
 
@@ -186,7 +188,8 @@ fn main() {
         // `gpui_component::init` on purpose — gpui breaks same-depth binding
         // ties by registration order, which is what lets vim claim `escape`
         // and friends back from the input's own keymap (see `vim`).
-        vim::init(cx, &home);
+        client_settings::ClientSettings::init(cx, &home);
+        vim::init(cx);
 
         // Editor commands. `file.save` is `mod+s` in Electron's
         // DEFAULT_KEYBINDINGS; formatting is a fixed editor chord there
@@ -250,6 +253,13 @@ fn main() {
             KeyBinding::new(&modified("w"), chat::RightPanelCloseSurface, None),
             KeyBinding::new(&modified("shift-]"), chat::RightPanelNextSurface, None),
             KeyBinding::new(&modified("shift-["), chat::RightPanelPreviousSurface, None),
+            // Electron has no rebindable command for settings: `mod+,` is an
+            // application-menu accelerator (DesktopApplicationMenu.ts), and in
+            // the browser there is no shortcut at all. Escape leaves, scoped to
+            // the settings surface's own key context so it never shadows the
+            // editor's or a dialog's escape.
+            KeyBinding::new(&modified(","), settings::SettingsOpen, None),
+            KeyBinding::new("escape", settings::SettingsClose, Some("Settings")),
         ]);
 
         // Terminal drawer. `terminal.toggle` is global (`ctrl+\`` plus the
@@ -293,11 +303,20 @@ fn main() {
                 ..Default::default()
             },
             |window, cx| {
-                gpui_component::Theme::sync_system_appearance(Some(window), cx);
+                // The theme setting decides whether the OS gets a vote:
+                // "System" follows the window appearance, light/dark pin the
+                // corresponding Vitre palette and ignore it (Electron's
+                // `useTheme` resolves the stored `t3code:theme` the same way).
+                let apply = |window: &mut gpui::Window, cx: &mut App| {
+                    settings::apply_theme(
+                        client_settings::ClientSettings::theme(cx),
+                        Some(window),
+                        cx,
+                    );
+                };
+                apply(window, cx);
                 window
-                    .observe_window_appearance(|window, cx| {
-                        gpui_component::Theme::sync_system_appearance(Some(window), cx);
-                    })
+                    .observe_window_appearance(move |window, cx| apply(window, cx))
                     .detach();
                 let shell = cx.new(|cx| chat::ChatApp::new(&home, status_rx, window, cx));
                 cx.new(|cx| Root::new(shell, window, cx))

@@ -44,6 +44,7 @@ use vitre_state::worktree_cleanup::{
 };
 
 use crate::assets::VitreIcon;
+use crate::client_settings::ClientSettings;
 
 use super::project_actions::{ProjectMember, project_context_menu};
 use super::{ChatApp, SyncPhase, fresh_id, now_iso, relative_time, tnes};
@@ -397,6 +398,10 @@ impl ChatApp {
     /// (`confirmThreadDelete` defaults on), then the orphaned-worktree offer,
     /// then the actual stop/close/delete pipeline.
     fn delete_thread_request(&mut self, id: ThreadId, window: &mut Window, cx: &mut Context<Self>) {
+        if !ClientSettings::confirm_thread_delete(cx) {
+            self.delete_thread_offer_worktree_cleanup(id, window, cx);
+            return;
+        }
         let title = self.thread_title(&id);
         let owner = cx.entity().downgrade();
         let dialog_title: SharedString = format!("Delete thread \"{title}\"?").into();
@@ -1178,13 +1183,34 @@ impl ChatApp {
                     .child(list),
             )
             .child(
-                div()
-                    .p_3()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground.opacity(0.75))
+                v_flex()
                     .border_t_1()
                     .border_color(cx.theme().sidebar_border)
-                    .child(self.sidecar_status.clone()),
+                    .child(
+                        // Electron's `SidebarChromeFooter` settings button
+                        // (sidebar/SidebarChrome.tsx).
+                        div().px_1().pt_1().child(
+                            Button::new("open-settings")
+                                .ghost()
+                                .small()
+                                .w_full()
+                                .justify_start()
+                                .icon(Icon::new(IconName::Settings).size_4())
+                                .label("Settings")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_settings(window, cx)
+                                })),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .px_3()
+                            .pb_3()
+                            .pt_2()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground.opacity(0.75))
+                            .child(self.sidecar_status.clone()),
+                    ),
             )
     }
 }

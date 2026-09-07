@@ -1,4 +1,4 @@
-//! Vim mode for the code editor: the keymap, the preference, and the glue
+//! Vim mode for the code editor: the keymap and the glue
 //! that drives [`vitre_state::vim`] against the fork's `EditorState`.
 //!
 //! Electron gets this from `@replit/codemirror-vim`, switched on by the
@@ -30,121 +30,10 @@
 //!   here, so insert mode leaves the input's own keymap and the platform text
 //!   path (IME composition included) completely untouched.
 
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui::{Action, App, Global, KeyBinding, KeyContext, SharedString, actions};
-use serde::{Deserialize, Serialize};
+use gpui::{Action, App, KeyBinding, KeyContext, SharedString, actions};
 use vitre_state::vim::{VimEngine, VimKey, VimMode};
-
-const FILE_NAME: &str = "editor-state.json";
-
-/// The editor surface's own settings, persisted under the Vitre home.
-///
-/// Electron splits these: `vimMode` is a `ClientSettings` key, and the file
-/// explorer's visibility is browser-local (`t3code.fileExplorerOpen`, read at
-/// mount and defaulting to shown). Vitre has no settings sync yet (that lands
-/// with M5), so both live in one small file with the same defaults.
-pub struct EditorPrefs {
-    vim_mode: bool,
-    file_explorer_open: bool,
-    path: PathBuf,
-}
-
-impl Global for EditorPrefs {}
-
-/// On-disk shape, keyed the way each setting's source keys it.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-struct StoredPrefs {
-    vim_mode: bool,
-    file_explorer_open: bool,
-}
-
-impl Default for StoredPrefs {
-    fn default() -> Self {
-        Self {
-            vim_mode: false,
-            file_explorer_open: true,
-        }
-    }
-}
-
-impl EditorPrefs {
-    fn load(home: &Path) -> Self {
-        let path = home.join(FILE_NAME);
-        let stored = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|contents| serde_json::from_str::<StoredPrefs>(&contents).ok())
-            .unwrap_or_default();
-        Self {
-            vim_mode: stored.vim_mode,
-            file_explorer_open: stored.file_explorer_open,
-            path,
-        }
-    }
-
-    pub fn vim_mode(cx: &App) -> bool {
-        cx.try_global::<EditorPrefs>()
-            .is_some_and(|prefs| prefs.vim_mode)
-    }
-
-    /// Whether the files panel shows its tree aside. Defaults to shown, as
-    /// Electron's missing-localStorage-key fallback does.
-    pub fn file_explorer_open(cx: &App) -> bool {
-        cx.try_global::<EditorPrefs>()
-            .is_none_or(|prefs| prefs.file_explorer_open)
-    }
-
-    /// Flip vim mode and persist it. Returns the new value.
-    pub fn toggle_vim_mode(cx: &mut App) -> bool {
-        let Some(prefs) = cx.try_global::<EditorPrefs>() else {
-            return false;
-        };
-        let vim_mode = !prefs.vim_mode;
-        Self::store(
-            StoredPrefs {
-                vim_mode,
-                file_explorer_open: prefs.file_explorer_open,
-            },
-            prefs.path.clone(),
-            cx,
-        );
-        vim_mode
-    }
-
-    pub fn set_file_explorer_open(cx: &mut App, file_explorer_open: bool) {
-        let Some(prefs) = cx.try_global::<EditorPrefs>() else {
-            return;
-        };
-        if prefs.file_explorer_open == file_explorer_open {
-            return;
-        }
-        Self::store(
-            StoredPrefs {
-                vim_mode: prefs.vim_mode,
-                file_explorer_open,
-            },
-            prefs.path.clone(),
-            cx,
-        );
-    }
-
-    fn store(stored: StoredPrefs, path: PathBuf, cx: &mut App) {
-        cx.set_global(Self {
-            vim_mode: stored.vim_mode,
-            file_explorer_open: stored.file_explorer_open,
-            path: path.clone(),
-        });
-        // Best-effort, like every other Vitre UI preference: a failed write
-        // is not worth interrupting the edit session over.
-        if let Ok(contents) = serde_json::to_string_pretty(&stored)
-            && let Err(error) = std::fs::write(&path, contents)
-        {
-            eprintln!("[vitre] failed to persist {FILE_NAME}: {error}");
-        }
-    }
-}
 
 /// One vim keystroke, carried as the vim-notation name (`"d"`, `"A"`, `"$"`,
 /// `"escape"`, `"ctrl-r"`) so the handler never has to re-derive it from the
@@ -158,8 +47,9 @@ pub struct VimKeystroke {
 actions!(
     vitre,
     [
-        /// Turn vim mode on or off, the Electron settings toggle
-        /// (`SettingsPanels.tsx:829`) until Vitre grows a settings panel.
+        /// Turn vim mode on or off — Electron's Settings ▸ General switch
+        /// (`SettingsPanels.tsx:829`), which Vitre now has too; the
+        /// action stays for the command palette and any user chord.
         ToggleVimMode,
     ]
 );
@@ -181,8 +71,7 @@ pub fn key_context(mode: Option<VimMode>) -> Option<KeyContext> {
     Some(context)
 }
 
-pub fn init(cx: &mut App, home: &Path) {
-    cx.set_global(EditorPrefs::load(home));
+pub fn init(cx: &mut App) {
     cx.bind_keys(bindings());
 }
 

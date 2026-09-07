@@ -50,14 +50,11 @@ use vitre_state::file_tree::{FileTreeModel, FileTreeRow};
 use vitre_state::vcs_tree_status::{TreeVcsDecorations, TreeVcsStatus, build_tree_vcs_decorations};
 use vitre_state::vim::{VimDocument, VimEffect};
 
+use crate::client_settings::ClientSettings;
 use crate::git_gutter::{GitGutterState, RECOMPUTE_DEBOUNCE};
 use crate::lsp::bridge::{self, LspBridge};
 use crate::lsp::positions::{self as positions, WirePosition, wire_to_offset};
-use crate::vim::{self, EditorPrefs, ToggleVimMode, VimKeystroke, VimSession};
-
-/// Electron default: autosave on, `afterDelay`, 500ms
-/// (`packages/contracts/src/settings.ts` `DEFAULT_AUTO_SAVE_DELAY_MS`).
-const AUTOSAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+use crate::vim::{self, ToggleVimMode, VimKeystroke, VimSession};
 
 /// A server-completed watch stream must not resubscribe in a hot loop
 /// (vitre-client's `RESUBSCRIBE_AFTER_COMPLETION`).
@@ -262,6 +259,10 @@ pub struct FilesPanel {
     /// The last open that failed, kept until another open supersedes it.
     /// Mutually exclusive with [`Self::open`].
     open_error: Option<OpenError>,
+    /// `wordWrap`, and the value the editor was last given — the setter needs
+    /// a `Window`, which only the frame has.
+    word_wrap: bool,
+    applied_word_wrap: bool,
     /// Cross-file go-to-definition target, applied once that file loads.
     pending_reveal: Option<(String, RevealTarget)>,
     /// The reveal the tree has already followed, as (generation, path).
@@ -308,7 +309,9 @@ impl FilesPanel {
                     _ => {}
                 },
             ),
-            cx.observe_global::<EditorPrefs>(|this: &mut Self, cx| this.sync_vim_enabled(cx)),
+            cx.observe_global::<ClientSettings>(|this: &mut Self, cx| {
+                this.sync_client_settings(cx)
+            }),
         ];
 
         let lsp = LspBridge::new(client.clone(), cwd.clone(), editor.downgrade());
@@ -363,7 +366,7 @@ impl FilesPanel {
             tree_scroll: ScrollHandle::new(),
             tree_revealed: None,
             reveal_generation: 0,
-            explorer_open: EditorPrefs::file_explorer_open(cx),
+            explorer_open: ClientSettings::file_explorer_open(cx),
             git: GitGutterState::default(),
             vcs_entries: Vec::new(),
             vcs: TreeVcsDecorations::default(),
@@ -371,9 +374,11 @@ impl FilesPanel {
             edit: None,
             editor,
             lsp,
-            vim: EditorPrefs::vim_mode(cx).then(VimSession::new),
+            vim: ClientSettings::vim_mode(cx).then(VimSession::new),
             diagnostics: HashMap::new(),
             open_error: None,
+            word_wrap: ClientSettings::word_wrap(cx),
+            applied_word_wrap: true,
             pending_reveal: None,
             open_generation: 0,
             list_generation: 0,
@@ -1232,10 +1237,16 @@ impl FilesPanel {
         if !rearm {
             return;
         }
+        // Autosave is a setting now (Settings ▸ Editor ▸ Auto save, and its
+        // delay). Switched off, a dirty buffer waits for ⌘S or `:w` — which is
+        // exactly what Electron's `autoSaveEnabled: false` does.
+        let Some(autosave_delay) = ClientSettings::auto_save_delay(cx) else {
+            return;
+        };
         open.debounce += 1;
         let debounce = open.debounce;
         cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(AUTOSAVE_DEBOUNCE).await;
+            cx.background_executor().timer(autosave_delay).await;
             let _ = this.update_in(cx, |panel, window, cx| {
                 if panel.open_generation != generation {
                     return;
@@ -2212,8 +2223,15 @@ impl FilesPanel {
     // ---- vim mode ---------------------------------------------------------
 
     /// Follow the `vimMode` preference after it flips.
-    fn sync_vim_enabled(&mut self, cx: &mut Context<Self>) {
-        let enabled = EditorPrefs::vim_mode(cx);
+    /// Re-read the client settings this panel honours. Fired by
+    /// `cx.observe_global::<ClientSettings>`, so flipping a switch in Settings
+    /// reaches an already-open buffer without a reopen.
+    fn sync_client_settings(&mut self, cx: &mut Context<Self>) {
+        // Soft wrap needs a `Window` the observer does not have, so it is
+        // applied on the next frame (see `Render`).
+        self.word_wrap = ClientSettings::word_wrap(cx);
+        cx.notify();
+        let enabled = ClientSettings::vim_mode(cx);
         if enabled == self.vim.is_some() {
             return;
         }
@@ -2515,7 +2533,12 @@ impl FilesPanel {
                 .into_any_element();
         }
         let open = self.open.as_ref();
-        let conflict = open.and_then(|open| open.buffer.conflict());
+        // `showFileConflictWarning`: Electron keeps detecting conflicts and
+        // only silences the banner, which is what hiding it here does — the
+        // buffer still refuses to overwrite a newer revision.
+        let conflict = open
+            .and_then(|open| open.buffer.conflict())
+            .filter(|_| ClientSettings::show_file_conflict_warning(cx));
         let truncated = open.is_some_and(|open| open.truncated);
         v_flex()
             .flex_1()
@@ -2655,7 +2678,7 @@ impl FilesPanel {
     /// persists `t3code.fileExplorerOpen`.
     fn toggle_explorer(&mut self, cx: &mut Context<Self>) {
         self.explorer_open = !self.explorer_open;
-        EditorPrefs::set_file_explorer_open(cx, self.explorer_open);
+        ClientSettings::set_file_explorer_open(cx, self.explorer_open);
         cx.notify();
     }
 }
@@ -2830,7 +2853,17 @@ fn render_hunk_peek(
 }
 
 impl Render for FilesPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Electron's `wordWrap` client setting, applied to the live buffer
+        // (`EditorView.lineWrapping` in a compartment there, `set_soft_wrap`
+        // here). The fork's editor defaults to wrapping, which is also the
+        // contract default.
+        if self.applied_word_wrap != self.word_wrap {
+            self.applied_word_wrap = self.word_wrap;
+            let wrap = self.word_wrap;
+            self.editor
+                .update(cx, |state, cx| state.set_soft_wrap(wrap, window, cx));
+        }
         // A file that failed to open still holds the surface: breadcrumb,
         // toggle and aside behave as they do for a file that loaded.
         let file_open = self.open.is_some() || self.open_error.is_some();
@@ -2865,8 +2898,8 @@ impl Render for FilesPanel {
                 panel.vim_key(&action.key, window, cx);
             }))
             .on_action(cx.listener(|panel, _: &ToggleVimMode, _, cx| {
-                EditorPrefs::toggle_vim_mode(cx);
-                panel.sync_vim_enabled(cx);
+                ClientSettings::toggle_vim_mode(cx);
+                panel.sync_client_settings(cx);
             }))
             .bg(cx.theme().background)
             .border_l_1()
