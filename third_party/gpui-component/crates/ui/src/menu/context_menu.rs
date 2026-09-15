@@ -275,10 +275,21 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
                 let hitbox = hitbox.clone();
                 // When right mouse click, to build content menu, and show it at the mouse position.
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-                    if phase.bubble()
-                        && event.button == MouseButton::Right
+                    // Wrapped elements paint first, so nested menus register
+                    // before their ancestors. Capture in that order, before
+                    // a Control-click can arm the row's ordinary click.
+                    if phase.capture()
+                        && (event.button == MouseButton::Right
+                            || (cfg!(target_os = "macos")
+                                && event.button == MouseButton::Left
+                                && event.modifiers.control))
                         && hitbox.is_hovered(window)
                     {
+                        // The innermost target owns this secondary click. In
+                        // particular Control-click must not select its row or
+                        // open an ancestor's menu as well.
+                        cx.stop_propagation();
+                        window.prevent_default();
                         // Capture the focused element to restore focus to on dismiss.
                         // If focus is still on the previous menu, keep its captured focus.
                         let previous_focus_handle = window.focused(cx).and_then(|focused| {

@@ -905,8 +905,11 @@ impl PopupMenu {
 
     fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
+        let first_clickable_ix = self.clickable_menu_items().next().map(|(ix, _)| ix);
         let Some(ix) = self.selected_index else {
-            self.set_selected_index(0, cx);
+            if let Some(first_ix) = first_clickable_ix {
+                self.set_selected_index(first_ix, cx);
+            }
             return;
         };
 
@@ -920,7 +923,9 @@ impl PopupMenu {
             return;
         }
 
-        self.set_selected_index(0, cx);
+        if let Some(first_ix) = first_clickable_ix {
+            self.set_selected_index(first_ix, cx);
+        }
     }
 
     fn select_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {

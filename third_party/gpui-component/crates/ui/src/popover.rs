@@ -304,12 +304,37 @@ impl RenderOnce for Popover {
             .default_open(self.default_open)
             .overlay_closable(self.overlay_closable)
             .content(move |state, window, cx| {
+                let ring = popover_ring(cx);
                 Self::render_popover_content(anchor, appearance, window, cx)
                     .when_some(content, |this, content| {
                         this.child((content)(state, window, cx))
                     })
                     .children(children)
                     .refine_style(&style)
+                    .with_animation(
+                        "popover-enter",
+                        Animation::new(DROPDOWN_ENTER_DURATION).with_easing(ease_out_cubic),
+                        move |surface, delta| {
+                            surface
+                                .opacity(delta)
+                                .relative()
+                                .top(px(
+                                    if matches!(
+                                        anchor,
+                                        Anchor::BottomLeft
+                                            | Anchor::BottomCenter
+                                            | Anchor::BottomRight
+                                    ) {
+                                        8. * (1. - delta) - 4.
+                                    } else {
+                                        -8. * (1. - delta) + 4.
+                                    },
+                                ))
+                                .when(appearance, |surface| {
+                                    surface.shadow(popover_shadow(ring, delta * delta * delta))
+                                })
+                        },
+                    )
             })
             .when_some(self.trigger, |this, trigger| this.trigger_with(trigger))
             .when_some(self.open, |this, open| this.open(open))

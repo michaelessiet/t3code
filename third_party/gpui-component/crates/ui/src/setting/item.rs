@@ -205,7 +205,9 @@ impl SettingItem {
         }
     }
 
-    fn render_field(
+    /// Render only the typed control, allowing applications to supply their
+    /// own row layout while retaining field behavior, validation and state.
+    pub fn render_field(
         field: Rc<dyn AnySettingField>,
         options: RenderOptions,
         window: &mut Window,

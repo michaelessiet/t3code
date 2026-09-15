@@ -196,7 +196,7 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeC
             );
         }
         Node::InlineCode(val) => {
-            text = val.value.clone();
+            text = super::super::node::normalize_inline_code_text(&val.value);
             paragraph.push(
                 InlineNode::new(&text).marks(vec![(0..text.len(), TextMark::default().code())]),
             );
@@ -536,6 +536,22 @@ mod tests {
                 .any(|(_, mark)| mark.bold && mark.italic),
             "nested emphasis should produce a bold and italic mark"
         );
+    }
+
+    #[test]
+    fn inline_code_line_endings_render_as_spaces() {
+        let mut cx = NodeContext::default();
+        let document = parse("Before `first\nsecond` after", &mut cx).unwrap();
+        let BlockNode::Paragraph(paragraph) = &document.blocks[0] else {
+            panic!("expected paragraph");
+        };
+        let code = paragraph
+            .children
+            .iter()
+            .find(|child| child.marks.iter().any(|(_, mark)| mark.code))
+            .expect("expected inline code");
+        assert_eq!(code.text.as_ref(), "first second");
+        assert!(!code.text.contains(['\r', '\n']));
     }
 
     #[test]

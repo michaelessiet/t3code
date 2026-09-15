@@ -1,0 +1,2 @@
+<!-- Adapted from T3/Pierre for standalone native rendering; see ../NOTICE.md. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 16 16" color="#cbd5e1" fill="#cbd5e1"><path fill="#3b7fd4" fill-rule="evenodd" d="M3.6 2.6h4.8a3.4 3.4 0 0 1 1.6 6.4l2.4 4.4H10L7.8 9.4H5.8v4H3.6V2.6Zm2.2 2v2.8h2.6a1.4 1.4 0 0 0 0-2.8H5.8Z" /></svg>

@@ -28,6 +28,15 @@ impl Styled for SettingGroup {
 }
 
 impl SettingGroup {
+    /// Optional heading in an application-owned settings layout.
+    pub fn heading(&self) -> Option<&SharedString> {
+        self.title.as_ref()
+    }
+
+    /// The group's controls in display order.
+    pub fn entries(&self) -> &[SettingItem] {
+        &self.items
+    }
     /// Create a new setting group.
     pub fn new() -> Self {
         Self {

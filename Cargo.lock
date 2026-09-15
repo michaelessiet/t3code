@@ -8759,26 +8759,45 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "base64",
+ "block2 0.6.2",
  "chrono",
+ "futures",
  "gpui",
+ "gpui-base",
  "gpui-component",
  "gpui-component-assets",
  "gpui-wry",
  "gpui_platform",
  "gpui_tokio",
+ "image",
  "lb-wry",
  "lsp-types",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "objc2-web-kit",
  "percent-encoding",
  "raw-window-handle",
+ "regex",
+ "reqwest",
  "ropey",
+ "roxmltree 0.21.1",
  "serde",
  "serde_json",
  "tokio",
+ "vitre-bezel-orbs",
  "vitre-client",
  "vitre-contracts",
  "vitre-rpc",
  "vitre-sidecar",
  "vitre-state",
+]
+
+[[package]]
+name = "vitre-bezel-orbs"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui-component",
 ]
 
 [[package]]

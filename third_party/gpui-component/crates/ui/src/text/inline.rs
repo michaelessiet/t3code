@@ -44,9 +44,62 @@ pub(crate) struct InlineState {
     /// The text that actually rendering, matched with selection.
     pub(super) text: SharedString,
     pub(super) selection: Option<Selection>,
+    source: Option<SelectionSource>,
+}
+
+#[derive(Debug, Clone)]
+struct SelectionSource {
+    state: Arc<Mutex<InlineState>>,
+    offset: usize,
+}
+impl PartialEq for SelectionSource {
+    fn eq(&self, other: &Self) -> bool {
+        self.offset == other.offset && Arc::ptr_eq(&self.state, &other.state)
+    }
 }
 
 impl InlineState {
+    /// A visual fragment still selects bytes in its paragraph's original run.
+    pub(super) fn fragment(text: SharedString, parent: Arc<Mutex<Self>>, offset: usize) -> Self {
+        let source = parent.lock().ok().and_then(|state| state.source.clone());
+        let source = source
+            .map(|source| SelectionSource {
+                state: source.state,
+                offset: source.offset + offset,
+            })
+            .unwrap_or(SelectionSource {
+                state: parent,
+                offset,
+            });
+        Self {
+            text,
+            source: Some(source),
+            ..Default::default()
+        }
+    }
+
+    pub(super) fn clear_fragment_selection(&mut self) {
+        self.selection = None;
+        if let Some(source) = &self.source
+            && let Ok(mut parent) = source.state.lock()
+        {
+            parent.selection = None;
+        }
+    }
+
+    fn update_selection(&mut self, selection: Option<Selection>) {
+        self.selection = selection;
+        if let Some(source) = &self.source
+            && let Some(selection) = selection
+            && let Ok(mut parent) = source.state.lock()
+        {
+            let start = source.offset + selection.start;
+            let end = source.offset + selection.end;
+            parent.selection = Some(parent.selection.map_or((start..end).into(), |old| {
+                (old.start.min(start)..old.end.max(end)).into()
+            }));
+        }
+    }
     /// Save actually rendered text for selected text to use.
     pub(crate) fn set_text(&mut self, text: SharedString) {
         self.text = text;
@@ -436,7 +489,7 @@ impl Element for Inline {
         let (is_selectable, is_selection, selection) =
             self.layout_selections(&text_layout, &bounds, window, cx);
 
-        state.selection = selection;
+        state.update_selection(selection);
 
         if is_selection || is_selectable {
             window.set_cursor_style(CursorStyle::IBeam, &hitbox);

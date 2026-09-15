@@ -6,23 +6,132 @@ use std::{
 use gpui::{
     AbsoluteLength, AnyElement, App, AvailableSpace, Bounds, DefiniteLength, Element, ElementId,
     GlobalElementId, HighlightStyle, InspectorElementId, InteractiveElement as _, IntoElement,
-    LayoutId, LineFragment as WrapLineFragment, ObjectFit, Pixels, ShapedLine, SharedString,
-    SharedUri, Size, StatefulInteractiveElement as _, Styled, StyledImage as _, TextRun, TextStyle,
-    WhiteSpace, Window, img, point, prelude::FluentBuilder as _, px, relative, size,
+    LayoutId, LineFragment as WrapLineFragment, ObjectFit, ParentElement as _, Pixels, ShapedLine,
+    SharedString, SharedUri, Size, StatefulInteractiveElement as _, Styled, StyledImage as _,
+    TextRun, TextStyle, WhiteSpace, Window, div, img, point, prelude::FluentBuilder as _, px,
+    relative, size,
 };
 
 use crate::{
+    ActiveTheme as _,
     text::text_view::{LinkClickHandlerFn, handle_link_click},
     tooltip::Tooltip,
 };
 
 use super::{
     inline::{Inline, InlineState},
-    node::LinkMark,
+    node::{LinkMark, normalize_inline_code_text},
     utils::image_source,
 };
 
 const IMAGE_LEN: usize = 1;
+
+/// Split at semantic code marks so padding is layout, never extra characters
+/// in the selectable/copied text. Links and emphasis keep their byte ranges.
+pub(super) fn text_items(
+    text: SharedString,
+    state: Arc<Mutex<InlineState>>,
+    links: Vec<(Range<usize>, LinkMark)>,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    mut codes: Vec<Range<usize>>,
+) -> Vec<InlineFlowItem> {
+    codes.sort_by_key(|range| range.start);
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for range in codes {
+        if range.is_empty() || range.end > text.len() {
+            continue;
+        }
+        if let Some(last) = ranges.last_mut()
+            && range.start <= last.end
+        {
+            last.end = last.end.max(range.end);
+        } else {
+            ranges.push(range);
+        }
+    }
+    if ranges.is_empty() {
+        return vec![InlineFlowItem::Text {
+            state,
+            text,
+            links,
+            highlights,
+        }];
+    }
+    let mut chunks = Vec::new();
+    let mut offset = 0;
+    for range in ranges {
+        if offset < range.start {
+            chunks.push((offset..range.start, false));
+        }
+        offset = range.end;
+        chunks.push((range, true));
+    }
+    if offset < text.len() {
+        chunks.push((offset..text.len(), false));
+    }
+    chunks
+        .into_iter()
+        .map(|(range, code)| {
+            let text: SharedString = if code {
+                normalize_inline_code_text(&text[range.clone()]).into()
+            } else {
+                text[range.clone()].to_owned().into()
+            };
+            let inline_state = InlineState::fragment(text.clone(), state.clone(), range.start);
+            let state = Arc::new(Mutex::new(inline_state));
+            let links = slice_ranges(&links, range.start, range.end, |range, link| {
+                (range, link.clone())
+            });
+            let highlights = slice_ranges(&highlights, range.start, range.end, |range, style| {
+                (range, *style)
+            });
+            if code {
+                InlineFlowItem::Code {
+                    text,
+                    state,
+                    links,
+                    highlights,
+                }
+            } else {
+                InlineFlowItem::Text {
+                    text,
+                    state,
+                    links,
+                    highlights,
+                }
+            }
+        })
+        .collect()
+}
+
+fn measure_code(
+    text: &SharedString,
+    style: &TextStyle,
+    wrap_width: Option<Pixels>,
+    window: &mut Window,
+) -> Size<Pixels> {
+    let font_size = style.font_size.to_pixels(window.rem_size());
+    let runs = [style.to_run(text.len())];
+    // Taffy rounds inner widths to device pixels. Leave a pixel of shaping
+    // slack so a fitting word doesn't wrap its final glyph after rounding.
+    let natural =
+        px(f32::from(shape_line(text.clone(), font_size, &runs, window).width()).ceil() + 12.);
+    let width = natural.min(wrap_width.unwrap_or(natural)).max(px(12.));
+    let lines = window
+        .text_system()
+        .shape_text(text.clone(), font_size, &runs, Some(width - px(10.)), None)
+        .map(|lines| {
+            lines
+                .iter()
+                .map(|line| line.wrap_boundaries.len() + 1)
+                .sum::<usize>()
+        })
+        .unwrap_or(1);
+    size(
+        width,
+        style.line_height_in_pixels(window.rem_size()) * lines.max(1) as f32 + px(4.),
+    )
+}
 
 pub(super) struct InlineFlow {
     id: ElementId,
@@ -31,6 +140,12 @@ pub(super) struct InlineFlow {
 }
 
 pub(super) enum InlineFlowItem {
+    Code {
+        state: Arc<Mutex<InlineState>>,
+        text: SharedString,
+        links: Vec<(Range<usize>, LinkMark)>,
+        highlights: Vec<(Range<usize>, HighlightStyle)>,
+    },
     Text {
         state: Arc<Mutex<InlineState>>,
         text: SharedString,
@@ -59,6 +174,11 @@ struct InlineFlowLayout {
 
 #[derive(Clone)]
 enum PositionedFragment {
+    Code {
+        item_ix: usize,
+        origin: gpui::Point<Pixels>,
+        size: Size<Pixels>,
+    },
     Text {
         item_ix: usize,
         origin: gpui::Point<Pixels>,
@@ -76,6 +196,10 @@ enum PositionedFragment {
 }
 
 enum MeasureItem {
+    Code {
+        text: SharedString,
+        style: TextStyle,
+    },
     Text {
         text: SharedString,
         links: Vec<(Range<usize>, LinkMark)>,
@@ -96,6 +220,7 @@ struct LineFragmentLayout {
 }
 
 enum LineFragmentKind {
+    Code,
     Text {
         text: SharedString,
         links: Vec<(Range<usize>, LinkMark)>,
@@ -191,7 +316,21 @@ impl Element for InlineFlow {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let measure_items = self.items.iter().map(MeasureItem::from).collect::<Vec<_>>();
+        let measure_items = self
+            .items
+            .iter()
+            .map(|item| match item {
+                InlineFlowItem::Code { text, .. } => {
+                    let mut style = window.text_style();
+                    style.font_family = cx.theme().mono_font_family.clone();
+                    MeasureItem::Code {
+                        text: text.clone(),
+                        style,
+                    }
+                }
+                _ => MeasureItem::from(item),
+            })
+            .collect::<Vec<_>>();
         let line_height = window.line_height();
         let rem_size = window.rem_size();
         let image_sizes = measure_items
@@ -208,15 +347,18 @@ impl Element for InlineFlow {
                     window,
                     cx,
                 )),
-                MeasureItem::Text { .. } => None,
+                MeasureItem::Text { .. } | MeasureItem::Code { .. } => None,
             })
             .collect::<Vec<_>>();
         let layout_state = InlineFlowLayoutState::default();
         let layout_ref = layout_state.layout.clone();
+        // The measured-layout callback runs outside the paragraph's inherited
+        // text-style stack. Capture it here or plain fragments get wider gaps
+        // when a chat uses a smaller font than the window default.
+        let text_style = window.text_style();
 
         let layout_id = window.request_measured_layout(Default::default(), {
             move |known_dimensions, available_space, window, _cx| {
-                let text_style = window.text_style();
                 let wrap_width = if text_style.white_space == WhiteSpace::Normal {
                     known_dimensions.width.or(match available_space.width {
                         AvailableSpace::Definite(width) => Some(width),
@@ -260,8 +402,73 @@ impl Element for InlineFlow {
             .unwrap_or_default();
         let mut elements = Vec::with_capacity(fragments.len());
 
+        for item in &self.items {
+            if let InlineFlowItem::Text { state, .. } | InlineFlowItem::Code { state, .. } = item
+                && let Ok(mut state) = state.lock()
+            {
+                state.clear_fragment_selection();
+            }
+        }
+
         for fragment in fragments {
             match fragment {
+                PositionedFragment::Code {
+                    item_ix,
+                    origin,
+                    size: fragment_size,
+                } => {
+                    let InlineFlowItem::Code {
+                        state,
+                        text,
+                        links,
+                        highlights,
+                    } = &self.items[item_ix]
+                    else {
+                        continue;
+                    };
+                    if let Ok(mut state) = state.lock() {
+                        state.set_text(text.clone());
+                    }
+                    let mut highlights = highlights.clone();
+                    for (_, style) in &mut highlights {
+                        style.background_color = None;
+                    }
+                    let mut element = div()
+                        .id(("inline-code", item_ix))
+                        .debug_selector(|| format!("inline-code-{item_ix}"))
+                        .w(fragment_size.width)
+                        .h(fragment_size.height)
+                        .px(px(4.))
+                        .py(px(1.))
+                        .border_1()
+                        .rounded(px(4.))
+                        .border_color(cx.theme().foreground.opacity(0.12))
+                        .bg(cx.theme().foreground.opacity(0.06))
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .child(
+                            div()
+                                .w_full()
+                                .debug_selector(move || format!("inline-code-content-{item_ix}"))
+                                .child(Inline::new(
+                                    item_ix,
+                                    state.clone(),
+                                    links.clone(),
+                                    highlights,
+                                    self.link_click_handler.clone(),
+                                )),
+                        )
+                        .into_any_element();
+                    element.prepaint_as_root(
+                        bounds.origin + origin,
+                        size(
+                            AvailableSpace::Definite(fragment_size.width),
+                            AvailableSpace::Definite(fragment_size.height),
+                        ),
+                        window,
+                        cx,
+                    );
+                    elements.push(element);
+                }
                 PositionedFragment::Text {
                     item_ix,
                     origin,
@@ -278,6 +485,9 @@ impl Element for InlineFlow {
                             text: source,
                             ..
                         } if source_range == (0..source.len()) => state.clone(),
+                        InlineFlowItem::Text { state, .. } => Arc::new(Mutex::new(
+                            InlineState::fragment(text.clone(), state.clone(), source_range.start),
+                        )),
                         _ => Arc::new(Mutex::new(InlineState::default())),
                     };
                     if let Ok(mut state) = state.lock() {
@@ -358,6 +568,7 @@ impl Element for InlineFlow {
 impl From<&InlineFlowItem> for MeasureItem {
     fn from(item: &InlineFlowItem) -> Self {
         match item {
+            InlineFlowItem::Code { .. } => unreachable!("code measurement needs the current font"),
             InlineFlowItem::Text {
                 state: _,
                 text,
@@ -384,7 +595,7 @@ impl MeasureItem {
     fn len(&self) -> usize {
         match self {
             MeasureItem::Text { text, .. } => text.len(),
-            MeasureItem::Image { .. } => IMAGE_LEN,
+            MeasureItem::Image { .. } | MeasureItem::Code { .. } => IMAGE_LEN,
         }
     }
 }
@@ -396,7 +607,7 @@ fn layout_flow(
     wrap_width: Option<Pixels>,
     window: &mut Window,
 ) -> InlineFlowLayout {
-    let line_height = window.line_height();
+    let line_height = text_style.line_height_in_pixels(window.rem_size());
     let rem_size = window.rem_size();
     let total_len = items.iter().map(MeasureItem::len).sum::<usize>();
     if total_len == 0 {
@@ -426,6 +637,17 @@ fn layout_flow(
             }
 
             match item {
+                MeasureItem::Code { text, style } => {
+                    let code_size = measure_code(text, style, wrap_width, window);
+                    line_width += code_size.width;
+                    actual_line_height = actual_line_height.max(code_size.height);
+                    line_fragments.push(LineFragmentLayout {
+                        item_ix,
+                        kind: LineFragmentKind::Code,
+                        size: code_size,
+                        source_range: 0..IMAGE_LEN,
+                    });
+                }
                 MeasureItem::Text {
                     text,
                     links,
@@ -481,6 +703,11 @@ fn layout_flow(
         for fragment in line_fragments {
             let origin = point(x, y + (actual_line_height - fragment.size.height) / 2.);
             let positioned = match fragment.kind {
+                LineFragmentKind::Code => PositionedFragment::Code {
+                    item_ix: fragment.item_ix,
+                    origin,
+                    size: fragment.size,
+                },
                 LineFragmentKind::Text {
                     text,
                     links,
@@ -559,6 +786,10 @@ fn line_ranges(
                     None
                 } else {
                     match item {
+                        MeasureItem::Code { text, style } => Some(WrapLineFragment::element(
+                            measure_code(text, style, Some(wrap_width), window).width,
+                            IMAGE_LEN,
+                        )),
                         MeasureItem::Text { text, .. } => {
                             let start = hard_line.start.max(item_start) - item_start;
                             let end = hard_line.end.min(item_end) - item_start;

@@ -10,6 +10,7 @@ members = [
   "crates/vitre-state",
   "third_party/ztracing",
   "third_party/ztracing-macro",
+  "third_party/bezel-orbs",
 ]
 default-members = ["crates/vitre-app"]
 # Vendored fork with its own inner workspace (see third_party/gpui-component/VENDOR.md);
@@ -45,9 +46,8 @@ vitre-sidecar = { path = "crates/vitre-sidecar" }
 vitre-state = { path = "crates/vitre-state" }
 
 # --- vendored gpui-component fork (Apache-2.0) ---
-# The grammar set the editor highlights with. Not optional polish: without a
-# grammar the editor's highlight pass returns early and drops LSP diagnostics
-# with it (element.rs `highlight_lines`), so squiggles depend on it too.
+# The grammar set the editor highlights with. Language-server diagnostics
+# remain independent of whether a matching highlighting grammar is bundled.
 # This is the upstream `tree-sitter-languages` set minus two grammars:
 # `tree-sitter-sql`, whose `tree-sitter-sequel` pins `cc ~1.2` and cannot
 # resolve against the `cc 1.4` gpui's `embed-resource` requires; and
@@ -90,6 +90,8 @@ gpui-component = { path = "third_party/gpui-component/crates/ui", features = [
 ] }
 gpui-wry = { path = "third_party/gpui-component/crates/webview" }
 gpui-component-assets = { path = "third_party/gpui-component/crates/assets" }
+gpui-base = { path = "third_party/gpui-component/crates/base" }
+vitre-bezel-orbs = { path = "third_party/bezel-orbs" }
 raw-window-handle = "0.6.2"
 # Same wry fork gpui-wry builds against; needed to construct the child webview.
 wry = { version = "0.53.3", package = "lb-wry" }
@@ -112,10 +114,7 @@ percent-encoding = "2"
 regex = "1"
 # Same pin as the vendored gpui-component fork's rope, so the editor buffers
 # and the LSP wire-position math share one resolved crate.
-ropey = { version = "=2.0.0-beta.1", features = [
-  "metric_lines_lf",
-  "metric_utf16",
-] }
+ropey = { version = "=2.0.0-beta.1", features = ["metric_lines_lf", "metric_utf16"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

@@ -382,6 +382,19 @@ pub struct TextMark {
     pub link: Option<LinkMark>,
 }
 
+/// Code spans are inline even when their source crosses a line ending.
+/// CommonMark renders those endings as spaces, and GPUI's inline shaper has
+/// an intentional single-line contract. Mapping one byte to one byte also
+/// keeps source/selection offsets stable.
+pub(crate) fn normalize_inline_code_text(text: &str) -> String {
+    text.chars()
+        .map(|character| match character {
+            '\r' | '\n' => ' ',
+            character => character,
+        })
+        .collect()
+}
+
 impl TextMark {
     pub fn bold(mut self) -> Self {
         self.bold = true;
@@ -1550,7 +1563,11 @@ impl Paragraph {
     fn should_render_inline_flow(&self) -> bool {
         let has_image = self.children.iter().any(|child| child.image.is_some());
         let has_text = self.children.iter().any(|child| !child.text.is_empty());
-        has_image && has_text
+        (has_image && has_text)
+            || self
+                .children
+                .iter()
+                .any(|child| child.marks.iter().any(|(_, mark)| mark.code))
     }
 
     fn inline_flow_items(&self, node_cx: &NodeContext, cx: &mut App) -> Vec<InlineFlowItem> {
@@ -1558,6 +1575,7 @@ impl Paragraph {
         let mut text = String::new();
         let mut highlights: Vec<(Range<usize>, HighlightStyle)> = vec![];
         let mut links: Vec<(Range<usize>, LinkMark)> = vec![];
+        let mut codes: Vec<Range<usize>> = vec![];
         let mut offset = 0;
 
         for inline_node in &self.children {
@@ -1569,12 +1587,13 @@ impl Paragraph {
                     if let Ok(mut state) = inline_node.state.lock() {
                         state.set_text(text.clone().into());
                     }
-                    items.push(InlineFlowItem::Text {
-                        state: inline_node.state.clone(),
-                        text: text.clone().into(),
-                        links: links.clone(),
-                        highlights: highlights.clone(),
-                    });
+                    items.extend(super::inline_flow::text_items(
+                        text.clone().into(),
+                        inline_node.state.clone(),
+                        links.clone(),
+                        highlights.clone(),
+                        codes.clone(),
+                    ));
                 }
 
                 items.push(InlineFlowItem::Image {
@@ -1588,6 +1607,7 @@ impl Paragraph {
                 text.clear();
                 links.clear();
                 highlights.clear();
+                codes.clear();
                 offset = 0;
             } else {
                 let mut node_highlights = vec![];
@@ -1614,6 +1634,7 @@ impl Paragraph {
                         });
                     }
                     if style.code {
+                        codes.push(inner_range.clone());
                         highlight = highlight.highlight(node_cx.style.inline_code_highlight(cx));
                     }
                     if let Some(color) = style.highlight {
@@ -1648,12 +1669,13 @@ impl Paragraph {
             if let Ok(mut state) = self.state.lock() {
                 state.set_text(text.clone().into());
             }
-            items.push(InlineFlowItem::Text {
-                state: self.state.clone(),
-                text: text.into(),
+            items.extend(super::inline_flow::text_items(
+                text.into(),
+                self.state.clone(),
                 links,
                 highlights,
-            });
+                codes,
+            ));
         }
 
         items

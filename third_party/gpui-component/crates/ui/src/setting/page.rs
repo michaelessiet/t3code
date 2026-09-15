@@ -31,6 +31,15 @@ pub struct SettingPage {
 }
 
 impl SettingPage {
+    /// The page label for application-owned settings navigation.
+    pub fn label(&self) -> &SharedString {
+        &self.title
+    }
+
+    /// Read the sections without imposing the built-in settings shell.
+    pub fn sections(&self) -> &[SettingGroup] {
+        &self.groups
+    }
     pub fn new(title: impl Into<SharedString>) -> Self {
         Self {
             icon: None,

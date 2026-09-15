@@ -483,6 +483,22 @@ impl RenderOnce for Dialog {
             return self.render_trigger(trigger, window, cx);
         }
 
+        // An explicitly configured confirmation label requests the standard
+        // action footer. A custom footer still takes precedence. Previously
+        // on_ok worked by keyboard but these dialogs had no clickable action.
+        if self.footer.is_none() && self.button_props.ok_text.is_some() {
+            self.footer = Some(
+                crate::h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .when(self.button_props.show_cancel, |row| {
+                        row.child(self.button_props.render_cancel(window, cx))
+                    })
+                    .child(self.button_props.render_ok(window, cx))
+                    .into_any_element(),
+            );
+        }
+
         let layer_ix = self.layer_ix;
         let selection_scope = self.selection_scope;
         let on_close = self.button_props.on_close.clone();
@@ -496,7 +512,19 @@ impl RenderOnce for Dialog {
                 window_paddings.top + window_paddings.bottom,
             );
         let y = self.props.margin_top.unwrap_or(view_size.height / 10.) + px(layer_ix as f32 * 16.);
-        let x = view_size.width / 2. - self.props.width / 2.;
+        let target_width = self
+            .props
+            .width
+            .min(self.props.max_width.unwrap_or(self.props.width))
+            .min(view_size.width - px(32.));
+        let width = px(gpui_base::motion::spring(
+            (layer_ix, "dialog-width"),
+            f32::from(target_width),
+            gpui_base::motion::Spring::new(std::time::Duration::from_millis(260)),
+            window,
+            cx,
+        ));
+        let x = view_size.width / 2. - width / 2.;
 
         let base_size = window.text_style().font_size;
         let rem_size = window.rem_size();
@@ -514,6 +542,11 @@ impl RenderOnce for Dialog {
         if let Some(pb) = self.style.padding.bottom {
             paddings.bottom = pb.to_pixels(base_size, rem_size);
         }
+        // GPUI clips descendants to a rectangle, not the parent's rounded
+        // corners. Inset child backgrounds inside the curved edge, including
+        // dialogs whose caller requests zero padding (command/preview views).
+        let corner_inset = cx.theme().radius_lg * 0.3 + px(1.);
+        paddings = paddings.map(|padding| (*padding).max(corner_inset));
 
         // x1 = 1/3, x2 = 2/3 make the bezier's time mapping the identity,
         // preserving the trajectory this dialog was tuned with before
@@ -571,6 +604,7 @@ impl RenderOnce for Dialog {
                             .popup(
                                 v_flex()
                                     .id(layer_ix)
+                                    .debug_selector(move || format!("dialog-surface-{layer_ix}"))
                                     .bg(cx.theme().tokens.background)
                                     .border_1()
                                     .border_color(cx.theme().border)
@@ -580,18 +614,22 @@ impl RenderOnce for Dialog {
                                     .pb(paddings.bottom)
                                     .gap(paddings.top.max(px(8.)))
                                     .refine_style(&self.style)
+                                    .pt(paddings.top)
+                                    .pb(paddings.bottom)
                                     .px_0()
+                                    .overflow_hidden()
                                     // There style is high priority, can't be overridden.
                                     .absolute()
                                     .occlude()
                                     .relative()
                                     .left(x)
                                     .top(y)
-                                    .w(self.props.width)
-                                    .when_some(self.props.max_width, |this, w| this.max_w(w))
-                                    .child(
+                                    .w(width)
+                                    .child(crate::animated_height::AnimatedHeight::new(
+                                        ("dialog-body", layer_ix),
                                         v_flex()
-                                            .flex_1()
+                                            .w_full()
+                                            .min_w_0()
                                             .overflow_hidden()
                                             .gap_y_2()
                                             .when_some(self.header, |this, header| {
@@ -633,7 +671,7 @@ impl RenderOnce for Dialog {
                                                     ),
                                                 )
                                             }),
-                                    )
+                                    ))
                                     .when_some(self.footer, |this, footer| {
                                         this.child(
                                             div()

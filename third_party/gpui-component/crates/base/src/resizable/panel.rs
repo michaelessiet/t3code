@@ -227,6 +227,7 @@ pub struct ResizablePanel {
     size_range: Range<Pixels>,
     children: Vec<AnyElement>,
     visible: bool,
+    reveal: Option<f32>,
     style: StyleRefinement,
     handle_appearance: Option<ResizeHandleRenderer>,
 }
@@ -242,6 +243,7 @@ impl ResizablePanel {
             axis: Axis::Horizontal,
             children: vec![],
             visible: true,
+            reveal: None,
             style: StyleRefinement::default(),
             handle_appearance: None,
         }
@@ -250,6 +252,13 @@ impl ResizablePanel {
     /// Set the visibility of the panel, default is true.
     pub fn visible(mut self, visible: bool) -> Self {
         self.visible = visible;
+        self
+    }
+
+    /// Reveal a sized panel without resizing its contents or overwriting its
+    /// saved drag width. Keep it visible until the closing motion reaches zero.
+    pub fn reveal(mut self, progress: f32) -> Self {
+        self.reveal = Some(progress.clamp(0., 1.));
         self
     }
 
@@ -295,6 +304,13 @@ impl RenderOnce for ResizablePanel {
             .get(self.panel_ix)
             .expect("BUG: The `index` of ResizablePanel should be one of in `state`.");
         let size_range = self.size_range.clone();
+        let full_size = panel_state
+            .size
+            .or(self.initial_size)
+            .unwrap_or(size_range.start)
+            .clamp(size_range.start, size_range.end);
+        let reveal = self.reveal.unwrap_or(1.);
+        let revealing = reveal < 1.;
 
         div()
             .id(("resizable-panel", self.panel_ix))
@@ -333,16 +349,53 @@ impl RenderOnce for ResizablePanel {
                 Some(size) => this.flex_basis(size.min(size_range.end).max(size_range.start)),
                 None => this,
             })
+            .when(revealing, |this| {
+                this.flex_none()
+                    .flex_basis(full_size * reveal)
+                    .when(self.axis.is_horizontal(), |this| {
+                        this.min_w(gpui::px(0.)).max_w(full_size * reveal)
+                    })
+                    .when(self.axis.is_vertical(), |this| {
+                        this.min_h(gpui::px(0.)).max_h(full_size * reveal)
+                    })
+            })
             .on_prepaint({
                 let state = state.clone();
                 move |bounds, _, cx| {
+                    if revealing {
+                        return;
+                    }
                     state.update(cx, |state, cx| {
                         state.update_panel_size(self.panel_ix, bounds, self.size_range, cx)
                     })
                 }
             })
-            .children(self.children)
-            .when(self.panel_ix > 0, |this| {
+            .map(|this| {
+                if self.reveal.is_none() {
+                    this.children(self.children)
+                } else {
+                    this.child(
+                        div().size_full().relative().overflow_hidden().child(
+                            div()
+                                .size_full()
+                                .when(revealing, |this| {
+                                    this.absolute()
+                                        .when(self.axis.is_horizontal(), |this| {
+                                            this.w(full_size)
+                                                .top_0()
+                                                .when(self.panel_ix == 0, |this| this.right_0())
+                                                .when(self.panel_ix != 0, |this| this.left_0())
+                                        })
+                                        .when(self.axis.is_vertical(), |this| {
+                                            this.h(full_size).left_0().top_0()
+                                        })
+                                })
+                                .children(self.children),
+                        ),
+                    )
+                }
+            })
+            .when(self.panel_ix > 0 && !revealing, |this| {
                 let ix = self.panel_ix - 1;
                 this.child(
                     resize_handle(("resizable-handle", ix), self.axis)

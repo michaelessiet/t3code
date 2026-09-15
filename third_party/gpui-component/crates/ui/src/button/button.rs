@@ -615,6 +615,14 @@ impl RenderOnce for Button {
             .whitespace_nowrap()
             .items_center()
             .justify_center()
+            .map(|mut content| {
+                // Honor explicit application alignment on the content, not
+                // just its full-width wrapper (e.g. settings navigation).
+                if let Some(alignment) = instance_style.justify_content {
+                    content.style().justify_content = Some(alignment);
+                }
+                content
+            })
             .button_text_size(self.size)
             .map(|this| match self.size {
                 Size::XSmall => this.gap_1(),

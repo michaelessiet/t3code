@@ -10,6 +10,39 @@ use gpui_component::IconNamed;
 pub struct VitreAssets;
 
 const EXTRA_ICONS: &[(&str, &[u8])] = &[
+    (
+        "icons/keyboard.svg",
+        include_bytes!("../icons/keyboard.svg"),
+    ),
+    ("icons/braces.svg", include_bytes!("../icons/braces.svg")),
+    (
+        "icons/settings-2.svg",
+        include_bytes!("../icons/settings-2.svg"),
+    ),
+    (
+        "icons/refresh-cw.svg",
+        include_bytes!("../icons/refresh-cw.svg"),
+    ),
+    (
+        "icons/providers/codex.svg",
+        include_bytes!("../icons/providers/codex.svg"),
+    ),
+    (
+        "icons/providers/claudeAgent.svg",
+        include_bytes!("../icons/providers/claudeAgent.svg"),
+    ),
+    (
+        "icons/providers/cursor.svg",
+        include_bytes!("../icons/providers/cursor.svg"),
+    ),
+    (
+        "icons/providers/grok.svg",
+        include_bytes!("../icons/providers/grok.svg"),
+    ),
+    (
+        "icons/providers/opencode.svg",
+        include_bytes!("../icons/providers/opencode.svg"),
+    ),
     ("icons/bug.svg", include_bytes!("../icons/bug.svg")),
     (
         "icons/chevrons-down-up.svg",
@@ -99,14 +132,28 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
 
 impl AssetSource for VitreAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if let Some((_, bytes)) = EXTRA_ICONS.iter().find(|(name, _)| *name == path) {
+        if let Some((_, bytes)) = EXTRA_ICONS
+            .iter()
+            .chain(crate::icons::assets())
+            .find(|(name, _)| *name == path)
+        {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
         gpui_component_assets::Assets.load(path)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        gpui_component_assets::Assets.list(path)
+        let mut names = gpui_component_assets::Assets.list(path)?;
+        names.extend(
+            EXTRA_ICONS
+                .iter()
+                .chain(crate::icons::assets())
+                .filter(|(name, _)| name.starts_with(path))
+                .map(|(name, _)| SharedString::from(*name)),
+        );
+        names.sort();
+        names.dedup();
+        Ok(names)
     }
 }
 
@@ -115,6 +162,10 @@ impl AssetSource for VitreAssets {
 /// `Into<Icon>` is expected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VitreIcon {
+    Keyboard,
+    Braces,
+    Settings2,
+    RefreshCw,
     Bug,
     ChevronsDownUp,
     CircleAlert,
@@ -148,6 +199,10 @@ pub enum VitreIcon {
 impl IconNamed for VitreIcon {
     fn path(self) -> SharedString {
         match self {
+            Self::Keyboard => "icons/keyboard.svg".into(),
+            Self::Braces => "icons/braces.svg".into(),
+            Self::Settings2 => "icons/settings-2.svg".into(),
+            Self::RefreshCw => "icons/refresh-cw.svg".into(),
             Self::Bug => "icons/bug.svg".into(),
             Self::ChevronsDownUp => "icons/chevrons-down-up.svg".into(),
             Self::CircleAlert => "icons/circle-alert.svg".into(),
