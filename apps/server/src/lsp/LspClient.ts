@@ -9,7 +9,8 @@
  * Deliberately a plain promise-based class: vscode-jsonrpc owns the wire
  * protocol and its connection lifecycle callbacks; LspManager wraps this in
  * Effect and owns registry/refcount/diagnostics concerns. Documents are
- * synced with full text (TextDocumentSyncKind.Full).
+ * sent as full buffers by our clients; LspManager adapts changes to the
+ * server's negotiated synchronization mode.
  *
  * @module LspClient
  */
@@ -156,6 +157,7 @@ function configurationForSection(section: string | undefined): unknown {
 }
 
 export class LspClient {
+  serverCapabilities: Protocol.ServerCapabilities = {};
   private connection: MessageConnection | null = null;
   private child: NodeChildProcess.ChildProcess | null = null;
   private disposed = false;
@@ -276,16 +278,81 @@ export class LspClient {
           references: {},
           rename: {},
           formatting: {},
+          codeAction: {
+            dataSupport: true,
+            disabledSupport: true,
+            isPreferredSupport: true,
+            resolveSupport: { properties: ["edit"] },
+            codeActionLiteralSupport: {
+              codeActionKind: {
+                valueSet: [
+                  "",
+                  "quickfix",
+                  "refactor",
+                  "refactor.extract",
+                  "refactor.inline",
+                  "refactor.rewrite",
+                  "source",
+                  "source.organizeImports",
+                  "source.fixAll",
+                ],
+              },
+            },
+          },
+          semanticTokens: {
+            requests: { range: true, full: true },
+            tokenTypes: [
+              "namespace",
+              "type",
+              "class",
+              "enum",
+              "interface",
+              "struct",
+              "typeParameter",
+              "parameter",
+              "variable",
+              "property",
+              "enumMember",
+              "event",
+              "function",
+              "method",
+              "macro",
+              "keyword",
+              "modifier",
+              "comment",
+              "string",
+              "number",
+              "regexp",
+              "operator",
+              "decorator",
+            ],
+            tokenModifiers: [
+              "declaration",
+              "definition",
+              "readonly",
+              "static",
+              "deprecated",
+              "abstract",
+              "async",
+              "modification",
+              "documentation",
+              "defaultLibrary",
+            ],
+            formats: ["relative"],
+            overlappingTokenSupport: false,
+            multilineTokenSupport: false,
+          },
         },
         // vtsls pulls settings via workspace/configuration during init; the
         // request handler above returns VTSLS_WORKSPACE_CONFIGURATION.
         workspace: { workspaceFolders: true, configuration: true },
       },
     };
-    await withTimeout(
-      connection.sendRequest("initialize", initializeParams),
+    const initialized = await withTimeout(
+      connection.sendRequest<Protocol.InitializeResult>("initialize", initializeParams),
       this.options.config.initializeTimeoutMs ?? INITIALIZE_TIMEOUT_MS,
     );
+    this.serverCapabilities = initialized.capabilities ?? {};
     await connection.sendNotification("initialized", {});
   }
 

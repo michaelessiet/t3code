@@ -7,7 +7,7 @@
  * them with `git ls-files --others --ignored --exclude-standard --directory`
  * — `--directory` collapses fully-ignored directories to a single path so
  * git never descends into `node_modules` — then expands the collapsed
- * directories that are NOT known dependency/cache stores with a bounded
+ * directories that are NOT known dependency/cache stores with an asynchronous
  * filesystem walk.
  *
  * Non-git workspaces (or a missing git binary) simply have no gitignored
@@ -23,7 +23,6 @@ import * as Schema from "effect/Schema";
 
 import type { ProjectEntry } from "@t3tools/contracts";
 
-const IGNORED_SUPPLEMENT_MAX_ENTRIES = 5000;
 const GIT_LS_FILES_TIMEOUT_MS = 15_000;
 const GIT_LS_FILES_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 
@@ -95,19 +94,18 @@ function listGitIgnoredPaths(cwd: string): Promise<ReadonlyArray<string>> {
 }
 
 /**
- * Bounded depth-first expansion of one collapsed ignored directory. Nested
- * dependency stores are re-collapsed (listed, not descended into), and the
- * shared budget caps total work no matter how large a build output tree is.
+ * Depth-first expansion of one collapsed ignored directory. Nested dependency
+ * stores retain the existing exclusion policy, but generated files have no
+ * count limit. Filesystem awaits yield between directories.
  */
 async function expandIgnoredDirectory(
   cwd: string,
   relativePath: string,
   entries: ProjectEntry[],
-  budget: { remaining: number },
 ): Promise<void> {
   const pendingDirectories = [relativePath];
-  while (pendingDirectories.length > 0 && budget.remaining > 0) {
-    const directory = pendingDirectories.shift()!;
+  while (pendingDirectories.length > 0) {
+    const directory = pendingDirectories.pop()!;
     let dirents: NodeFS.Dirent[];
     try {
       dirents = await NodeFSP.readdir(NodePath.join(cwd, directory), { withFileTypes: true });
@@ -115,17 +113,14 @@ async function expandIgnoredDirectory(
       continue;
     }
     for (const dirent of dirents) {
-      if (budget.remaining <= 0) return;
       const childPath = `${directory}/${dirent.name}`;
       if (dirent.isDirectory()) {
         entries.push({ path: childPath, kind: "directory", ignored: true });
-        budget.remaining -= 1;
         if (shouldExpandDirectory(childPath)) {
           pendingDirectories.push(childPath);
         }
       } else if (dirent.isFile()) {
         entries.push({ path: childPath, kind: "file", ignored: true });
-        budget.remaining -= 1;
       }
     }
   }
@@ -134,32 +129,26 @@ async function expandIgnoredDirectory(
 async function collectIgnoredEntries(cwd: string): Promise<IgnoredEntriesSupplement> {
   const paths = await listGitIgnoredPaths(cwd);
   const entries: ProjectEntry[] = [];
-  const budget = { remaining: IGNORED_SUPPLEMENT_MAX_ENTRIES };
   const expandable: string[] = [];
 
   for (const rawPath of paths) {
-    if (budget.remaining <= 0) break;
     if (rawPath.endsWith("/")) {
       const directoryPath = rawPath.slice(0, -1);
       entries.push({ path: directoryPath, kind: "directory", ignored: true });
-      budget.remaining -= 1;
       if (shouldExpandDirectory(directoryPath)) {
         expandable.push(directoryPath);
       }
     } else {
       entries.push({ path: rawPath, kind: "file", ignored: true });
-      budget.remaining -= 1;
     }
   }
 
-  // Expand after the full collapsed listing so top-level ignored files are
-  // never starved out of the budget by one large build directory.
+  // Expand after collecting the collapsed listing.
   for (const directoryPath of expandable) {
-    if (budget.remaining <= 0) break;
-    await expandIgnoredDirectory(cwd, directoryPath, entries, budget);
+    await expandIgnoredDirectory(cwd, directoryPath, entries);
   }
 
-  return { entries, truncated: budget.remaining <= 0 };
+  return { entries, truncated: false };
 }
 
 /**

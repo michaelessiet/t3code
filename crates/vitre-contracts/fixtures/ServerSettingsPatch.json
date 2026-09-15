@@ -1,0 +1,7 @@
+{
+  "encoded": {
+    "automaticGitFetchInterval": 300000,
+    "enableAssistantStreaming": true
+  },
+  "schema": "ServerSettingsPatch"
+}

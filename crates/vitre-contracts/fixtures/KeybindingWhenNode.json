@@ -1,0 +1,24 @@
+{
+  "encoded": {
+    "left": {
+      "node": {
+        "name": "editorFocused",
+        "type": "identifier"
+      },
+      "type": "not"
+    },
+    "right": {
+      "left": {
+        "name": "chatFocused",
+        "type": "identifier"
+      },
+      "right": {
+        "name": "terminalFocused",
+        "type": "identifier"
+      },
+      "type": "or"
+    },
+    "type": "and"
+  },
+  "schema": "KeybindingWhenNode"
+}

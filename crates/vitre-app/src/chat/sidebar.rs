@@ -1,0 +1,1317 @@
+//! The grouped project sidebar: Electron's `Sidebar.tsx` (the V1 sidebar,
+//! which is what ships — `sidebarV2Enabled` defaults to `false`).
+//!
+//! Projects that check out the same repository collapse into one row
+//! ([`vitre_state::project_grouping`]); each row expands into its threads,
+//! capped at the preview count with a "Show more" tail. The derived model —
+//! grouping, ordering, status pills, the preview window — lives in
+//! `vitre-state` and is unit-tested there; this module is the render and the
+//! interactions.
+//!
+//! The row model is cached in [`super::ChatApp::sidebar_rows`] and rebuilt on
+//! the transitions that can change it (shell snapshot, thread selection,
+//! preference edits) rather than per frame, for the same reason the timeline
+//! is: it walks every project and thread.
+
+use gpui::{Context, div};
+use gpui::{CursorStyle, Hsla, SharedString, Window, prelude::*, px, rgb};
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, WindowExt as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
+    menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem},
+    notification::Notification,
+    v_flex,
+};
+use std::collections::HashMap;
+use vitre_contracts::{
+    ClientOrchestrationCommand, CommandId, OrchestrationSessionStatus, OrchestrationThreadShell,
+    ProjectId, TerminalCloseInput, ThreadId, VcsRemoveWorktreeInput, VcsStatusInput,
+    methods::{TerminalClose, VcsRefreshStatus, VcsRemoveWorktree},
+};
+use vitre_state::project_grouping::{
+    ProjectGroupingMode, build_project_groups, derive_physical_project_key,
+    expansion_preference_keys,
+};
+use vitre_state::sidebar::{
+    MAX_THREAD_PREVIEW_COUNT, MIN_THREAD_PREVIEW_COUNT, ProjectSortOrder, ThreadSortOrder,
+    ThreadStatus, ThreadWindow, is_archived, resolve_project_status, resolve_thread_status,
+    sort_project_groups, sort_threads, thread_window,
+};
+use vitre_state::worktree_cleanup::{
+    fallback_thread_id_after_delete, format_worktree_path_for_display,
+    orphaned_worktree_path_for_thread,
+};
+
+use crate::client_settings::ClientSettings;
+
+use super::project_actions::{ProjectMember, project_context_menu};
+use super::{ChatApp, QuickSearchMode, SyncPhase, fresh_id, now_iso, relative_time, tnes};
+
+/// Hover group that reveals a project header's "new thread" button, and a
+/// thread row's archive button. Electron does the same with
+/// `group/project-header` and `group/menu-sub-item`.
+const PROJECT_HEADER_GROUP: &str = "project-header";
+const THREAD_ROW_GROUP: &str = "thread-row";
+
+/// One project row's render-ready state.
+pub(super) struct SidebarProjectRow {
+    /// Logical project key: the row's identity.
+    key: String,
+    display_name: SharedString,
+    /// `groupedProjectCount` — the "{n} projects" chip appears above 1.
+    grouped_count: usize,
+    /// The row's physical projects, in row order: what the context menu's
+    /// per-member actions target, and what a manual drag moves as a block.
+    members: Vec<ProjectMember>,
+    /// Representative project: what "New thread" targets.
+    project_id: ProjectId,
+    /// Keys the expand/collapse preference is recorded under.
+    preference_keys: Vec<String>,
+    expanded: bool,
+    list_expanded: bool,
+    /// Status dot a collapsed row shows.
+    status: Option<ThreadStatus>,
+    window: ThreadWindow,
+    /// The row's unarchived threads, already ordered.
+    threads: Vec<SidebarThreadRow>,
+}
+
+/// One thread row's render-ready state.
+pub(super) struct SidebarThreadRow {
+    id: ThreadId,
+    title: SharedString,
+    status: Option<ThreadStatus>,
+    /// Relative timestamp label, from the same candidate chain Electron uses.
+    time: Option<SharedString>,
+}
+
+/// The two colours a status pill paints with: the label/glyph colour and the
+/// dot's fill. Transcribed from the Tailwind utilities Electron's
+/// `resolveThreadStatusPill` hands each state (amber / indigo / sky / violet /
+/// emerald), resolved out of the v4 oklch palette to sRGB. They are raw
+/// palette values there too, not design tokens, so there is nothing in the
+/// Vitre theme to reach for instead.
+struct StatusColors {
+    text: Hsla,
+    dot: Hsla,
+}
+
+fn status_colors(status: ThreadStatus, dark: bool) -> StatusColors {
+    let (light_text, light_dot, dark_shade, dark_alpha) = match status {
+        // amber-600 / amber-500, dark amber-300 at 90%
+        ThreadStatus::PendingApproval => (0xe17100, 0xfe9a00, 0xffd230, 0.9),
+        // indigo-600 / indigo-500, dark indigo-300 at 90%
+        ThreadStatus::AwaitingInput => (0x4f39f6, 0x615fff, 0xa3b3ff, 0.9),
+        // sky-600 / sky-500, dark sky-300 at 80%
+        ThreadStatus::Working | ThreadStatus::Connecting => (0x0084d1, 0x00a6f4, 0x74d4ff, 0.8),
+        // violet-600 / violet-500, dark violet-300 at 90%
+        ThreadStatus::PlanReady => (0x7f22fe, 0x8e51ff, 0xc4b4ff, 0.9),
+        // emerald-600 / emerald-500, dark emerald-300 at 90%
+        ThreadStatus::Completed => (0x009966, 0x00bc7d, 0x5ee9b5, 0.9),
+    };
+    if dark {
+        let shade = Hsla::from(rgb(dark_shade)).opacity(dark_alpha);
+        StatusColors {
+            text: shade,
+            dot: shade,
+        }
+    } else {
+        StatusColors {
+            text: Hsla::from(rgb(light_text)),
+            dot: Hsla::from(rgb(light_dot)),
+        }
+    }
+}
+
+/// A project row in flight during a manual reorder. It is both the drag
+/// payload and the ghost that follows the cursor.
+#[derive(Clone)]
+struct DraggedProjectRow {
+    /// Every physical key the row stands for — a grouped repository's
+    /// worktrees move together.
+    keys: Vec<String>,
+    label: SharedString,
+}
+
+impl Render for DraggedProjectRow {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .h_8()
+            .px_2()
+            .gap_2()
+            .items_center()
+            .rounded(cx.theme().radius)
+            .bg(crate::glass::sidebar(cx))
+            .border_1()
+            .border_color(cx.theme().primary.opacity(0.4))
+            .shadow_md()
+            .text_sm()
+            .text_color(cx.theme().sidebar_foreground)
+            .child(
+                Icon::new(IconName::Folder)
+                    .size_3p5()
+                    .text_color(cx.theme().muted_foreground.opacity(0.5)),
+            )
+            .child(self.label.clone())
+    }
+}
+
+impl ChatApp {
+    pub(super) fn ordered_thread_ids(&self) -> Vec<ThreadId> {
+        self.sidebar_rows
+            .iter()
+            .flat_map(|project| project.threads.iter().map(|thread| thread.id.clone()))
+            .collect()
+    }
+
+    pub(super) fn cycle_thread(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let ids = self.ordered_thread_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let current = self
+            .thread
+            .as_ref()
+            .and_then(|open| ids.iter().position(|id| id == &open.id))
+            .unwrap_or(0);
+        let next = (current as isize + delta).rem_euclid(ids.len() as isize) as usize;
+        self.select_thread(ids[next].clone(), cx);
+    }
+
+    pub(super) fn jump_thread(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(id) = self.ordered_thread_ids().get(index).cloned() {
+            self.select_thread(id, cx);
+        }
+    }
+
+    /// Recompute the cached sidebar rows.
+    ///
+    /// Called on shell updates, thread selection and preference edits — never
+    /// from `render`, which is the point: this groups every project and walks
+    /// every thread.
+    pub(super) fn rebuild_sidebar(&mut self) {
+        let Some(snapshot) = self.shell.snapshot.clone() else {
+            self.sidebar_rows = Vec::new();
+            self.sidebar_project_order = Vec::new();
+            return;
+        };
+        let projects = &snapshot.projects;
+
+        // Electron orders the raw project list by the persisted manual order
+        // first (`orderItemsByPreferredIds`) and only then groups, so a manual
+        // drag survives a grouping-mode change. The activity sort below is a
+        // no-op in `Manual` mode, leaving that order in place.
+        let physical_keys: Vec<String> = projects.iter().map(derive_physical_project_key).collect();
+        let ordered: Vec<vitre_contracts::OrchestrationProjectShell> = self
+            .sidebar
+            .order_projects(&physical_keys)
+            .into_iter()
+            .map(|index| projects[index].clone())
+            .collect();
+        // The seed a manual drag reorders against, exactly as Electron passes
+        // `orderedProjects.map(getProjectOrderKey)`.
+        self.sidebar_project_order = ordered.iter().map(derive_physical_project_key).collect();
+
+        let mut groups = build_project_groups(&ordered, &self.sidebar.grouping);
+
+        // Every project id in a group maps to that group's row, so a thread
+        // finds its row through its own project.
+        let mut row_of_project: HashMap<&ProjectId, String> = HashMap::new();
+        for group in &groups {
+            for member in &group.members {
+                row_of_project.insert(&ordered[*member].id, group.key.clone());
+            }
+        }
+
+        let mut threads_by_row: HashMap<String, Vec<&OrchestrationThreadShell>> = HashMap::new();
+        for thread in &snapshot.threads {
+            if is_archived(thread) {
+                continue;
+            }
+            let Some(row) = row_of_project.get(&thread.project_id) else {
+                continue;
+            };
+            threads_by_row.entry(row.clone()).or_default().push(thread);
+        }
+        for threads in threads_by_row.values_mut() {
+            sort_threads(threads, self.sidebar.thread_sort_order);
+        }
+
+        sort_project_groups(
+            &mut groups,
+            &ordered,
+            self.sidebar.project_sort_order,
+            |group| {
+                threads_by_row
+                    .get(group.key.as_str())
+                    .cloned()
+                    .unwrap_or_default()
+            },
+        );
+
+        let open = self.thread.as_ref().map(|open| open.id.clone());
+        self.sidebar_rows = groups
+            .iter()
+            .map(|group| {
+                let threads = threads_by_row
+                    .get(group.key.as_str())
+                    .cloned()
+                    .unwrap_or_default();
+                let statuses: Vec<Option<ThreadStatus>> = threads
+                    .iter()
+                    .map(|thread| {
+                        resolve_thread_status(
+                            thread,
+                            self.sidebar.thread_last_visited(&thread.id.0),
+                        )
+                    })
+                    .collect();
+                let preference_keys = expansion_preference_keys(group, &ordered);
+                let expanded = self.sidebar.project_expanded(&preference_keys);
+                let list_expanded = self.sidebar.thread_list_expanded(&group.key);
+                let active = open
+                    .as_ref()
+                    .and_then(|id| threads.iter().position(|thread| thread.id == *id));
+                let window = thread_window(
+                    &threads,
+                    &statuses,
+                    active,
+                    expanded,
+                    list_expanded,
+                    self.sidebar.thread_preview_count,
+                );
+                SidebarProjectRow {
+                    key: group.key.clone(),
+                    display_name: group.display_name.clone().into(),
+                    grouped_count: group.grouped_project_count(),
+                    members: group
+                        .members
+                        .iter()
+                        .map(|member| {
+                            let project = &ordered[*member];
+                            ProjectMember {
+                                physical_key: derive_physical_project_key(project),
+                                project_id: project.id.clone(),
+                                title: project.title.0.clone().into(),
+                                workspace_root: project.workspace_root.0.clone().into(),
+                            }
+                        })
+                        .collect(),
+                    project_id: ordered[group.representative].id.clone(),
+                    preference_keys,
+                    expanded,
+                    list_expanded,
+                    status: resolve_project_status(statuses.iter().copied()),
+                    window,
+                    threads: threads
+                        .iter()
+                        .zip(statuses)
+                        .map(|(thread, status)| SidebarThreadRow {
+                            id: thread.id.clone(),
+                            title: thread.title.0.clone().into(),
+                            status,
+                            // Electron labels a row with the same candidate
+                            // chain it sorts by, falling back to creation.
+                            time: thread
+                                .latest_user_message_at
+                                .as_ref()
+                                .map(|at| at.0.as_str())
+                                .or(Some(thread.updated_at.0.as_str()))
+                                .and_then(relative_time)
+                                .map(SharedString::from),
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+    }
+
+    /// `ChatView`'s visit effect: while a thread is open, its last-visited
+    /// stamp tracks the thread's `updatedAt`, which is what keeps the
+    /// "Completed" pill off the row you are looking at.
+    pub(super) fn sync_thread_visit(&mut self) -> bool {
+        let Some(open) = self.thread.as_ref() else {
+            return false;
+        };
+        let Some(thread) = self.shell_thread(&open.id) else {
+            return false;
+        };
+        let (id, updated_at) = (thread.id.0.clone(), thread.updated_at.0.clone());
+        self.sidebar.mark_thread_visited(&id, &updated_at)
+    }
+
+    /// Land a manual reorder drag: move `dragged`'s keys to where `target`'s
+    /// keys sit in the current on-screen order.
+    fn reorder_projects(&mut self, dragged: &[String], target: &[String], cx: &mut Context<Self>) {
+        let current = self.sidebar_project_order.clone();
+        if self.sidebar.reorder_projects(&current, dragged, target) {
+            self.rebuild_sidebar();
+            cx.notify();
+        }
+    }
+
+    fn set_project_expanded(&mut self, row_key: &str, expanded: bool, cx: &mut Context<Self>) {
+        let Some(row) = self.sidebar_rows.iter().find(|row| row.key == row_key) else {
+            return;
+        };
+        let keys = row.preference_keys.clone();
+        self.sidebar.set_project_expanded(&keys, expanded);
+        self.rebuild_sidebar();
+        cx.notify();
+    }
+
+    fn set_thread_list_expanded(&mut self, row_key: &str, expanded: bool, cx: &mut Context<Self>) {
+        self.sidebar.set_thread_list_expanded(row_key, expanded);
+        self.rebuild_sidebar();
+        cx.notify();
+    }
+
+    fn set_project_grouping_mode(&mut self, mode: ProjectGroupingMode, cx: &mut Context<Self>) {
+        self.sidebar.set_project_grouping_mode(mode);
+        self.rebuild_sidebar();
+        cx.notify();
+    }
+
+    fn set_project_sort_order(&mut self, order: ProjectSortOrder, cx: &mut Context<Self>) {
+        self.sidebar.set_project_sort_order(order);
+        self.rebuild_sidebar();
+        cx.notify();
+    }
+
+    fn set_thread_sort_order(&mut self, order: ThreadSortOrder, cx: &mut Context<Self>) {
+        self.sidebar.set_thread_sort_order(order);
+        self.rebuild_sidebar();
+        cx.notify();
+    }
+
+    fn set_thread_preview_count(&mut self, count: usize, cx: &mut Context<Self>) {
+        self.sidebar.set_thread_preview_count(count);
+        self.rebuild_sidebar();
+        cx.notify();
+    }
+
+    /// Archive a thread (`ThreadArchive`). The shell drops it from the row on
+    /// the resulting event, so nothing is removed optimistically.
+    pub(super) fn archive_thread(&mut self, id: ThreadId, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let command = ClientOrchestrationCommand::ThreadArchive {
+            command_id: CommandId(fresh_id("vitre-cmd")),
+            thread_id: id,
+            r#type: Default::default(),
+        };
+        self.last_error = None;
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = client.dispatch(&command).await {
+                let _ = this.update(cx, |app, cx| {
+                    app.last_error = Some(format!("archive failed: {error:?}").into());
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Electron's sidebar `delete` action: a confirm dialog first
+    /// (`confirmThreadDelete` defaults on), then the orphaned-worktree offer,
+    /// then the actual stop/close/delete pipeline.
+    pub(super) fn delete_thread_request(
+        &mut self,
+        id: ThreadId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !ClientSettings::confirm_thread_delete(cx) {
+            self.delete_thread_offer_worktree_cleanup(id, window, cx);
+            return;
+        }
+        let title = self.thread_title(&id);
+        let owner = cx.entity().downgrade();
+        let dialog_title: SharedString = format!("Delete thread \"{title}\"?").into();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let id = id.clone();
+            let confirm_owner = owner.clone();
+            dialog
+                .title(dialog_title.clone())
+                .w(px(448.))
+                .content(|content, _, cx| {
+                    content.child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("This permanently clears conversation history for this thread."),
+                    )
+                })
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("delete-thread-cancel")
+                                .outline()
+                                .small()
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("delete-thread-confirm")
+                                .danger()
+                                .small()
+                                .label("Delete thread")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let id = id.clone();
+                                    let _ = confirm_owner.update(cx, |this, cx| {
+                                        this.delete_thread_offer_worktree_cleanup(id, window, cx);
+                                    });
+                                }),
+                        ),
+                )
+        });
+    }
+
+    /// The orphaned-worktree offer (`useThreadActions.deleteThread`): when the
+    /// deleted thread is the only one linked to its worktree, ask whether to
+    /// remove the worktree too. Either answer still deletes the thread.
+    fn delete_thread_offer_worktree_cleanup(
+        &mut self,
+        id: ThreadId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Archived threads still reference their worktrees, so the share check
+        // runs over the raw snapshot, not the sidebar's filtered list.
+        let all_threads: Vec<&OrchestrationThreadShell> = self
+            .shell
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.threads.iter().collect())
+            .unwrap_or_default();
+        let orphaned = orphaned_worktree_path_for_thread(&all_threads, &id);
+        let project_cwd = self
+            .shell_thread(&id)
+            .map(|thread| thread.project_id.clone())
+            .and_then(|project_id| self.project_root(&project_id));
+        let (Some(path), Some(cwd)) = (orphaned, project_cwd) else {
+            self.perform_thread_delete(id, None, cx);
+            return;
+        };
+        let display = format_worktree_path_for_display(&path);
+        let owner = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let keep_id = id.clone();
+            let keep_owner = owner.clone();
+            let remove_id = id.clone();
+            let remove_owner = owner.clone();
+            let remove = (cwd.clone(), path.clone(), display.clone());
+            let display = display.clone();
+            dialog
+                .title("Delete the worktree too?")
+                .w(px(448.))
+                .content(move |content, _, cx| {
+                    content.child(
+                        v_flex()
+                            .gap_1()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("This thread is the only one linked to this worktree:")
+                            .child(
+                                div()
+                                    .font_medium()
+                                    .text_color(cx.theme().foreground)
+                                    .child(display.clone()),
+                            ),
+                    )
+                })
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new("delete-worktree-keep")
+                                .outline()
+                                .small()
+                                .label("Keep worktree")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let id = keep_id.clone();
+                                    let _ = keep_owner.update(cx, |this, cx| {
+                                        this.perform_thread_delete(id, None, cx);
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new("delete-worktree-remove")
+                                .danger()
+                                .small()
+                                .label("Delete worktree")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let id = remove_id.clone();
+                                    let remove = remove.clone();
+                                    let _ = remove_owner.update(cx, |this, cx| {
+                                        this.perform_thread_delete(id, Some(remove), cx);
+                                    });
+                                }),
+                        ),
+                )
+        });
+    }
+
+    /// The delete pipeline (`useThreadActions.deleteThread`): stop a live
+    /// session, close the thread terminal with history, dispatch
+    /// `ThreadDelete`, move the selection off the dead thread, and optionally
+    /// remove the orphaned worktree (`force: true` + a status refresh).
+    fn perform_thread_delete(
+        &mut self,
+        id: ThreadId,
+        remove_worktree: Option<(String, String, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let stop_first = self
+            .shell_thread(&id)
+            .and_then(|thread| thread.session.as_ref())
+            .is_some_and(|session| session.status != OrchestrationSessionStatus::Stopped);
+        let was_open = self.thread.as_ref().is_some_and(|open| open.id == id);
+        // The fallback is computed before the shell drops the thread — after
+        // the delete lands, its project is no longer derivable.
+        let fallback = if was_open {
+            let threads = self.shell_threads();
+            let refs: Vec<&OrchestrationThreadShell> = threads.iter().collect();
+            fallback_thread_id_after_delete(&refs, &id, self.sidebar.thread_sort_order)
+        } else {
+            None
+        };
+        self.last_error = None;
+        cx.spawn(async move |this, cx| {
+            if stop_first {
+                let stop = ClientOrchestrationCommand::ThreadSessionStop {
+                    command_id: CommandId(fresh_id("vitre-cmd")),
+                    created_at: tnes(now_iso()),
+                    thread_id: id.clone(),
+                    r#type: Default::default(),
+                };
+                let _ = client.dispatch(&stop).await;
+            }
+            let close = TerminalCloseInput {
+                delete_history: Some(Some(true)),
+                terminal_id: None,
+                thread_id: tnes(&id.0),
+            };
+            let _ = client.call::<TerminalClose>(&close).await;
+            let delete = ClientOrchestrationCommand::ThreadDelete {
+                command_id: CommandId(fresh_id("vitre-cmd")),
+                thread_id: id.clone(),
+                r#type: Default::default(),
+            };
+            if let Err(error) = client.dispatch(&delete).await {
+                let _ = this.update(cx, |app, cx| {
+                    app.last_error = Some(format!("delete failed: {error:?}").into());
+                    cx.notify();
+                });
+                return;
+            }
+            let _ = this.update(cx, |app, cx| {
+                if was_open {
+                    match fallback.clone() {
+                        Some(fallback_id) => app.select_thread(fallback_id, cx),
+                        None => app.close_open_thread(cx),
+                    }
+                }
+            });
+            let Some((cwd, path, display)) = remove_worktree else {
+                return;
+            };
+            let input = VcsRemoveWorktreeInput {
+                cwd: tnes(&cwd),
+                force: Some(Some(true)),
+                path: tnes(&path),
+            };
+            match client.call::<VcsRemoveWorktree>(&input).await {
+                Ok(_) => {
+                    let _ = client
+                        .call::<VcsRefreshStatus>(&VcsStatusInput { cwd: tnes(&cwd) })
+                        .await;
+                }
+                Err(error) => {
+                    let _ = this.update_in(cx, |_, window, cx| {
+                        window.push_notification(
+                            Notification::error(SharedString::from(format!(
+                                "Could not remove {display}. {error:?}"
+                            )))
+                            .title("Thread deleted, but worktree removal failed"),
+                            cx,
+                        );
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The status dot Electron paints beside a collapsed project and inside a
+    /// thread row.
+    fn status_dot(&self, status: ThreadStatus, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .size(px(9.))
+            .rounded_full()
+            .bg(status_colors(status, cx.theme().is_dark()).dot)
+    }
+
+    /// `ThreadStatusLabel`: dot plus label, in the status colour.
+    fn status_label(&self, status: ThreadStatus, cx: &Context<Self>) -> impl IntoElement {
+        let colors = status_colors(status, cx.theme().is_dark());
+        h_flex()
+            .flex_shrink_0()
+            .gap_1()
+            .items_center()
+            .text_size(px(10.))
+            .text_color(colors.text)
+            .child(div().size(px(6.)).rounded_full().bg(colors.dot))
+            .child(status.label())
+    }
+
+    fn render_thread_row(
+        &self,
+        thread: &SidebarThreadRow,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let selected = self
+            .thread
+            .as_ref()
+            .is_some_and(|open| open.id == thread.id);
+        let id = thread.id.clone();
+        let menu_owner = cx.entity().downgrade();
+        let menu_target = self.thread_menu_target(&thread.id);
+        let context_owner = menu_owner.clone();
+        let context_target = menu_target.clone();
+
+        let meta = div()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground.opacity(0.72))
+            .children(thread.time.clone());
+
+        let mut row = h_flex()
+            .id(SharedString::from(format!("thread-{}", thread.id.0)))
+            .debug_selector({
+                let id = thread.id.0.clone();
+                move || format!("sidebar-thread-{id}")
+            })
+            .group(THREAD_ROW_GROUP)
+            .relative()
+            .h_8()
+            .w_full()
+            .px_2()
+            .gap_2()
+            .items_center()
+            .rounded(px(8.))
+            .cursor_pointer()
+            .text_sm()
+            .children(selected.then(|| {
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(9.))
+                    .bottom(px(9.))
+                    .w(px(2.))
+                    .rounded_full()
+                    .bg(cx.theme().primary)
+            }))
+            .children(
+                thread
+                    .status
+                    .map(|status| self.status_label(status, cx).into_any_element()),
+            )
+            .child(self.render_thread_title(&thread.id, thread.title.clone(), cx))
+            .child(div().ml_auto().flex().flex_shrink_0().child(meta))
+            .child(
+                Button::new(SharedString::from(format!("thread-menu-{}", thread.id.0)))
+                    .ghost()
+                    .xsmall()
+                    .label("⋯")
+                    .tooltip("Conversation actions")
+                    .dropdown_menu(move |menu, window, cx| {
+                        if let Some(target) = &menu_target {
+                            super::thread_actions::thread_context_menu(
+                                menu,
+                                &menu_owner,
+                                target,
+                                false,
+                                window,
+                                cx,
+                            )
+                        } else {
+                            menu
+                        }
+                    }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.select_thread(id.clone(), cx);
+            }));
+        row = if selected {
+            row.bg(cx.theme().list_active)
+                .font_medium()
+                .text_color(cx.theme().sidebar_foreground)
+        } else {
+            row.text_color(cx.theme().sidebar_foreground.opacity(0.8))
+                .hover(|style| style.bg(cx.theme().list_hover))
+        };
+        // An inline title editor owns native Cut/Copy/Paste while renaming.
+        if self.is_thread_renaming(&thread.id) {
+            return row.into_any_element();
+        }
+        row.context_menu(move |menu, window, cx| {
+            if let Some(target) = &context_target {
+                super::thread_actions::thread_context_menu(
+                    menu,
+                    &context_owner,
+                    target,
+                    false,
+                    window,
+                    cx,
+                )
+            } else {
+                menu
+            }
+        })
+        .into_any_element()
+    }
+
+    fn render_project_row(
+        &self,
+        row: &SidebarProjectRow,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let row_key = row.key.clone();
+        let project_id = row.project_id.clone();
+        let expanded = row.expanded;
+
+        // Collapsed rows carry their most urgent thread status as a dot that
+        // crossfades to the chevron on hover; expanded rows just show the
+        // chevron, since the statuses are all visible below.
+        let leading: gpui::AnyElement = match (expanded, row.status) {
+            (false, Some(status)) => div()
+                .relative()
+                .size_3p5()
+                .flex_shrink_0()
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .group_hover(PROJECT_HEADER_GROUP, |style| style.invisible())
+                        .child(self.status_dot(status, cx)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .invisible()
+                        .group_hover(PROJECT_HEADER_GROUP, |style| style.visible())
+                        .child(
+                            Icon::new(IconName::ChevronRight)
+                                .size_3p5()
+                                .text_color(cx.theme().muted_foreground.opacity(0.7)),
+                        ),
+                )
+                .into_any_element(),
+            _ => Icon::new(if expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
+            .size_3p5()
+            .flex_shrink_0()
+            .text_color(cx.theme().muted_foreground.opacity(0.7))
+            .into_any_element(),
+        };
+
+        let members = row.members.clone();
+        let chat = cx.entity().downgrade();
+
+        let header = h_flex()
+            .id(SharedString::from(format!("project-{}", row.key)))
+            .group(PROJECT_HEADER_GROUP)
+            .relative()
+            .h(px(36.))
+            .w_full()
+            .gap_2()
+            .px_2()
+            .pr_8()
+            .items_center()
+            .rounded(cx.theme().radius)
+            .cursor_pointer()
+            .hover(|style| style.bg(cx.theme().list_hover))
+            // Manual order is set by dragging, so the rows only become
+            // draggable in that mode — same gate Electron puts on its
+            // sortable context. A grouped row carries every member key, so
+            // the whole repository moves as one block.
+            .when(
+                self.sidebar.project_sort_order == ProjectSortOrder::Manual,
+                |this| {
+                    let member_keys: Vec<String> = row
+                        .members
+                        .iter()
+                        .map(|member| member.physical_key.clone())
+                        .collect();
+                    this.cursor(CursorStyle::OpenHand)
+                        .on_drag(
+                            DraggedProjectRow {
+                                keys: member_keys.clone(),
+                                label: row.display_name.clone(),
+                            },
+                            |dragged, _, _, cx| {
+                                let dragged = dragged.clone();
+                                cx.new(|_| dragged)
+                            },
+                        )
+                        .drag_over::<DraggedProjectRow>(|style, _, _, cx| {
+                            style.bg(cx.theme().drop_target)
+                        })
+                        .on_drop(
+                            cx.listener(move |this, dragged: &DraggedProjectRow, _, cx| {
+                                this.reorder_projects(&dragged.keys, &member_keys, cx);
+                            }),
+                        )
+                },
+            )
+            .child(leading)
+            .child(
+                self.project_icon(
+                    &row.display_name,
+                    row.members
+                        .iter()
+                        .find(|m| m.project_id == row.project_id)
+                        .map(|m| m.workspace_root.as_ref())
+                        .unwrap_or(&row.key),
+                    cx,
+                ),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .font_medium()
+                            .text_color(cx.theme().sidebar_foreground.opacity(0.9))
+                            .child(row.display_name.clone()),
+                    )
+                    .when(row.grouped_count > 1, |this| {
+                        this.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(10.))
+                                .text_color(cx.theme().muted_foreground.opacity(0.6))
+                                .child(format!("{} projects", row.grouped_count)),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .right_0p5()
+                    .invisible()
+                    .group_hover(PROJECT_HEADER_GROUP, |style| style.visible())
+                    .child(
+                        Button::new(SharedString::from(format!("new-thread-{}", row.key)))
+                            .icon(Icon::new(IconName::SquarePen).size_3p5())
+                            .ghost()
+                            .xsmall()
+                            .tooltip(format!("Create new thread in {}", row.display_name))
+                            .on_click(cx.listener({
+                                let project_id = project_id.clone();
+                                move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.new_thread(Some(project_id.clone()), window, cx);
+                                }
+                            })),
+                    ),
+            )
+            .on_click(cx.listener({
+                let row_key = row_key.clone();
+                move |this, _, _, cx| {
+                    this.set_project_expanded(&row_key, !expanded, cx);
+                }
+            }))
+            .context_menu(move |menu, window, cx| {
+                project_context_menu(menu, &chat, &members, window, cx)
+            });
+
+        v_flex()
+            .w_full()
+            .child(header)
+            .children(self.render_thread_panel(row, cx))
+            .into_any_element()
+    }
+
+    /// `SidebarProjectThreadList`: the empty state, the windowed thread rows,
+    /// and the "Show more"/"Show less" tail.
+    fn render_thread_panel(
+        &self,
+        row: &SidebarProjectRow,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if !row.window.show_panel && !row.window.show_empty_state {
+            return None;
+        }
+        let mut list = v_flex()
+            .ml(px(15.))
+            .mr_1()
+            .pl(px(10.))
+            .border_l_1()
+            .border_color(cx.theme().sidebar_border.opacity(0.6))
+            .gap_0p5();
+        if row.window.show_empty_state {
+            list = list.child(
+                div()
+                    .h_8()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .px_2()
+                    .text_xs()
+                    .text_color(cx.theme().sidebar_foreground.opacity(0.5))
+                    .child("No threads yet"),
+            );
+        }
+        if row.window.show_panel {
+            for index in &row.window.rendered {
+                let Some(thread) = row.threads.get(*index) else {
+                    continue;
+                };
+                list = list.child(self.render_thread_row(thread, cx));
+            }
+        }
+
+        // The tail only exists while the row itself is open — a collapsed row
+        // pinning the active thread shows that one row and nothing else.
+        if row.expanded && row.window.has_overflow {
+            let row_key = row.key.clone();
+            let expand = !row.list_expanded;
+            let hidden_status = row.window.hidden_status;
+            list = list.child(
+                h_flex()
+                    .id(SharedString::from(format!("show-more-{}", row.key)))
+                    .h_8()
+                    .w_full()
+                    .px_2()
+                    .gap_2()
+                    .items_center()
+                    .rounded(cx.theme().radius)
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(cx.theme().sidebar_foreground.opacity(0.5))
+                    .hover(|style| {
+                        style
+                            .bg(cx.theme().list_hover)
+                            .text_color(cx.theme().sidebar_foreground)
+                    })
+                    .when(expand, |this| {
+                        this.children(hidden_status.map(|status| {
+                            div()
+                                .flex()
+                                .size_3p5()
+                                .items_center()
+                                .justify_center()
+                                .child(self.status_dot(status, cx))
+                        }))
+                    })
+                    .child(if expand { "Show more" } else { "Show less" })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_thread_list_expanded(&row_key, expand, cx);
+                    })),
+            );
+        }
+        Some(list.into_any_element())
+    }
+
+    /// `ProjectSortMenu`: project order, thread order, visible-thread count.
+    fn render_sort_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let project_order = self.sidebar.project_sort_order;
+        let thread_order = self.sidebar.thread_sort_order;
+        let preview_count = self.sidebar.thread_preview_count;
+        let grouping_mode = self.sidebar.grouping.mode;
+        let chat = cx.entity().downgrade();
+
+        Button::new("sidebar-options")
+            .icon(Icon::new(IconName::ArrowUpDown).size_3p5())
+            .ghost()
+            .xsmall()
+            .tooltip("Sidebar options")
+            .dropdown_menu(move |mut menu, window, cx| {
+                menu = menu.item(PopupMenuItem::label("Sort projects"));
+                for order in ProjectSortOrder::ALL {
+                    let chat = chat.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(order.label())
+                            .checked(order == project_order)
+                            .on_click(move |_, _, cx| {
+                                let _ = chat.update(cx, |this, cx| {
+                                    this.set_project_sort_order(order, cx);
+                                });
+                            }),
+                    );
+                }
+                menu = menu.separator().item(PopupMenuItem::label("Sort threads"));
+                for order in ThreadSortOrder::ALL {
+                    let chat = chat.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(order.label())
+                            .checked(order == thread_order)
+                            .on_click(move |_, _, cx| {
+                                let _ = chat.update(cx, |this, cx| {
+                                    this.set_thread_sort_order(order, cx);
+                                });
+                            }),
+                    );
+                }
+                menu = menu
+                    .separator()
+                    .item(PopupMenuItem::label("Group projects"));
+                for mode in ProjectGroupingMode::ALL {
+                    let chat = chat.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(mode.label())
+                            .checked(mode == grouping_mode)
+                            .on_click(move |_, _, cx| {
+                                let _ = chat.update(cx, |this, cx| {
+                                    this.set_project_grouping_mode(mode, cx);
+                                });
+                            }),
+                    );
+                }
+                // Electron's NumberField spans exactly this range; a submenu of
+                // the whole range keeps every value reachable without an
+                // editable field inside a popup menu.
+                let chat = chat.clone();
+                menu.separator().submenu(
+                    format!("Visible threads: {preview_count}"),
+                    window,
+                    cx,
+                    move |mut menu, _, _| {
+                        for count in MIN_THREAD_PREVIEW_COUNT..=MAX_THREAD_PREVIEW_COUNT {
+                            let chat = chat.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(count.to_string())
+                                    .checked(count == preview_count)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = chat.update(cx, |this, cx| {
+                                            this.set_thread_preview_count(count, cx);
+                                        });
+                                    }),
+                            );
+                        }
+                        menu
+                    },
+                )
+            })
+    }
+
+    /// The sidebar: search affordance + options, then the grouped project
+    /// rows, then the sidecar status footer.
+    pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let phase = match self.shell.phase {
+            SyncPhase::Disconnected => "offline",
+            SyncPhase::Synchronizing => "syncing…",
+            SyncPhase::Live => "live",
+        };
+
+        let mut list = v_flex().gap_2().px_2().pb_3();
+        if ClientSettings::get(cx).sidebar_v2_enabled {
+            list = list.child(self.render_beta_sidebar(cx));
+        } else {
+            for row in &self.sidebar_rows {
+                list = list.child(self.render_project_row(row, cx));
+            }
+        }
+        if self.sidebar_rows.is_empty() {
+            list = list.child(
+                div()
+                    .px_2()
+                    .py_2()
+                    .text_xs()
+                    .text_color(cx.theme().sidebar_foreground.opacity(0.5))
+                    .child("No projects yet"),
+            );
+        }
+
+        v_flex()
+            .w_full()
+            .h_full()
+            .bg(crate::glass::sidebar(cx))
+            .text_color(cx.theme().sidebar_foreground)
+            .border_r_1()
+            .border_color(cx.theme().sidebar_border)
+            // Clear the hiddenInset traffic lights.
+            .pt(px(44.))
+            .child(
+                h_flex()
+                    .px_3()
+                    .pb_3()
+                    .gap_1p5()
+                    .items_center()
+                    .child(
+                        h_flex()
+                            .id("sidebar-search")
+                            .flex_1()
+                            .min_w_0()
+                            .h(px(34.))
+                            .px_2p5()
+                            .gap_2()
+                            .items_center()
+                            .rounded(cx.theme().radius)
+                            .bg(cx.theme().muted)
+                            .border_1()
+                            .border_color(cx.theme().sidebar_border)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(cx.theme().list_hover))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_quick_search(QuickSearchMode::Open, window, cx)
+                            }))
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(Icon::new(IconName::Search).size_4())
+                            .child("Search")
+                            .child(
+                                div()
+                                    .ml_auto()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground.opacity(0.6))
+                                    .child(if cfg!(target_os = "macos") {
+                                        "⌘P"
+                                    } else {
+                                        "Ctrl P"
+                                    }),
+                            ),
+                    )
+                    .child(self.render_sort_menu(cx))
+                    // Electron's header button is add-project, not new-thread
+                    // — per-project rows carry their own new-thread buttons.
+                    .child(
+                        Button::new("add-project")
+                            .icon(Icon::new(IconName::FolderPlus).size_4())
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Add project")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.open_add_project(window, cx)
+                                }),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .id("thread-list")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .child(list),
+            )
+            .child(
+                v_flex()
+                    .border_t_1()
+                    .border_color(cx.theme().sidebar_border)
+                    .child(
+                        // Electron's `SidebarChromeFooter` settings button
+                        // (sidebar/SidebarChrome.tsx).
+                        div().px_1().pt_1().child(
+                            Button::new("open-settings")
+                                .ghost()
+                                .small()
+                                .w_full()
+                                .justify_start()
+                                .icon(Icon::new(IconName::Settings).size_4())
+                                .label("Settings")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_settings(window, cx)
+                                })),
+                        ),
+                    )
+                    .child(
+                        h_flex()
+                            .id("sidebar-connection-status")
+                            .px_3()
+                            .pb_3()
+                            .pt_2()
+                            .text_xs()
+                            .gap_2()
+                            .text_color(cx.theme().muted_foreground.opacity(0.75))
+                            .child(
+                                div()
+                                    .size(px(5.))
+                                    .rounded_full()
+                                    .bg(match self.shell.phase {
+                                        SyncPhase::Live => cx.theme().success,
+                                        SyncPhase::Synchronizing => cx.theme().warning,
+                                        SyncPhase::Disconnected => cx.theme().muted_foreground,
+                                    }),
+                            )
+                            .child(format!("Local environment · {phase}"))
+                            .tooltip({
+                                let status = self.sidecar_status.clone();
+                                move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(status.clone())
+                                        .build(window, cx)
+                                }
+                            }),
+                    ),
+            )
+    }
+}
+
+impl ChatApp {
+    pub(super) fn snooze_thread(
+        &mut self,
+        id: ThreadId,
+        hours: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let command = match hours {
+            Some(hours) => ClientOrchestrationCommand::ThreadSnooze {
+                command_id: CommandId(fresh_id("snooze")),
+                thread_id: id,
+                snoozed_until: tnes(
+                    (chrono::Utc::now() + chrono::Duration::hours(hours)).to_rfc3339(),
+                ),
+                r#type: Default::default(),
+            },
+            None => ClientOrchestrationCommand::ThreadUnsnooze {
+                command_id: CommandId(fresh_id("unsnooze")),
+                thread_id: id,
+                reason: vitre_contracts::ClientOrchestrationCommandThreadUnsnoozeReason::User,
+                r#type: Default::default(),
+            },
+        };
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = client.dispatch(&command).await {
+                let _ = this.update(cx, |app, cx| {
+                    app.runtime_notice = Some(e.user_message().into());
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+}

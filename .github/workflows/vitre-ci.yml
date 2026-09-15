@@ -1,0 +1,114 @@
+name: Vitre CI
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "deny.toml"
+      - "crates/**"
+      - "third_party/**"
+      - "apps/vitre/**"
+      - "packages/contracts/**"
+      - "scripts/vitre/**"
+      - ".github/workflows/vitre-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "deny.toml"
+      - "crates/**"
+      - "third_party/**"
+      - "apps/vitre/**"
+      - "packages/contracts/**"
+      - "scripts/vitre/**"
+      - ".github/workflows/vitre-ci.yml"
+
+jobs:
+  rust:
+    name: Rust + live-server wire check (macOS)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+      # The licensing firewall's structural guarantee: exactly one gpui, ours.
+      - name: Single gpui instance
+        run: |
+          COUNT=$(cargo tree -i gpui --prefix none | grep -c "^gpui v")
+          echo "gpui instances: $COUNT"
+          test "$COUNT" -eq 1
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Build server bundle
+        run: pnpm --filter t3 run build:bundle
+
+      # Contracts drift gate: the committed contracts.gen.json, fixtures, and
+      # generated.rs must match what the live @t3tools/contracts produce.
+      # Semantic drift beyond JSON Schema is caught by the fixture round-trip
+      # tests in `cargo test -p vitre-contracts` above.
+      - name: Contracts drift
+        run: |
+          node scripts/vitre/export-contracts.ts
+          node scripts/vitre/export-fixtures.ts
+          pnpm exec vp fmt crates/vitre-contracts
+          cargo run -p vitre-contracts-gen
+          cargo fmt -p vitre-contracts
+          git diff --exit-code crates/vitre-contracts
+
+      # Effect-RPC wire tripwire: boots a real sidecar and validates the full
+      # client path (token exchange, ticket, /ws, unary, Ping/Pong, Ack-paced
+      # stream, Interrupt). Must be green on every `effect` bump.
+      - name: Live-server wire spike
+        run: cargo run -p vitre-rpc --example spike_rpc
+
+      # Typed-layer tripwire: generated method table + HTTP snapshot loaders +
+      # reconnect supervisor, including a forced sidecar restart with a
+      # ShellProjection afterSequence resume.
+      - name: Live-server typed spike
+        run: cargo run -p vitre-rpc --example spike_typed
+
+      # Client-layer tripwire: EnvironmentClient shell/thread sync loops
+      # against a supervised sidecar — dispatch, shell-scoped meta events,
+      # and live detail events through the projections.
+      - name: Live-server client spike
+        run: cargo run -p vitre-client --example spike_client
+
+  licenses:
+    name: cargo-deny (licensing firewall)
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources

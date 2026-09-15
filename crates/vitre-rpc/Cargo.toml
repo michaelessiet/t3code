@@ -1,0 +1,28 @@
+[package]
+name = "vitre-rpc"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+futures.workspace = true
+percent-encoding.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+vitre-contracts.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+vitre-sidecar.workspace = true
+vitre-state.workspace = true
+
+[[example]]
+name = "spike_rpc"
+
+[[example]]
+name = "spike_typed"

@@ -43,8 +43,11 @@ export const GRAPH_DIRTY_FILE_NAME = "dirty.json";
 const MAX_SLUG_LENGTH = 48;
 const HASH_LENGTH = 8;
 
-/** A UUIDv4, which is what `ProjectId` is. Anything else is not ours. */
+/** Web UUIDv4 IDs and the original native client's timestamp IDs. */
 const PROJECT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// Keep legacy native projects usable without migrating their thread references.
+// This deliberately does not accept arbitrary contract strings as path segments.
+const VITRE_PROJECT_ID_PATTERN = /^vitre-project-[0-9]{16,20}$/;
 
 /** `<slug>-<8 hex>`, the only shape `graphStoreDirectoryName` can produce. */
 const ENTRY_DIRECTORY_PATTERN = new RegExp(`^[a-z0-9][a-z0-9._-]*-[0-9a-f]{${HASH_LENGTH}}$`);
@@ -110,5 +113,5 @@ export function isGraphStoreDirectoryName(value: string): boolean {
 
 /** True when `value` is a `ProjectId` and therefore a directory we minted. */
 export function isProjectIdDirectoryName(value: string): boolean {
-  return PROJECT_ID_PATTERN.test(value);
+  return PROJECT_ID_PATTERN.test(value) || VITRE_PROJECT_ID_PATTERN.test(value);
 }

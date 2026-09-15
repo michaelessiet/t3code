@@ -182,6 +182,11 @@ import {
   LspLocationsResult,
   LspPositionInput,
   LspRenameInput,
+  LspCodeAction,
+  LspCodeActionsInput,
+  LspCodeActionsResult,
+  LspResolveCodeActionInput,
+  LspSemanticTokensResult,
   LspResolveCompletionInput,
   LspServerStatusResult,
   LspSignatureHelpResult,
@@ -240,6 +245,9 @@ export const WS_METHODS = {
   lspDefinition: "lsp.definition",
   lspReferences: "lsp.references",
   lspRename: "lsp.rename",
+  lspCodeActions: "lsp.codeActions",
+  lspResolveCodeAction: "lsp.resolveCodeAction",
+  lspSemanticTokens: "lsp.semanticTokens",
   lspFormat: "lsp.format",
   lspServerStatus: "lsp.serverStatus",
 
@@ -721,6 +729,22 @@ export const WsLspFormatRpc = Rpc.make(WS_METHODS.lspFormat, {
   error: Schema.Union([LspError, EnvironmentAuthorizationError]),
 });
 
+export const WsLspCodeActionsRpc = Rpc.make(WS_METHODS.lspCodeActions, {
+  payload: LspCodeActionsInput,
+  success: LspCodeActionsResult,
+  error: Schema.Union([LspError, EnvironmentAuthorizationError]),
+});
+export const WsLspResolveCodeActionRpc = Rpc.make(WS_METHODS.lspResolveCodeAction, {
+  payload: LspResolveCodeActionInput,
+  success: LspCodeAction,
+  error: Schema.Union([LspError, EnvironmentAuthorizationError]),
+});
+export const WsLspSemanticTokensRpc = Rpc.make(WS_METHODS.lspSemanticTokens, {
+  payload: LspCodeActionsInput,
+  success: LspSemanticTokensResult,
+  error: Schema.Union([LspError, EnvironmentAuthorizationError]),
+});
+
 export const WsLspServerStatusRpc = Rpc.make(WS_METHODS.lspServerStatus, {
   payload: Schema.Struct({ cwd: Schema.String }),
   success: LspServerStatusResult,
@@ -1094,6 +1118,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsLspDefinitionRpc,
   WsLspReferencesRpc,
   WsLspRenameRpc,
+  WsLspCodeActionsRpc,
+  WsLspResolveCodeActionRpc,
+  WsLspSemanticTokensRpc,
   WsLspFormatRpc,
   WsLspServerStatusRpc,
   WsSubscribeLspDiagnosticsRpc,

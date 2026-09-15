@@ -5,12 +5,20 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
-import { afterAll, beforeAll, expect, it } from "@effect/vitest";
+import { afterAll, afterEach, beforeAll, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import { vi } from "vite-plus/test";
 
 import * as WorkspaceIgnoredEntries from "./WorkspaceIgnoredEntries.ts";
 
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, readdir: vi.fn(actual.readdir) };
+});
+
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
+
+afterEach(() => vi.restoreAllMocks());
 
 let gitFixture: string;
 let plainFixture: string;
@@ -64,6 +72,28 @@ it.effect("lists dependency stores as collapsed directories without expanding th
     expect(paths.has("node_modules")).toBe(true);
     expect(paths.has("node_modules/pkg")).toBe(false);
     expect(paths.has("node_modules/pkg/index.js")).toBe(false);
+  }),
+);
+
+it.effect("keeps ignored generated files beyond the former 50,000 entry budget", () =>
+  Effect.gen(function* () {
+    // Use a real gitignored directory, but synthesize its large readdir result.
+    const dirents = Array.from({ length: 50_001 }, (_, index) => ({
+      name: `generated-${index}.js`,
+      isDirectory: () => false,
+      isFile: () => true,
+    }));
+    vi.spyOn(NodeFSP, "readdir").mockResolvedValueOnce(
+      dirents as unknown as Awaited<ReturnType<typeof NodeFSP.readdir>>,
+    );
+    const result = yield* WorkspaceIgnoredEntries.listIgnoredEntries(gitFixture);
+    expect(result.entries.length).toBeGreaterThan(50_000);
+    expect(result.entries).toContainEqual({
+      path: "dist/generated-50000.js",
+      kind: "file",
+      ignored: true,
+    });
+    expect(result.truncated).toBe(false);
   }),
 );
 

@@ -1,0 +1,7 @@
+{
+  "encoded": {
+    "afterSequence": 42,
+    "requestCompletionMarker": true
+  },
+  "schema": "OrchestrationSubscribeShellInput"
+}

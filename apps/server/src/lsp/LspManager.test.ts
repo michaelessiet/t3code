@@ -53,6 +53,91 @@ describe("languageBindingForPath", () => {
 it.layer(TestLayer, { excludeTestServices: true })("LspManagerLive", (it) => {
   describe("typescript smoke test", () => {
     it.effect(
+      "provides semantic tokens, quick fixes and cross-file rename edits",
+      () =>
+        Effect.gen(function* () {
+          const manager = yield* LspManager.LspManager;
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const cwd = yield* makeTempDir;
+          const contents =
+            "export function greet(name: string) { return name; }\nconst value = 12;\nvalue = 13;\n";
+          yield* fs.writeFileString(
+            path.join(cwd, "tsconfig.json"),
+            '{"compilerOptions":{"strict":true}}',
+          );
+          yield* fs.writeFileString(path.join(cwd, "main.ts"), contents);
+          yield* fs.writeFileString(
+            path.join(cwd, "caller.ts"),
+            'import { greet } from "./main";\ngreet("world");\n',
+          );
+          const diagnostics = yield* manager.subscribeDiagnostics({ cwd }).pipe(
+            Stream.filter((e) => e.relativePath === "main.ts" && e.diagnostics.length > 0),
+            Stream.take(1),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+          yield* manager.didOpen({ cwd, relativePath: "main.ts", contents });
+          yield* Fiber.join(diagnostics).pipe(Effect.timeout("60 seconds"));
+          // vtsls negotiates incremental sync. Full-buffer changes without
+          // old-document ranges crashed tsserver when a snippet added lines.
+          yield* manager.didChange({
+            cwd,
+            relativePath: "main.ts",
+            version: 1,
+            contents: `${contents}\nexport const added = "😀";\n\n`,
+          });
+          const added = yield* manager.hover({
+            cwd,
+            relativePath: "main.ts",
+            position: { line: 4, character: 14 },
+          });
+          expect(added?.contents).toContain("added");
+          yield* manager.didChange({ cwd, relativePath: "main.ts", version: 2, contents });
+          const range = { start: { line: 0, character: 0 }, end: { line: 3, character: 0 } };
+          const semantic = yield* manager.semanticTokens({ cwd, relativePath: "main.ts", range });
+          expect(
+            semantic.tokens.some(
+              (token) => token.kind === "function" && token.range.start.line === 0,
+            ),
+          ).toBe(true);
+          const rename = yield* manager.rename({
+            cwd,
+            relativePath: "main.ts",
+            position: { line: 0, character: 18 },
+            newName: "welcome",
+          });
+          expect(rename.files.map((f) => f.relativePath).toSorted()).toEqual([
+            "caller.ts",
+            "main.ts",
+          ]);
+          expect(rename.files.every((f) => f.edits.every((e) => e.newText === "welcome"))).toBe(
+            true,
+          );
+          const actions = yield* manager.codeActions({ cwd, relativePath: "main.ts", range });
+          const first = actions.actions.find(
+            (action) =>
+              action.title.toLowerCase().includes("const") && action.disabledReason === undefined,
+          );
+          expect(
+            first,
+            actions.actions.map((a) => `${a.title}: ${a.disabledReason ?? "enabled"}`).join("\n"),
+          ).toBeDefined();
+          const resolved = yield* manager.resolveCodeAction({
+            cwd,
+            relativePath: "main.ts",
+            resolveData: first!.resolveData,
+          });
+          expect(resolved.title).toBe(first!.title);
+          expect(
+            resolved.files.some((file) => file.edits.some((edit) => edit.newText === "let")),
+          ).toBe(true);
+          yield* manager.didClose({ cwd, relativePath: "main.ts" });
+        }),
+      { timeout: 90_000 },
+    );
+
+    it.effect(
       "opens a document, receives diagnostics, and answers hover",
       () =>
         Effect.gen(function* () {

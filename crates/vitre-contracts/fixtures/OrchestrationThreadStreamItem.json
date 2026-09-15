@@ -1,0 +1,12 @@
+{
+  "encoded": {
+    "createdAt": "2026-08-27T00:00:00.000Z",
+    "delta": "Hello from Vitre",
+    "kind": "ephemeral-delta",
+    "messageId": "message-fixture-01",
+    "offset": 0,
+    "threadId": "thread-fixture-01",
+    "turnId": null
+  },
+  "schema": "OrchestrationThreadStreamItem"
+}

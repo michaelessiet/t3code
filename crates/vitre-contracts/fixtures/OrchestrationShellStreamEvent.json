@@ -1,0 +1,8 @@
+{
+  "encoded": {
+    "kind": "thread-removed",
+    "sequence": 7,
+    "threadId": "thread-fixture-01"
+  },
+  "schema": "OrchestrationShellStreamEvent"
+}

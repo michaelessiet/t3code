@@ -1,0 +1,164 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/vitre-app",
+  "crates/vitre-client",
+  "crates/vitre-contracts",
+  "crates/vitre-contracts-gen",
+  "crates/vitre-rpc",
+  "crates/vitre-sidecar",
+  "crates/vitre-state",
+  "third_party/ztracing",
+  "third_party/ztracing-macro",
+  "third_party/bezel-orbs",
+]
+default-members = ["crates/vitre-app"]
+# Vendored fork with its own inner workspace (see third_party/gpui-component/VENDOR.md);
+# its crates are consumed via path deps, sharing our resolution + [patch].
+exclude = ["third_party/gpui-component"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# --- zed pin (Apache-2.0 island only; see docs/vitre-licensing.md) ---
+gpui = { git = "https://github.com/zed-industries/zed", rev = "f66ed399cdde86092af8af3dc7b418abf45f37f8" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "f66ed399cdde86092af8af3dc7b418abf45f37f8", features = [
+  "font-kit",
+  "runtime_shaders",
+] }
+gpui_macros = { git = "https://github.com/zed-industries/zed", rev = "f66ed399cdde86092af8af3dc7b418abf45f37f8" }
+gpui_tokio = { git = "https://github.com/zed-industries/zed", rev = "f66ed399cdde86092af8af3dc7b418abf45f37f8" }
+
+# PTY-less VT-emulation grid for the terminal panel (Apache-2.0). The server
+# owns the PTY; we feed its byte stream through the vte processor only.
+alacritty_terminal = "0.25"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# --- vitre crates ---
+vitre-client = { path = "crates/vitre-client" }
+vitre-contracts = { path = "crates/vitre-contracts" }
+vitre-rpc = { path = "crates/vitre-rpc" }
+vitre-sidecar = { path = "crates/vitre-sidecar" }
+vitre-state = { path = "crates/vitre-state" }
+
+# --- vendored gpui-component fork (Apache-2.0) ---
+# The grammar set the editor highlights with. Language-server diagnostics
+# remain independent of whether a matching highlighting grammar is bundled.
+# This is the upstream `tree-sitter-languages` set minus two grammars:
+# `tree-sitter-sql`, whose `tree-sitter-sequel` pins `cc ~1.2` and cannot
+# resolve against the `cc 1.4` gpui's `embed-resource` requires; and
+# `tree-sitter-graphql`, which states its (MIT) terms only in a LICENSE file,
+# so cargo-deny cannot classify it and the firewall can't audit it.
+gpui-component = { path = "third_party/gpui-component/crates/ui", features = [
+  "tree-sitter-astro",
+  "tree-sitter-bash",
+  "tree-sitter-c",
+  "tree-sitter-cmake",
+  "tree-sitter-cpp",
+  "tree-sitter-csharp",
+  "tree-sitter-css",
+  "tree-sitter-diff",
+  "tree-sitter-ejs",
+  "tree-sitter-elixir",
+  "tree-sitter-erb",
+  "tree-sitter-go",
+  "tree-sitter-html",
+  "tree-sitter-java",
+  "tree-sitter-javascript",
+  "tree-sitter-jsdoc",
+  "tree-sitter-kotlin",
+  "tree-sitter-lua",
+  "tree-sitter-make",
+  "tree-sitter-markdown",
+  "tree-sitter-php",
+  "tree-sitter-proto",
+  "tree-sitter-python",
+  "tree-sitter-ruby",
+  "tree-sitter-rust",
+  "tree-sitter-scala",
+  "tree-sitter-svelte",
+  "tree-sitter-swift",
+  "tree-sitter-toml",
+  "tree-sitter-tsx",
+  "tree-sitter-typescript",
+  "tree-sitter-yaml",
+  "tree-sitter-zig",
+] }
+gpui-wry = { path = "third_party/gpui-component/crates/webview" }
+gpui-component-assets = { path = "third_party/gpui-component/crates/assets" }
+gpui-base = { path = "third_party/gpui-component/crates/base" }
+vitre-bezel-orbs = { path = "third_party/bezel-orbs" }
+raw-window-handle = "0.6.2"
+# Same wry fork gpui-wry builds against; needed to construct the child webview.
+wry = { version = "0.53.3", package = "lb-wry" }
+
+# --- third-party ---
+anyhow = "1"
+futures = "0.3"
+getrandom = "0.3"
+# Line diffs for the editor's git gutter (Apache-2.0). The histogram
+# algorithm is the same family git itself uses, so hunk boundaries agree
+# with `git diff`. `unified_diff` printing is off: we render hunks ourselves.
+imara-diff = { version = "0.2", default-features = false }
+libc = "0.2"
+# Same pin as the vendored gpui-component fork, so our LSP providers and the
+# editor's provider traits speak one resolved crate.
+lsp-types = { version = "0.97.0", features = ["proposed"] }
+percent-encoding = "2"
+# Vim `/` search and `:s` substitution. Already in the graph transitively at
+# this version, so this adds no new crate.
+regex = "1"
+# Same pin as the vendored gpui-component fork's rope, so the editor buffers
+# and the LSP wire-position math share one resolved crate.
+ropey = { version = "=2.0.0-beta.1", features = ["metric_lines_lf", "metric_utf16"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "time",
+  "process",
+  "io-util",
+  "sync",
+  "signal",
+] }
+tokio-tungstenite = "0.26"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tracing = "0.1"
+
+# The GPL `ztracing` crate inside the zed monorepo is replaced by a local MIT
+# no-op stub so no GPL code enters the build (zed issue #55470).
+[patch."https://github.com/zed-industries/zed"]
+ztracing = { path = "third_party/ztracing" }
+
+[profile.dev]
+codegen-units = 16
+debug = "limited"
+split-debuginfo = "unpacked"
+
+# Everything on a render frame's hot path is optimised even in dev builds;
+# without this, scrolling and text shaping are unusably slow to develop against.
+[profile.dev.package]
+gpui = { opt-level = 3 }
+gpui_platform = { opt-level = 3 }
+gpui-base = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+markdown = { opt-level = 3 }
+resvg = { opt-level = 3 }
+ropey = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+tree-sitter = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
+sum_tree = { opt-level = 3 }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

@@ -1,0 +1,77 @@
+[package]
+name = "vitre-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "vitre"
+path = "src/main.rs"
+
+[dependencies]
+alacritty_terminal.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+futures.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui_tokio.workspace = true
+gpui-component.workspace = true
+gpui-component-assets.workspace = true
+gpui-base.workspace = true
+vitre-bezel-orbs.workspace = true
+gpui-wry.workspace = true
+lsp-types.workspace = true
+percent-encoding.workspace = true
+raw-window-handle.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+roxmltree = "0.21.1"
+ropey.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+vitre-client.workspace = true
+vitre-contracts.workspace = true
+vitre-state.workspace = true
+vitre-rpc.workspace = true
+vitre-sidecar.workspace = true
+wry.workspace = true
+image = { version = "0.25.10", default-features = false, features = [
+  "png",
+  "gif",
+  "jpeg",
+  "webp",
+  "ico",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+  "NSAppearance",
+  "NSView",
+  "NSImage",
+  "NSBitmapImageRep",
+  "NSEvent",
+  "NSResponder",
+  "NSWindow",
+  "NSGraphicsContext",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+  "NSString",
+  "NSData",
+  "NSDictionary",
+  "NSError",
+] }
+block2 = "0.6.2"
+objc2-web-kit = { version = "0.3.2", default-features = false, features = [
+  "WKWebView",
+  "WKSnapshotConfiguration",
+  "block2",
+] }
+
+[dev-dependencies]
+# Windowed tests: the vim keymap's arbitration against the input's own
+# bindings is only meaningful through gpui's real dispatch pipeline.
+gpui = { workspace = true, features = ["test-support"] }
