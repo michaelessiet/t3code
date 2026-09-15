@@ -4,12 +4,19 @@
 mod assets;
 mod chat;
 mod client_settings;
+mod desktop;
 mod files;
 mod git_gutter;
+mod glass;
+mod graph;
+mod icons;
+mod keymap;
 mod lsp;
 mod palette;
+mod search;
 mod settings;
 mod sidebar_prefs;
+mod ui;
 mod vim;
 
 use std::path::PathBuf;
@@ -17,8 +24,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, point,
-    px, size,
+    App, AppContext as _, KeyBinding, Styled as _, TitlebarOptions, WindowBackgroundAppearance,
+    WindowOptions, point, px, size,
 };
 use gpui_component::{Root, Theme, ThemeRegistry};
 use serde_json::Value;
@@ -148,6 +155,15 @@ fn main() {
     }
 
     let app = gpui_platform::application().with_assets(assets::VitreAssets);
+    let (link_tx, mut link_rx) = tokio::sync::mpsc::unbounded_channel();
+    app.on_open_urls(move |urls| {
+        for url in urls {
+            if let Some(id) = desktop::thread_from_url(&url) {
+                let _ = link_tx.send(id);
+            }
+        }
+    });
+    app.on_reopen(|cx| cx.activate(true));
     app.run(move |cx: &mut App| {
         gpui_tokio::init(cx);
         gpui_component::init(cx);
@@ -190,6 +206,9 @@ fn main() {
         // and friends back from the input's own keymap (see `vim`).
         client_settings::ClientSettings::init(cx, &home);
         vim::init(cx);
+        desktop::init(cx);
+        files::commands::init(cx);
+        files::debugger::init(cx);
 
         // Editor commands. `file.save` is `mod+s` in Electron's
         // DEFAULT_KEYBINDINGS; formatting is a fixed editor chord there
@@ -197,7 +216,9 @@ fn main() {
         // focus path, so they reach the files panel from the editor and the
         // tree alike and do nothing when no file is open.
         cx.bind_keys([
-            KeyBinding::new(&modified("s"), files::SaveFile, None),
+            KeyBinding::new("down", chat::ModelPickerNext, Some("ModelPickerInput")),
+            KeyBinding::new("up", chat::ModelPickerPrevious, Some("ModelPickerInput")),
+            KeyBinding::new("enter", chat::ModelPickerConfirm, Some("ModelPickerInput")),
             KeyBinding::new("shift-alt-f", files::FormatDocument, None),
             // Git hunk navigation, the chords Electron's git gutter binds on
             // the editor itself (`gitDiffGutter.ts`), not rebindable commands.
@@ -206,10 +227,47 @@ fn main() {
             // Go to definition. Electron binds `F12` in the editor's own LSP
             // keymap (`lspBridge.ts`), alongside mod-click and vim `gd`.
             KeyBinding::new("f12", files::GoToDefinition, None),
+            KeyBinding::new("shift-f12", files::FindReferences, Some("Editor")),
+            KeyBinding::new("f2", files::RenameSymbol, Some("Editor && !vim_command")),
+            KeyBinding::new(
+                "secondary-.",
+                files::ShowCodeActions,
+                Some("Editor && !vim_command"),
+            ),
+            KeyBinding::new(
+                "secondary-alt-j",
+                files::InsertSnippet,
+                Some("Editor && !vim_command"),
+            ),
+            KeyBinding::new(
+                "secondary-d",
+                files::SelectNextOccurrence,
+                Some("Editor && !vim_command"),
+            ),
+            KeyBinding::new(
+                "secondary-shift-l",
+                files::SelectAllOccurrences,
+                Some("Editor && !vim_command"),
+            ),
+            KeyBinding::new(
+                "secondary-alt-up",
+                files::AddCursorAbove,
+                Some("Editor && !vim_command"),
+            ),
+            KeyBinding::new(
+                "secondary-alt-down",
+                files::AddCursorBelow,
+                Some("Editor && !vim_command"),
+            ),
+            KeyBinding::new(
+                "secondary-shift-space",
+                files::ShowSignatureHelp,
+                Some("Editor"),
+            ),
+            KeyBinding::new("ctrl-space", files::ShowCompletions, Some("Editor")),
             // `editor.showCompletions`, `mod+i` when `editorFocus` in
             // DEFAULT_KEYBINDINGS. The `editorFocus` half is the panel's own
             // check that the buffer holds focus.
-            KeyBinding::new(&modified("i"), files::ShowCompletions, None),
         ]);
 
         // File-tree keyboard navigation. Electron gets the arrows, Home/End
@@ -227,6 +285,24 @@ fn main() {
             KeyBinding::new("home", files::TreeFocusFirst, Some("FileTree")),
             KeyBinding::new("end", files::TreeFocusLast, Some("FileTree")),
             KeyBinding::new("enter", files::TreeActivate, Some("FileTree")),
+            KeyBinding::new(
+                if cfg!(target_os = "macos") {
+                    "cmd-c"
+                } else {
+                    "ctrl-c"
+                },
+                files::TreeCopy,
+                Some("FileTree"),
+            ),
+            KeyBinding::new(
+                if cfg!(target_os = "macos") {
+                    "cmd-v"
+                } else {
+                    "ctrl-v"
+                },
+                files::TreePaste,
+                Some("FileTree"),
+            ),
             KeyBinding::new("space", files::TreeActivate, Some("FileTree")),
             KeyBinding::new("j", files::TreeFocusNext, Some("FileTree")),
             KeyBinding::new("k", files::TreeFocusPrevious, Some("FileTree")),
@@ -244,15 +320,6 @@ fn main() {
         // palette resolves its shortcut chips from these bindings, so a chord
         // changed here changes the chip too.
         cx.bind_keys([
-            KeyBinding::new(&modified("p"), chat::QuickSearchOpen, None),
-            KeyBinding::new(&modified("shift-f"), chat::QuickSearchContent, None),
-            KeyBinding::new(&modified("shift-p"), chat::CommandPaletteToggle, None),
-            KeyBinding::new(&modified("shift-o"), chat::NewThread, None),
-            KeyBinding::new(&modified("j"), chat::RightPanelToggle, None),
-            KeyBinding::new(&modified("alt-b"), chat::RightPanelToggle, None),
-            KeyBinding::new(&modified("w"), chat::RightPanelCloseSurface, None),
-            KeyBinding::new(&modified("shift-]"), chat::RightPanelNextSurface, None),
-            KeyBinding::new(&modified("shift-["), chat::RightPanelPreviousSurface, None),
             // Electron has no rebindable command for settings: `mod+,` is an
             // application-menu accelerator (DesktopApplicationMenu.ts), and in
             // the browser there is no shortcut at all. Escape leaves, scoped to
@@ -262,24 +329,9 @@ fn main() {
             KeyBinding::new("escape", settings::SettingsClose, Some("Settings")),
         ]);
 
-        // Terminal drawer. `terminal.toggle` is global (`ctrl+\`` plus the
-        // Electron default `mod+r`); the session chords only fire while a
-        // terminal is focused (`Terminal` key context) — everywhere else they
-        // keep their platform/app meaning, and the deeper context beats the
-        // global `mod+w` above, exactly Electron's passthrough arbitration.
-        cx.bind_keys([
-            KeyBinding::new("ctrl-`", chat::TerminalToggle, None),
-            KeyBinding::new(&modified("r"), chat::TerminalToggle, None),
-            KeyBinding::new(&modified("d"), chat::TerminalSplit, Some("Terminal")),
-            KeyBinding::new(
-                &modified("shift-d"),
-                chat::TerminalSplitVertical,
-                Some("Terminal"),
-            ),
-            KeyBinding::new(&modified("n"), chat::TerminalNew, Some("Terminal")),
-            KeyBinding::new(&modified("t"), chat::TerminalNew, Some("Terminal")),
-            KeyBinding::new(&modified("w"), chat::TerminalCloseActive, Some("Terminal")),
-        ]);
+        // Server-owned shortcuts are installed by keymap::install after the
+        // connection arrives. Fixed copies here would survive a user's remove
+        // or rebind and silently restore the old chord.
 
         let supervisor = Arc::new(Supervisor::start(config));
         let status_rx = supervisor.status();
@@ -289,10 +341,11 @@ fn main() {
         })
         .detach();
 
-        let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
+        let bounds = desktop::load_bounds(&home, cx);
         cx.open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_bounds: Some(bounds),
+                window_min_size: Some(size(px(640.), px(480.))),
                 // Electron parity: hiddenInset titlebar, traffic lights at
                 // (16, 18) (apps/desktop/src/window/DesktopWindow.ts).
                 titlebar: Some(TitlebarOptions {
@@ -300,6 +353,7 @@ fn main() {
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(16.), px(18.))),
                 }),
+                window_background: WindowBackgroundAppearance::Blurred,
                 ..Default::default()
             },
             |window, cx| {
@@ -319,7 +373,33 @@ fn main() {
                     .observe_window_appearance(move |window, cx| apply(window, cx))
                     .detach();
                 let shell = cx.new(|cx| chat::ChatApp::new(&home, status_rx, window, cx));
-                cx.new(|cx| Root::new(shell, window, cx))
+                let shell_links = shell.downgrade();
+                cx.spawn(async move |cx| {
+                    while let Some(id) = link_rx.recv().await {
+                        if shell_links
+                            .update(cx, |shell, cx| shell.open_deep_link(id, cx))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+                window.set_rem_size(px(client_settings::ClientSettings::get(cx).ui_font_size));
+                let saved_home = home.clone();
+                shell.update(cx, |_, cx| {
+                    cx.observe_window_bounds(window, move |_, window, _| {
+                        desktop::save_bounds(&saved_home, window)
+                    })
+                    .detach();
+                });
+                window.on_window_should_close(cx, |_, cx| {
+                    cx.quit();
+                    true
+                });
+                // Root paints an opaque theme background by default. Clear
+                // that outer layer too, so the pane tints reach the native blur.
+                cx.new(|cx| Root::new(shell, window, cx).bg(glass::root(cx)))
             },
         )
         .expect("failed to open window");

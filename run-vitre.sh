@@ -6,4 +6,5 @@ PATH="/Users/michaelessiet/.nvm/versions/node/v24.15.0/bin:$PATH"
 export PATH
 VITRE_SERVER_ENTRY="$PWD/apps/server/dist/bin.mjs"
 export VITRE_SERVER_ENTRY
+cargo build -p vitre-app --bin vitre || exit 1
 exec ./target/debug/vitre
