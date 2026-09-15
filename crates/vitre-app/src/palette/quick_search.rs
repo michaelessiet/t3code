@@ -159,6 +159,15 @@ fn tnes(text: impl Into<String>) -> TrimmedNonEmptyString {
 }
 
 impl QuickSearch {
+    #[cfg(debug_assertions)]
+    pub(crate) fn verification_state(&self) -> Entity<CommandState> {
+        self.state.clone()
+    }
+    #[cfg(debug_assertions)]
+    pub(crate) fn verification_preview_ready(&self) -> bool {
+        matches!(self.preview_state, PreviewFile::Ready)
+    }
+
     /// Build the overlay and open its dialog.
     ///
     /// The caller keeps the returned handle alive for as long as the dialog is
@@ -582,15 +591,15 @@ impl QuickSearch {
             .on_select(move |index, window, cx| {
                 _ = select_owner.update(cx, |this, cx| this.sync_preview(Some(index), window, cx));
             })
-            .side(move |state, _, cx| {
+            .side(move |state, window, cx| {
                 let index = state.selected_index();
                 let Some(search) = side_owner.upgrade() else {
-                    return preview::pane(PreviewKind::None, None, cx);
+                    return preview::pane(PreviewKind::None, None, window, cx);
                 };
                 let (kind, body) = search.update(cx, |search, cx| {
                     (search.preview_kind(index), search.render_preview(index, cx))
                 });
-                preview::pane(kind, body, cx)
+                preview::pane(kind, body, window, cx)
             });
 
         // A failed ripgrep spawn must not read as "No results" — Electron
@@ -726,8 +735,12 @@ fn command_item(item: &QuickItem, query: &str) -> CommandItem {
 fn render_row(item: &QuickItem, query: &str, cx: &App) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let icon = match item {
-        QuickItem::Thread(_) | QuickItem::Message(_) => IconName::MessageSquare,
-        QuickItem::File { .. } | QuickItem::FileMatch(_) => IconName::File,
+        QuickItem::Thread(_) | QuickItem::Message(_) => Icon::new(IconName::MessageSquare)
+            .size(px(crate::ui::ICON))
+            .text_color(muted)
+            .into_any_element(),
+        QuickItem::File { path } => crate::icons::file_icon(path, cx),
+        QuickItem::FileMatch(hit) => crate::icons::file_icon(&hit.path.0, cx),
     };
     let body: AnyElement = match item {
         QuickItem::Thread(thread) => h_flex()
@@ -823,7 +836,7 @@ fn render_row(item: &QuickItem, query: &str, cx: &App) -> AnyElement {
         .gap_2()
         .items_center()
         .text_size(px(12.))
-        .child(Icon::new(icon).size_3p5().text_color(muted))
+        .child(icon)
         .child(body)
         .into_any_element()
 }

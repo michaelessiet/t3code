@@ -148,6 +148,27 @@ fn ensure_path(nodes: &mut Vec<Node>, index: &mut HashMap<String, usize>, path: 
 }
 
 impl FileTreeModel {
+    /// Show matching paths with their ancestors, independent of disclosure state.
+    pub fn filtered_rows(&self, query: &str) -> Vec<FileTreeRow> {
+        let query = query.to_lowercase();
+        let mut keep = HashSet::new();
+        let mut expanded = HashSet::new();
+        for node in &self.nodes {
+            if node.path.to_lowercase().contains(&query) {
+                keep.insert(node.path.clone());
+                let mut parent = node.parent;
+                while let Some(ix) = parent {
+                    keep.insert(self.nodes[ix].path.clone());
+                    expanded.insert(self.nodes[ix].path.clone());
+                    parent = self.nodes[ix].parent;
+                }
+            }
+        }
+        self.visible_rows(&expanded)
+            .into_iter()
+            .filter(|r| keep.contains(&r.path))
+            .collect()
+    }
     /// Build from the flat listEntries result. Order of input entries is not
     /// guaranteed; missing ancestor directories are synthesized. Unknown
     /// entry kinds count as files.
@@ -394,6 +415,36 @@ mod tests {
         assert_eq!(
             names,
             vec!["2.log", "10.log", "file1.txt", "file2.txt", "file10.txt"]
+        );
+    }
+
+    #[test]
+    fn filtering_reveals_matching_descendants_without_changing_disclosures() {
+        let model = FileTreeModel::build(&[
+            file("src/components/Workspace.tsx"),
+            file("src/components/Toolbar.tsx"),
+            file("src/types.ts"),
+            file("README.md"),
+        ]);
+        let before = row_keys(&model.visible_rows(&HashSet::new()));
+        let filtered = model.filtered_rows("WORKSPACE");
+        assert!(
+            filtered
+                .iter()
+                .any(|r| r.path == "src/components/Workspace.tsx")
+        );
+        assert!(
+            !filtered
+                .iter()
+                .any(|r| r.path == "src/types.ts" || r.path == "README.md")
+        );
+        assert!(model.filtered_rows("missing").is_empty());
+        assert_eq!(row_keys(&model.visible_rows(&HashSet::new())), before);
+        assert!(
+            model
+                .filtered_rows("src/")
+                .iter()
+                .any(|r| r.path == "src/types.ts")
         );
     }
 

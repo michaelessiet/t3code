@@ -92,6 +92,10 @@ pub enum PaletteAction {
     QuickSearchContent,
     ToggleFilesPanel,
     ToggleTerminal,
+    WorkspaceSearch,
+    KnowledgeGraph,
+    BuildGraph,
+    WorkspaceFolders,
     NewFile,
     NewFolder,
     /// Electron exposes this as a Settings → Editor switch; the palette keeps
@@ -1683,6 +1687,34 @@ fn action_items(
     // Electron gates the workspace block on an active thread, because every
     // command in it addresses the open workspace.
     if context.active_thread.is_some() {
+        for (title, icon, terms, action) in [
+            (
+                "Search and replace in files",
+                IconName::Search,
+                vec!["search", "replace", "find in files"],
+                PaletteAction::WorkspaceSearch,
+            ),
+            (
+                "Explore knowledge graph",
+                IconName::Network,
+                vec!["graph", "symbols", "relationships"],
+                PaletteAction::KnowledgeGraph,
+            ),
+            (
+                "Build knowledge graph",
+                IconName::Network,
+                vec!["build graph", "index code"],
+                PaletteAction::BuildGraph,
+            ),
+            (
+                "Attach workspace folders…",
+                IconName::FolderPlus,
+                vec!["workspace roots", "attach folder", "multi root"],
+                PaletteAction::WorkspaceFolders,
+            ),
+        ] {
+            items.push(PaletteItem::new(title, icon, &terms).action(action));
+        }
         items.push(
             PaletteItem::new(
                 "Quick open chat or file",

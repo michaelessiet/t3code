@@ -231,7 +231,7 @@ export const make = Effect.gen(function* () {
 
   const locate: GraphStore["Service"]["locate"] = Effect.fn("GraphStore.locate")(function* (input) {
     if (!isProjectIdDirectoryName(input.projectId)) {
-      return yield* refuse(input.projectId, "project id is not a UUID");
+      return yield* refuse(input.projectId, "project id is not a recognised client project id");
     }
     const directoryName = graphStoreDirectoryName(input);
     const entryDir = path.join(root, input.projectId, directoryName);

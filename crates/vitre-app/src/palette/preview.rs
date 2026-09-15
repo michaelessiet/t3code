@@ -73,11 +73,23 @@ pub(super) enum PreviewFile {
 
 /// The pane's outer column. Always mounted, zero-width when there is nothing
 /// to show, so the width transition has something to animate.
-pub(super) fn pane(kind: PreviewKind, body: Option<AnyElement>, cx: &App) -> AnyElement {
+pub(super) fn pane(
+    kind: PreviewKind,
+    body: Option<AnyElement>,
+    window: &mut gpui::Window,
+    cx: &mut App,
+) -> AnyElement {
+    let width = gpui_base::motion::spring(
+        "quick-search-preview-width",
+        f32::from(kind.pane_width()),
+        gpui_base::motion::Spring::new(std::time::Duration::from_millis(260)),
+        window,
+        cx,
+    );
     let column = v_flex()
         .flex_none()
         .min_h_0()
-        .w(kind.pane_width())
+        .w(px(width.max(0.)))
         .overflow_hidden()
         .bg(cx.theme().muted.opacity(0.3));
     match body {

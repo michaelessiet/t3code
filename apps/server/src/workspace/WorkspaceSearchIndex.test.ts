@@ -269,6 +269,83 @@ const indexedOnlyFinder = () =>
     scanFiles: vi.fn(() => ({ ok: true, value: undefined })),
   }) as unknown as FileFinder;
 
+it.effect("lists beyond the former 250,000 entry ceiling without truncation", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const items = Array.from({ length: 250_001 }, (_, index) => ({
+        type: "file",
+        item: { relativePath: `file-${String(index).padStart(6, "0")}.ts` },
+      }));
+      const mixedSearch = vi.fn((_query: string, options: { pageSize: number }) => ({
+        ok: true,
+        value: { items: items.slice(0, options.pageSize), totalMatched: items.length },
+      }));
+      vi.spyOn(FileFinder, "create").mockReturnValueOnce({
+        ok: true,
+        value: {
+          ...indexedOnlyFinder(),
+          mixedSearch,
+        } as unknown as FileFinder,
+      });
+      const index = yield* WorkspaceSearchIndex.make("/workspace/project");
+      const result = yield* index.list();
+      expect(result.truncated).toBe(false);
+      expect(result.entries).toHaveLength(items.length);
+      expect(result.entries.at(-1)?.path).toBe("file-250000.ts");
+      expect(mixedSearch).toHaveBeenLastCalledWith("", { pageSize: items.length });
+    }),
+  ),
+);
+
+it.effect("retries a listing whose index grows after the size probe", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const mixedSearch = vi.fn((_query: string, options: { pageSize: number }) => {
+        const totalMatched = options.pageSize === 1024 ? 1025 : 1026;
+        return {
+          ok: true,
+          value: {
+            items: Array.from({ length: Math.min(options.pageSize, totalMatched) }, (_, index) => ({
+              type: "file",
+              item: { relativePath: `file-${index}.ts` },
+            })),
+            totalMatched,
+          },
+        };
+      });
+      vi.spyOn(FileFinder, "create").mockReturnValueOnce({
+        ok: true,
+        value: {
+          ...indexedOnlyFinder(),
+          mixedSearch,
+        } as unknown as FileFinder,
+      });
+      const index = yield* WorkspaceSearchIndex.make("/workspace/project");
+      const result = yield* index.list();
+      expect(result.entries).toHaveLength(1026);
+      expect(result.truncated).toBe(false);
+      expect(mixedSearch).toHaveBeenCalledTimes(3);
+    }),
+  ),
+);
+
+it.effect("fails visibly if the index cannot supply its advertised listing", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      vi.spyOn(FileFinder, "create").mockReturnValueOnce({
+        ok: true,
+        value: {
+          ...indexedOnlyFinder(),
+          mixedSearch: vi.fn(() => ({ ok: true, value: { items: [], totalMatched: 2 } })),
+        } as unknown as FileFinder,
+      });
+      const index = yield* WorkspaceSearchIndex.make("/workspace/project");
+      const error = yield* Effect.flip(index.list());
+      expect(error.reason).toContain("incomplete listing");
+    }),
+  ),
+);
+
 it.effect("list includes gitignored entries the native index cannot see", () =>
   Effect.scoped(
     Effect.gen(function* () {

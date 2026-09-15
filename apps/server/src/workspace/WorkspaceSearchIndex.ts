@@ -14,14 +14,9 @@ import type {
 
 import * as WorkspaceIgnoredEntries from "./WorkspaceIgnoredEntries.ts";
 
-/**
- * Payload-safety ceiling, not a UX limit: the file explorer must list every
- * entry in any realistic workspace (a monorepo with several full worktree
- * checkouts is ~30–50k entries). Only truly pathological roots (a filesystem
- * scan gone wrong) should ever trip this and surface the truncation banner.
- */
-const WORKSPACE_INDEX_MAX_ENTRIES = 250_000;
-const WORKSPACE_INDEX_PAGE_SIZE = WORKSPACE_INDEX_MAX_ENTRIES + 2;
+// Probe cheaply, then request the actual index size. This is a starting batch
+// size, not a listing limit; search result limits remain independent.
+const WORKSPACE_INDEX_INITIAL_LIST_SIZE = 1024;
 const WORKSPACE_INDEX_SCAN_TIMEOUT = "15 seconds";
 const WORKSPACE_INDEX_IDLE_TTL = "15 minutes";
 const WORKSPACE_INDEX_SCAN_POLL_INTERVAL = "50 millis";
@@ -377,17 +372,30 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (cwd: strin
 
   const list: WorkspaceSearchIndex["Service"]["list"] = Effect.fn("WorkspaceSearchIndex.list")(
     function* () {
-      const result = yield* runMixedSearch("", WORKSPACE_INDEX_PAGE_SIZE);
-      const mapped = mapMixedSearchResult(result, WORKSPACE_INDEX_MAX_ENTRIES);
+      let pageSize = WORKSPACE_INDEX_INITIAL_LIST_SIZE;
+      let result = yield* runMixedSearch("", pageSize);
+      while (result.items.length < result.totalMatched) {
+        if (result.totalMatched <= pageSize) {
+          return yield* new WorkspaceSearchIndexSearchFailed({
+            cwd,
+            queryLength: 0,
+            pageSize,
+            reason: "The workspace index returned an incomplete listing. Refresh to retry.",
+          });
+        }
+        // Re-read from the start: fff's live relevance ordering is not stable
+        // across separate pages. Also accommodate entries added during a scan.
+        pageSize = result.totalMatched;
+        result = yield* runMixedSearch("", pageSize);
+      }
+      const mapped = mapMixedSearchResult(result, result.items.length);
       const merged = mergeSupplementEntries(mapped.entries, supplement.entries);
       const sortedEntries = withDirectoryAncestors(merged).toSorted((left, right) =>
         left.path.localeCompare(right.path),
       );
-      const entries = sortedEntries.slice(0, WORKSPACE_INDEX_MAX_ENTRIES);
       return {
-        entries,
-        truncated:
-          mapped.truncated || supplement.truncated || entries.length < sortedEntries.length,
+        entries: sortedEntries,
+        truncated: false,
       };
     },
   );
