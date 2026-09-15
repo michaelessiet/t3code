@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" /><title>Vitre browser fixture</title>
+  <style>
+    body {
+      font: 18px system-ui;
+      padding: 30px;
+      background: #e5f3ff;
+      color: #12263c;
+    }
+    button,
+    input {
+      font: inherit;
+      padding: 12px;
+      margin: 8px;
+    }
+    #result {
+      background: #abe5bf;
+      padding: 20px;
+    }
+    @media (prefers-color-scheme: dark) {
+      body {
+        background: #182d46;
+        color: #eee;
+      }
+      #result {
+        color: #12263c;
+      }
+    }
+  </style>
+  <h1>Vitre browser fixture</h1>
+  <label>Message<input aria-label="Message" id="message" /></label
+  ><button
+    onclick="
+      document.querySelector('#result').textContent = document.querySelector('#message').value
+    "
+  >
+    Apply
+  </button>
+  <p id="result">Waiting for input</p>
+  <a href="?second-page">Second page</a>
+</html>
