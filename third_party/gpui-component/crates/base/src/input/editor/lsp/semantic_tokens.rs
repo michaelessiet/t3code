@@ -55,6 +55,11 @@ pub trait DocumentRangeSemanticTokensProvider {
 }
 
 impl Lsp {
+    /// Number of currently accepted semantic tokens, useful for language
+    /// status indicators and integration diagnostics.
+    pub fn semantic_token_count(&self) -> usize {
+        self.semantic_tokens.len()
+    }
     /// Get semantic token styles that intersect with the visible byte range,
     /// resolving each cached token's type name against `theme`.
     ///
@@ -111,6 +116,7 @@ impl Lsp {
         window: &mut Window,
         cx: &mut Context<InputBaseState<EditorMode>>,
     ) {
+        self.semantic_tokens.clear();
         let Some(provider) = self.semantic_tokens_provider.as_ref() else {
             return;
         };
@@ -131,13 +137,23 @@ impl Lsp {
                 .await;
 
             let task_result = cx
-                .update(|window, cx| provider.semantic_tokens(&text, range, window, cx))
-                .ok();
+                .update(|window, cx| {
+                    // A delayed request can outlive a buffer switch. Do not
+                    // hand an old snapshot to a provider now attached to the
+                    // new document: providers may sync that text before RPC.
+                    (input_state.read(cx).text() == &text)
+                        .then(|| provider.semantic_tokens(&text, range, window, cx))
+                })
+                .ok()
+                .flatten();
 
             if let Some(task) = task_result {
                 if let Ok(tokens) = task.await {
                     let decoded = decode_semantic_tokens(&tokens, &legend);
                     let _ = input_state.update(cx, |input_state, cx| {
+                        if input_state.text() != &text {
+                            return;
+                        }
                         if decoded != input_state.extras.lsp.semantic_tokens {
                             input_state.extras.lsp.semantic_tokens = decoded;
                             cx.notify();

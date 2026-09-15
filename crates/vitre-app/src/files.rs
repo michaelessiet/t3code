@@ -10,6 +10,22 @@
 //! saves are debounced writes guarded by `baseRevision` with the
 //! `stale_revision` failure surfacing the same banner.
 
+mod annotations;
+pub(crate) mod debugger;
+mod extras;
+mod language_tools;
+#[cfg(debug_assertions)]
+mod language_verification;
+mod refactor;
+mod snippets;
+pub use extras::{FileContext, FilesEvent};
+pub(crate) mod commands;
+#[cfg(test)]
+mod editing_tests;
+#[cfg(test)]
+mod language_tests;
+
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -17,8 +33,8 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable as _, MouseButton, PromptLevel,
-    ScrollHandle, SharedString, Subscription, WeakEntity, Window, actions, div, prelude::*, px,
-    rgb,
+    ScrollStrategy, SharedString, Subscription, UniformListScrollHandle, WeakEntity, Window,
+    actions, div, prelude::*, px, rgb, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
@@ -29,6 +45,7 @@ use gpui_component::{
         HoverProvider as _, Input, InputEvent, InputState, LineHighlight, Redo, RopeExt as _, Undo,
     },
     menu::{ContextMenuExt as _, PopupMenuItem},
+    scroll::ScrollableElement,
     v_flex,
 };
 use vitre_client::EnvironmentClient;
@@ -115,6 +132,31 @@ actions!(
         /// Open the completion menu at the caret — Electron's
         /// `editor.showCompletions` command, `mod+i` when `editorFocus`.
         ShowCompletions,
+        FindReferences,
+        ShowSignatureHelp,
+        RenameSymbol,
+        ShowCodeActions,
+        InsertSnippet,
+        SelectNextOccurrence,
+        SelectAllOccurrences,
+        AddCursorAbove,
+        AddCursorBelow,
+        DebugStart,
+        DebugStop,
+        DebugPause,
+        DebugNext,
+        DebugStepIn,
+        DebugStepOut,
+        ToggleBreakpoint,
+        DebugEvaluate,
+        /// Runtime file-tree commands from the server keymap.
+        TreeToggleFocus,
+        TreeSearch,
+        TreeCopy,
+        TreePaste,
+        TreeNewFile,
+        TreeNewDirectory,
+        TreeRename,
     ]
 );
 
@@ -126,7 +168,16 @@ fn tnes(text: impl Into<String>) -> TrimmedNonEmptyString {
 /// extensions and short names itself ("rs" → rust), so pass the extension and
 /// fall back to plain text.
 pub(crate) fn language_for_path(path: &str) -> String {
-    let name = path.rsplit('/').next().unwrap_or(path);
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    match name.to_ascii_lowercase().as_str() {
+        "makefile" | "gnumakefile" => return "make".into(),
+        "cmakelists.txt" => return "cmake".into(),
+        "gemfile" | "rakefile" | "guardfile" | "podfile" => return "ruby".into(),
+        "cargo.lock" | "uv.lock" | "poetry.lock" | "pipfile" => return "toml".into(),
+        ".bashrc" | ".bash_profile" | ".profile" => return "bash".into(),
+        "tsconfig.json" | "jsconfig.json" | "deno.jsonc" => return "jsonc".into(),
+        _ => {}
+    }
     match name.rsplit_once('.') {
         Some((stem, extension)) if !stem.is_empty() => extension.to_ascii_lowercase(),
         _ => match name.to_ascii_lowercase().as_str() {
@@ -193,6 +244,27 @@ enum TreeEditTarget {
     },
 }
 
+/// An editor either replaces one row (rename) or inserts one row (create).
+/// Keep virtual/display indices separate from the underlying tree indices.
+#[derive(Clone, Copy)]
+struct TreeEditSlot {
+    index: usize,
+    depth: usize,
+    is_dir: bool,
+    replaces: bool,
+}
+
+impl TreeEditSlot {
+    fn display_index(self, tree_index: usize) -> usize {
+        tree_index + usize::from(!self.replaces && tree_index >= self.index)
+    }
+
+    fn tree_index(self, display_index: usize) -> Option<usize> {
+        (display_index != self.index)
+            .then(|| display_index - usize::from(!self.replaces && display_index > self.index))
+    }
+}
+
 /// Inline name editor rendered inside the tree (create placeholder row or a
 /// row's name swapped for an input), the Electron `startRenaming` flow.
 struct TreeEdit {
@@ -225,9 +297,15 @@ fn join_path(parent: &str, name: &str) -> String {
 }
 
 pub struct FilesPanel {
+    media: Option<extras::MediaPreview>,
+    filter: Entity<InputState>,
+    filter_query: String,
+    markdown_preview: bool,
     client: Arc<EnvironmentClient>,
     cwd: String,
     tree: Option<FileTreeModel>,
+    /// Recomputed only after a listing/expansion change, not on scroll or hover.
+    tree_rows: RefCell<Option<Arc<Vec<FileTreeRow>>>>,
     tree_truncated: bool,
     /// Every path listEntries reported (files + dirs) — the "paths the tree
     /// knows" input to VCS untracked-directory expansion.
@@ -241,7 +319,7 @@ pub struct FilesPanel {
     tree_focused: Option<String>,
     /// Tracks the tree's scroll so a keyboard move can bring its row back
     /// into view.
-    tree_scroll: ScrollHandle,
+    tree_scroll: UniformListScrollHandle,
     vcs_entries: Vec<VcsFileStatusEntry>,
     vcs: TreeVcsDecorations,
     open: Option<OpenFile>,
@@ -286,10 +364,27 @@ pub struct FilesPanel {
     /// (Electron: the listEntries atom's `staleTimeMs: 30_000`).
     listed_at: Option<std::time::Instant>,
     status: Option<SharedString>,
+    language_tools: language_tools::LanguageTools,
+    refactor_busy: bool,
+    debugger: debugger::Debugger,
     _subscriptions: Vec<Subscription>,
 }
 
 impl FilesPanel {
+    #[cfg(debug_assertions)]
+    pub(crate) fn verification_editor(&self) -> Entity<EditorState> {
+        self.editor.clone()
+    }
+
+    pub fn active_file_status(&self) -> Option<(&str, bool)> {
+        if let Some(media) = &self.media {
+            return Some((&media.path, false));
+        }
+        self.open
+            .as_ref()
+            .map(|open| (open.relative_path.as_str(), open.buffer.is_dirty()))
+    }
+
     pub fn new(
         client: Arc<EnvironmentClient>,
         cwd: String,
@@ -297,14 +392,32 @@ impl FilesPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let editor = cx.new(|cx| EditorState::new(window, cx).line_number(true));
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter files…"));
         let subscriptions = vec![
+            cx.subscribe(&filter, |this: &mut Self, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.filter_query = input.read(cx).value().trim().to_string();
+                    *this.tree_rows.borrow_mut() = None;
+                    this.tree_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                    cx.notify();
+                }
+            }),
             cx.subscribe_in(
                 &editor,
                 window,
                 |this: &mut Self, _, event: &InputEvent, window, cx| match event {
                     InputEvent::Change => this.editor_edited(window, cx),
+                    InputEvent::Blur
+                        if ClientSettings::get(cx).auto_save_enabled
+                            && ClientSettings::get(cx).auto_save_on_focus_change =>
+                    {
+                        this.flush(window, cx)
+                    }
                     InputEvent::DiffGutterClick { line } => {
                         this.toggle_hunk_peek(*line, cx);
+                    }
+                    InputEvent::BreakpointClick { line } => {
+                        this.toggle_breakpoint_line(*line as u32 + 1, window, cx)
                     }
                     _ => {}
                 },
@@ -323,6 +436,7 @@ impl FilesPanel {
             editor_lsp.completion_provider = Some(lsp.clone());
             editor_lsp.hover_provider = Some(lsp.clone());
             editor_lsp.definition_provider = Some(lsp.clone());
+            editor_lsp.semantic_tokens_provider = Some(lsp.clone());
             // Cross-file go-to-definition: locations carry WIRE (UTF-16)
             // positions (see lsp::bridge module docs); converted against the
             // target file after it loads. Same-document targets fall through
@@ -355,15 +469,20 @@ impl FilesPanel {
         lsp.refresh_server_status(cx);
 
         let mut panel = Self {
+            media: None,
+            filter,
+            filter_query: String::new(),
+            markdown_preview: false,
             client,
             cwd,
             tree: None,
             tree_truncated: false,
+            tree_rows: RefCell::new(None),
             tree_paths: Vec::new(),
             expanded: HashSet::new(),
             tree_focus: cx.focus_handle(),
             tree_focused: None,
-            tree_scroll: ScrollHandle::new(),
+            tree_scroll: UniformListScrollHandle::new(),
             tree_revealed: None,
             reveal_generation: 0,
             explorer_open: ClientSettings::file_explorer_open(cx),
@@ -385,6 +504,9 @@ impl FilesPanel {
             listing_in_flight: false,
             listed_at: None,
             status: None,
+            language_tools: Default::default(),
+            refactor_busy: false,
+            debugger: debugger::Debugger::new(window, cx),
             _subscriptions: subscriptions,
         };
         panel.refresh_tree(cx);
@@ -434,7 +556,23 @@ impl FilesPanel {
                 }
                 match outcome {
                     Ok(result) => {
+                        // Sorting a large checkout must not block the window.
+                        let truncated = result.truncated;
+                        let (tree, paths) = cx
+                            .background_executor()
+                            .spawn(async move {
+                                let paths = result
+                                    .entries
+                                    .iter()
+                                    .map(|entry| entry.path.0.clone())
+                                    .collect();
+                                (FileTreeModel::build(&result.entries), paths)
+                            })
+                            .await;
                         let _ = this.update(cx, |panel, cx| {
+                            if panel.list_generation != generation {
+                                return;
+                            }
                             panel.listing_in_flight = false;
                             panel.listed_at = Some(std::time::Instant::now());
                             if panel
@@ -444,13 +582,10 @@ impl FilesPanel {
                             {
                                 panel.status = None;
                             }
-                            panel.tree_paths = result
-                                .entries
-                                .iter()
-                                .map(|entry| entry.path.0.clone())
-                                .collect();
-                            panel.tree = Some(FileTreeModel::build(&result.entries));
-                            panel.tree_truncated = result.truncated;
+                            panel.tree_paths = paths;
+                            panel.tree = Some(tree);
+                            panel.tree_rows.get_mut().take();
+                            panel.tree_truncated = truncated;
                             panel.rebuild_decorations();
                             panel.refresh_vcs(cx);
                             // A reveal that arrived before the listing did
@@ -557,7 +692,9 @@ impl FilesPanel {
                 return;
             };
             let _ = this.update(cx, |panel, cx| {
-                if panel.open_generation != generation {
+                if panel.open_generation != generation
+                    || ClientSettings::auto_save_delay(cx).is_none()
+                {
                     return;
                 }
                 if !panel.git.set_baseline(Some(&result)) {
@@ -963,6 +1100,10 @@ impl FilesPanel {
             .as_ref()
             .is_some_and(|open| open.relative_path == path);
         if already_open {
+            // A → B → A can return here while B is still loading. Returning
+            // to A supersedes that read, even though A needs no disk reload.
+            self.open_generation += 1;
+            self.pending_reveal = None;
             match target {
                 Some(target) => self.apply_reveal(target, window, cx),
                 // A reveal with no line clears the previous highlight, the
@@ -1070,6 +1211,7 @@ impl FilesPanel {
             self.expanded.insert(parent.to_string());
             parent = parent_dir(parent);
         }
+        self.tree_rows.get_mut().take();
         let rows = self.visible_rows();
         // Absent (entries still loading, or a truncated listing): leave the
         // request unrecorded so the next listing retries it.
@@ -1088,15 +1230,38 @@ impl FilesPanel {
     }
 
     fn open_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_signature_help(cx);
         if self
             .open
             .as_ref()
             .is_some_and(|open| open.relative_path == path)
         {
+            // The tree can also reselect the current buffer while another
+            // file's asynchronous read is pending.
+            self.open_generation += 1;
+            self.pending_reveal = None;
+            return;
+        }
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|open| open.buffer.is_dirty())
+        {
+            self.pending_reveal = None;
+            self.status = Some("Save your changes before opening another file.".into());
+            if let Some(open) = &self.open {
+                cx.emit(FilesEvent::Opened(open.relative_path.clone()));
+            }
+            cx.notify();
             return;
         }
         self.open_generation += 1;
         self.reveal_generation += 1;
+        self.media = None;
+        if extras::is_image(&path) {
+            self.open_image(path, window, cx);
+            return;
+        }
         // Whatever failed before is not what we are loading now.
         self.open_error = None;
         let generation = self.open_generation;
@@ -1110,6 +1275,22 @@ impl FilesPanel {
                 Ok(result) => {
                     let _ = this.update_in(cx, |panel, window, cx| {
                         if panel.open_generation != generation {
+                            return;
+                        }
+                        if panel
+                            .open
+                            .as_ref()
+                            .is_some_and(|open| open.buffer.is_dirty())
+                        {
+                            panel.pending_reveal = None;
+                            panel.status = Some(
+                                "File switch cancelled: the current buffer has unsaved changes."
+                                    .into(),
+                            );
+                            if let Some(open) = &panel.open {
+                                cx.emit(FilesEvent::Opened(open.relative_path.clone()));
+                            }
+                            cx.notify();
                             return;
                         }
                         let revision = result.revision.flatten().map(|revision| revision.0);
@@ -1164,6 +1345,7 @@ impl FilesPanel {
                         }
                         panel.follow_open_file_in_tree(cx);
                         panel.status = None;
+                        cx.emit(FilesEvent::Opened(path.clone()));
                         cx.notify();
                     });
                 }
@@ -1209,6 +1391,17 @@ impl FilesPanel {
     }
 
     fn close_file(&mut self, cx: &mut Context<Self>) {
+        self.cancel_signature_help(cx);
+        self.media = None;
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|open| open.buffer.is_dirty())
+        {
+            self.status = Some("Save your changes before closing this file.".into());
+            cx.notify();
+            return;
+        }
         self.open_generation += 1;
         self.open = None;
         self.open_error = None;
@@ -1219,6 +1412,7 @@ impl FilesPanel {
     }
 
     fn editor_edited(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.update_signature_help(window, cx);
         if let Some(vim) = self.vim.as_mut() {
             vim.invalidate();
         }
@@ -1306,6 +1500,8 @@ impl FilesPanel {
     /// buffer dirty and autosave (or ⌘S) persists it — so this does the same.
     pub fn format_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(relative_path) = self.lsp.current_document() else {
+            self.status = Some("No language server is attached. Configure this language in Settings → Language Servers.".into());
+            cx.notify();
             return;
         };
         let generation = self.open_generation;
@@ -1322,8 +1518,17 @@ impl FilesPanel {
         let client = self.client.clone();
         cx.spawn_in(window, async move |this, cx| {
             flush.await;
-            let Ok(result) = client.call::<LspFormat>(&payload).await else {
-                return;
+            let result = match client.call::<LspFormat>(&payload).await {
+                Ok(result) => result,
+                Err(error) => {
+                    let _ = this.update(cx, |panel, cx| {
+                        if panel.open_generation == generation {
+                            panel.status = Some(error.user_message().into());
+                            cx.notify();
+                        }
+                    });
+                    return;
+                }
             };
             if result.edits.is_empty() {
                 return;
@@ -1332,8 +1537,12 @@ impl FilesPanel {
                 if panel.open_generation != generation {
                     return;
                 }
+                if panel.editor.read(cx).text() != &text {
+                    panel.status = Some("Formatting cancelled: the document changed. Format again to use the latest text.".into());
+                    cx.notify();
+                    return;
+                }
                 panel.editor.update(cx, |state, cx| {
-                    let text = state.text().clone();
                     let edits = result
                         .edits
                         .iter()
@@ -1341,6 +1550,7 @@ impl FilesPanel {
                         .collect();
                     state.apply_lsp_edits(&edits, window, cx);
                 });
+                panel.status = None;
                 // `apply_lsp_edits` replaces text silently, so the editor
                 // emits no change event: tell the buffer and the LSP document
                 // about the edit by hand.
@@ -1515,11 +1725,24 @@ impl FilesPanel {
 
     /// The rows the tree is currently showing — the list every keyboard move
     /// walks, and the same one `render_explorer` renders.
-    fn visible_rows(&self) -> Vec<FileTreeRow> {
-        self.tree
-            .as_ref()
-            .map(|tree| tree.visible_rows(&self.expanded))
-            .unwrap_or_default()
+    fn visible_rows(&self) -> Arc<Vec<FileTreeRow>> {
+        self.tree_rows
+            .borrow_mut()
+            .get_or_insert_with(|| {
+                Arc::new(
+                    self.tree
+                        .as_ref()
+                        .map(|tree| {
+                            if self.filter_query.is_empty() {
+                                tree.visible_rows(&self.expanded)
+                            } else {
+                                tree.filtered_rows(&self.filter_query)
+                            }
+                        })
+                        .unwrap_or_default(),
+                )
+            })
+            .clone()
     }
 
     fn focused_row_index(&self, rows: &[FileTreeRow]) -> Option<usize> {
@@ -1536,7 +1759,11 @@ impl FilesPanel {
             return;
         };
         self.tree_focused = Some(row.path.clone());
-        self.tree_scroll.scroll_to_item(index);
+        let index = self
+            .tree_edit_slot(rows)
+            .map_or(index, |slot| slot.display_index(index));
+        self.tree_scroll
+            .scroll_to_item(index, ScrollStrategy::Nearest);
         cx.notify();
     }
 
@@ -1619,10 +1846,57 @@ impl FilesPanel {
         }
     }
 
+    pub(crate) fn toggle_tree_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tree_focus.is_focused(window) {
+            self.editor.read(cx).focus_handle(cx).focus(window, cx);
+            return;
+        }
+        self.explorer_open = true;
+        ClientSettings::set_file_explorer_open(cx, true);
+        if self.tree_focused.is_none() {
+            let rows = self.visible_rows();
+            self.focus_row(&rows, 0, cx);
+        }
+        self.tree_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn focused_parent(&self) -> String {
+        let rows = self.visible_rows();
+        self.focused_row_index(&rows)
+            .and_then(|index| rows.get(index))
+            .map(|row| {
+                if row.is_dir {
+                    row.path.clone()
+                } else {
+                    parent_dir(&row.path).to_string()
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    fn begin_tree_create(
+        &mut self,
+        kind: ProjectMutateEntryInputCreateKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let parent = self.focused_parent();
+        self.start_edit(TreeEditTarget::Create { parent, kind }, window, cx);
+    }
+
+    fn begin_tree_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.tree_focused.clone() else {
+            return;
+        };
+        self.start_edit(TreeEditTarget::Rename { path }, window, cx);
+    }
+
     fn toggle_dir(&mut self, path: &str, cx: &mut Context<Self>) {
         if !self.expanded.remove(path) {
             self.expanded.insert(path.to_string());
         }
+        self.tree_rows.get_mut().take();
         cx.notify();
     }
 
@@ -1638,6 +1912,7 @@ impl FilesPanel {
                 String::new()
             }
         };
+        self.tree_rows.get_mut().take();
         let input = cx.new(|cx| {
             let state = InputState::new(window, cx).placeholder("name…");
             if initial.is_empty() {
@@ -1661,6 +1936,10 @@ impl FilesPanel {
             input,
             _subscription: subscription,
         });
+        if let Some(slot) = self.tree_edit_slot(&self.visible_rows()) {
+            self.tree_scroll
+                .scroll_to_item(slot.index, ScrollStrategy::Nearest);
+        }
         cx.notify();
     }
 
@@ -1751,6 +2030,7 @@ impl FilesPanel {
                                 }
                                 _ => {
                                     panel.expanded.insert(relative_path.0.clone());
+                                    panel.tree_rows.get_mut().take();
                                 }
                             },
                             ProjectMutateEntryInput::Rename {
@@ -1824,6 +2104,7 @@ impl FilesPanel {
             };
             self.expanded.insert(renamed);
         }
+        self.tree_rows.get_mut().take();
     }
 
     fn close_if_within(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -1898,16 +2179,22 @@ impl FilesPanel {
             parent_dir(&row.path).to_string()
         };
         h_flex()
-            .id(("file-tree-row", index))
+            .id(SharedString::from(format!("file-tree-row:{}", row.path)))
+            .on_drag(
+                FileContext {
+                    cwd: self.cwd.clone(),
+                    path: row.path.clone(),
+                },
+                |context, _, _, cx| cx.new(|_| context.clone()),
+            )
+            .debug_selector(|| format!("file-tree-row-{index}"))
             .relative()
-            .h(px(24.))
-            // The rows are direct children of the scrolling column now, so
-            // they have to refuse to be squeezed into its fixed height.
+            .h(px(crate::ui::TREE_ROW))
             .flex_shrink_0()
             .w_full()
-            .pl(px(8. + row.depth as f32 * 12.))
+            .pl(px(8. + row.depth as f32 * crate::ui::TREE_INDENT))
             .pr_2()
-            .gap_1()
+            .gap_2()
             .items_center()
             .text_sm()
             .cursor_pointer()
@@ -1958,14 +2245,14 @@ impl FilesPanel {
                     })),
             )
             .child(
-                Icon::new(match (row.is_dir, row.expanded) {
-                    (true, true) => IconName::FolderOpen,
-                    (true, false) => IconName::Folder,
-                    (false, _) => IconName::File,
-                })
-                .size_3p5()
-                .flex_shrink_0()
-                .text_color(cx.theme().muted_foreground),
+                div()
+                    .flex_shrink_0()
+                    .when(row.ignored, |this| this.opacity(0.5))
+                    .child(if row.is_dir {
+                        crate::icons::folder_icon(row.expanded, cx)
+                    } else {
+                        crate::icons::file_icon(&row.path, cx)
+                    }),
             )
             .child(
                 div()
@@ -1988,12 +2275,73 @@ impl FilesPanel {
                     .text_color(color)
                     .child(letter)
             }))
-            .context_menu(move |menu, _, _| {
+            .context_menu(move |menu, _, cx| {
+                let mention = menu_path.clone();
+                let add = menu_path.clone();
+                let add_panel = panel.clone();
+                let relative = menu_path.clone();
                 let new_file = (panel.clone(), create_parent.clone());
                 let new_folder = (panel.clone(), create_parent.clone());
                 let rename = (panel.clone(), menu_path.clone());
                 let delete = (panel.clone(), menu_path.clone());
-                menu.item(
+                let copy = (panel.clone(), menu_path.clone());
+                let paste = (panel.clone(), create_parent.clone());
+                let across = (panel.clone(), menu_path.clone());
+                let clipboard = cx.try_global::<extras::FileClipboard>().cloned();
+                menu.item(PopupMenuItem::new("Add to chat").on_click(move |_, _, cx| {
+                    let _ = add_panel.update(cx, |panel, cx| {
+                        cx.emit(FilesEvent::AddToChat(FileContext {
+                            cwd: panel.cwd.clone(),
+                            path: add.clone(),
+                        }))
+                    });
+                }))
+                .item(
+                    PopupMenuItem::new("Copy mention").on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(extras::mention(
+                            &mention,
+                        )))
+                    }),
+                )
+                .item(
+                    PopupMenuItem::new("Copy relative path").on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(relative.clone()))
+                    }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Copy file or folder").on_click(move |_, _, cx| {
+                        let _ = copy.0.update(cx, |panel, cx| {
+                            cx.set_global(extras::FileClipboard(FileContext {
+                                cwd: panel.cwd.clone(),
+                                path: copy.1.clone(),
+                            }))
+                        });
+                    }),
+                )
+                .item(
+                    PopupMenuItem::new("Paste here")
+                        .disabled(clipboard.is_none())
+                        .on_click(move |_, _, cx| {
+                            if let Some(source) = &clipboard {
+                                let _ = paste.0.update(cx, |panel, cx| {
+                                    panel.paste_entry(source.0.clone(), paste.1.clone(), cx)
+                                });
+                            }
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Copy to conversation…").on_click(move |_, _, cx| {
+                        let _ = across.0.update(cx, |panel, cx| {
+                            cx.emit(FilesEvent::CopyToThread(FileContext {
+                                cwd: panel.cwd.clone(),
+                                path: across.1.clone(),
+                            }))
+                        });
+                    }),
+                )
+                .separator()
+                .item(
                     PopupMenuItem::new("New File…").on_click(move |_, window, cx| {
                         let (panel, parent) = &new_file;
                         let target = TreeEditTarget::Create {
@@ -2042,24 +2390,21 @@ impl FilesPanel {
             return div().into_any_element();
         };
         h_flex()
-            .h(px(26.))
+            .id("file-tree-edit-row")
+            .debug_selector(|| "file-tree-edit-row".into())
+            .h(px(crate::ui::TREE_ROW))
             .flex_shrink_0()
             .w_full()
-            .pl(px(8. + depth as f32 * 12.))
+            .pl(px(8. + depth as f32 * crate::ui::TREE_INDENT))
             .pr_2()
-            .gap_1()
+            .gap_2()
             .items_center()
             .child(div().w(px(14.)).flex_shrink_0())
-            .child(
-                Icon::new(if is_dir {
-                    IconName::Folder
-                } else {
-                    IconName::File
-                })
-                .size_3p5()
-                .flex_shrink_0()
-                .text_color(cx.theme().muted_foreground),
-            )
+            .child(if is_dir {
+                crate::icons::folder_icon(false, cx)
+            } else {
+                crate::icons::file_icon(edit.input.read(cx).value().as_ref(), cx)
+            })
             .child(
                 div()
                     .flex_1()
@@ -2069,43 +2414,56 @@ impl FilesPanel {
             .into_any_element()
     }
 
+    fn tree_edit_slot(&self, rows: &[FileTreeRow]) -> Option<TreeEditSlot> {
+        match &self.edit.as_ref()?.target {
+            TreeEditTarget::Rename { path } => {
+                let index = rows.iter().position(|row| row.path == *path)?;
+                Some(TreeEditSlot {
+                    index,
+                    depth: rows[index].depth,
+                    is_dir: rows[index].is_dir,
+                    replaces: true,
+                })
+            }
+            TreeEditTarget::Create { parent, kind } => {
+                let (index, depth) = if parent.is_empty() {
+                    (0, 0)
+                } else {
+                    let index = rows
+                        .iter()
+                        .position(|row| row.path == *parent && row.is_dir && row.expanded)?;
+                    (index + 1, rows[index].depth + 1)
+                };
+                Some(TreeEditSlot {
+                    index,
+                    depth,
+                    is_dir: matches!(kind, ProjectMutateEntryInputCreateKind::Directory),
+                    replaces: false,
+                })
+            }
+        }
+    }
+
     fn render_explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows: Vec<_> = self
-            .tree
-            .as_ref()
-            .map(|tree| tree.visible_rows(&self.expanded))
-            .unwrap_or_default();
-        let empty = rows.is_empty();
-        // Interleave the inline edit row: root-level creates render at the
-        // top, in-directory creates directly under the parent row, renames
-        // replace the row in place.
-        let mut items: Vec<gpui::AnyElement> = Vec::new();
-        if let Some(TreeEditTarget::Create { parent, kind }) =
-            self.edit.as_ref().map(|edit| edit.target.clone())
-            && parent.is_empty()
-        {
-            let is_dir = matches!(kind, ProjectMutateEntryInputCreateKind::Directory);
-            items.push(self.render_edit_row(0, is_dir, cx));
-        }
-        for (index, row) in rows.iter().enumerate() {
-            let target = self.edit.as_ref().map(|edit| edit.target.clone());
-            if matches!(&target, Some(TreeEditTarget::Rename { path }) if *path == row.path) {
-                items.push(self.render_edit_row(row.depth, row.is_dir, cx));
-                continue;
-            }
-            items.push(self.render_tree_row(index, row, cx));
-            if let Some(TreeEditTarget::Create { parent, kind }) = target
-                && parent == row.path
-                && row.is_dir
-                && row.expanded
-            {
-                let is_dir = matches!(kind, ProjectMutateEntryInputCreateKind::Directory);
-                items.push(self.render_edit_row(row.depth + 1, is_dir, cx));
-            }
-        }
+        let rows = self.visible_rows();
+        let edit_slot = self.tree_edit_slot(&rows);
+        let item_count = rows.len() + usize::from(edit_slot.is_some_and(|slot| !slot.replaces));
         v_flex()
             .h_full()
             .min_h_0()
+            .child(
+                h_flex()
+                    .px_2()
+                    .pt_2()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if self.listing_in_flight {
+                        "Indexing…".to_string()
+                    } else {
+                        format!("{} entries", self.tree_paths.len())
+                    }),
+            )
+            .child(div().p_2().child(Input::new(&self.filter).small()))
             .child(
                 v_flex()
                     .id("file-tree-scroll")
@@ -2117,6 +2475,8 @@ impl FilesPanel {
                     .on_action(cx.listener(|panel, _: &TreeFocusNext, _, cx| {
                         panel.move_focus(1, cx);
                     }))
+                    .on_action(cx.listener(|panel, _: &TreeCopy, _, cx| panel.copy_focused(cx)))
+                    .on_action(cx.listener(|panel, _: &TreePaste, _, cx| panel.paste_focused(cx)))
                     .on_action(cx.listener(|panel, _: &TreeFocusPrevious, _, cx| {
                         panel.move_focus(-1, cx);
                     }))
@@ -2135,15 +2495,63 @@ impl FilesPanel {
                     .on_action(cx.listener(|panel, _: &TreeActivate, window, cx| {
                         panel.activate_focused_row(window, cx);
                     }))
+                    .on_action(cx.listener(|panel, _: &TreeToggleFocus, window, cx| {
+                        panel.toggle_tree_focus(window, cx);
+                    }))
+                    .on_action(cx.listener(|panel, _: &TreeNewFile, window, cx| {
+                        panel.begin_tree_create(
+                            ProjectMutateEntryInputCreateKind::File,
+                            window,
+                            cx,
+                        );
+                    }))
+                    .on_action(cx.listener(|panel, _: &TreeNewDirectory, window, cx| {
+                        panel.begin_tree_create(
+                            ProjectMutateEntryInputCreateKind::Directory,
+                            window,
+                            cx,
+                        );
+                    }))
+                    .on_action(cx.listener(|panel, _: &TreeRename, window, cx| {
+                        panel.begin_tree_rename(window, cx);
+                    }))
                     .flex_1()
                     .min_h_0()
                     .py_1()
-                    // The rows have to be this element's own children for
-                    // `scroll_to_item` to find their bounds.
-                    .overflow_y_scroll()
-                    .track_scroll(&self.tree_scroll)
-                    .children(items)
-                    .when(empty, |this| {
+                    .overflow_hidden()
+                    .when(item_count > 0, |this| {
+                        this.child(
+                            uniform_list(
+                                "file-tree-list",
+                                item_count,
+                                cx.processor(move |panel, range: std::ops::Range<usize>, _, cx| {
+                                    range
+                                        .map(|index| {
+                                            let tree_index = edit_slot
+                                                .map_or(Some(index), |slot| slot.tree_index(index));
+                                            match tree_index {
+                                                Some(index) => {
+                                                    panel.render_tree_row(index, &rows[index], cx)
+                                                }
+                                                None => {
+                                                    let slot = edit_slot.unwrap();
+                                                    panel.render_edit_row(
+                                                        slot.depth,
+                                                        slot.is_dir,
+                                                        cx,
+                                                    )
+                                                }
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                }),
+                            )
+                            .h_full()
+                            .w_full()
+                            .track_scroll(&self.tree_scroll),
+                        )
+                    })
+                    .when(item_count == 0, |this| {
                         this.child(
                             div()
                                 .p_3()
@@ -2165,7 +2573,9 @@ impl FilesPanel {
                     .text_color(cx.theme().muted_foreground)
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .child("Listing truncated — some files are not shown")
+                    // An old remote sidecar can still return a capped result.
+                    // Don't silently represent that response as complete.
+                    .child("Incomplete listing — update the server and refresh")
             }))
     }
 
@@ -2208,6 +2618,13 @@ impl FilesPanel {
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.resolve_by_reloading(window, cx);
                     })),
+            )
+            .child(
+                Button::new("conflict-compare")
+                    .small()
+                    .outline()
+                    .label("Compare…")
+                    .on_click(cx.listener(|this, _, window, cx| this.compare_disk(window, cx))),
             )
             .child(
                 Button::new("conflict-keep")
@@ -2275,7 +2692,9 @@ impl FilesPanel {
         let rope = self.editor.read(cx).text().clone();
         let Some(vim) = self.vim.as_mut() else {
             self.editor.update(cx, |state, cx| {
-                state.set_extra_key_context(None, cx);
+                let mut context = gpui::KeyContext::default();
+                context.add("Editor");
+                state.set_extra_key_context(Some(context), cx);
                 state.set_block_cursor(None, cx);
             });
             return;
@@ -2284,7 +2703,8 @@ impl FilesPanel {
         let text = vim.text(&rope);
         let selection = vim.engine.editor_selection(&text);
         let mode = vim.engine.mode();
-        let context = vim::key_context(Some(mode));
+        let mut context = vim::key_context(Some(mode)).unwrap_or_default();
+        context.add("Editor");
         // vim squashes the block to half height while a multi-key command is
         // half-typed, so `d` waiting for its motion is visible in the caret
         // rather than only in the status line.
@@ -2299,7 +2719,7 @@ impl FilesPanel {
             .map(|cell| BlockCursor::new(cell, rgb(BLOCK_CURSOR_COLOR)).with_height(height));
         self.editor.update(cx, |state, cx| {
             state.set_selected_range(selection, cx);
-            state.set_extra_key_context(context, cx);
+            state.set_extra_key_context(Some(context), cx);
             // The caret is a solid block on the character rather than a bar
             // between two, so it stays readable inside a visual selection —
             // codemirror-vim's `cm-fat-cursor`, which is what Electron paints.
@@ -2417,6 +2837,9 @@ impl FilesPanel {
                 return;
             };
             let _ = editor.update(cx, |state, cx| {
+                if state.text() != &rope {
+                    return;
+                }
                 let symbol_range = hover
                     .range
                     .map(|range| {
@@ -2437,6 +2860,7 @@ impl FilesPanel {
     /// resolved, so the jump is driven from the provider directly.
     fn go_to_definition(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
         let rope = self.editor.read(cx).text().clone();
+        let generation = self.open_generation;
         let task = self.lsp.definitions(&rope, offset, window, cx);
         cx.spawn_in(window, async move |this, cx| {
             let Ok(links) = task.await else {
@@ -2446,6 +2870,9 @@ impl FilesPanel {
                 return;
             };
             let _ = this.update_in(cx, |panel, window, cx| {
+                if panel.open_generation != generation || panel.editor.read(cx).text() != &rope {
+                    return;
+                }
                 let Some(target) = bridge::relative_path_from_uri(&panel.cwd, &link.target_uri)
                 else {
                     return;
@@ -2510,6 +2937,41 @@ impl FilesPanel {
     }
 
     fn render_editor_area(&self, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(media) = &self.media {
+            return media.render(cx);
+        }
+        if self.markdown_preview
+            && self
+                .open
+                .as_ref()
+                .is_some_and(|f| extras::is_markdown(&f.relative_path))
+        {
+            return v_flex()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .children(
+                    self.open
+                        .as_ref()
+                        .and_then(|f| f.buffer.conflict())
+                        .filter(|_| ClientSettings::show_file_conflict_warning(cx))
+                        .map(|conflict| self.render_conflict_banner(conflict, cx)),
+                )
+                .child(
+                    div()
+                        .id("file-markdown-preview")
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .overflow_y_scrollbar()
+                        .p_4()
+                        .child(gpui_component::text::TextView::markdown(
+                            "file-markdown",
+                            self.editor.read(cx).value().to_string(),
+                        )),
+                )
+                .into_any_element();
+        }
         if let Some(failed) = self.open_error.as_ref() {
             // Electron: one centred line of destructive text where the editor
             // would be, carrying the server's own message and nothing else —
@@ -2558,7 +3020,54 @@ impl FilesPanel {
             .child(
                 div().flex_1().min_h_0().child(
                     Editor::new(&self.editor)
-                        .readonly(truncated)
+                        .text_size(px(ClientSettings::get(cx).editor_font_size as f32))
+                        .readonly(truncated || self.refactor_busy)
+                        .context_menu(move |menu, _, _| {
+                            menu.menu("Go to Definition", Box::new(GoToDefinition))
+                                .menu("Find References", Box::new(FindReferences))
+                                .menu("Signature Help", Box::new(ShowSignatureHelp))
+                                .menu_with_disabled(
+                                    "Rename Symbol",
+                                    truncated,
+                                    Box::new(RenameSymbol),
+                                )
+                                .menu_with_disabled(
+                                    "Refactor / Quick Fix…",
+                                    truncated,
+                                    Box::new(ShowCodeActions),
+                                )
+                                .menu_with_disabled(
+                                    "Insert Snippet…",
+                                    truncated,
+                                    Box::new(InsertSnippet),
+                                )
+                                .menu("Add Next Occurrence", Box::new(SelectNextOccurrence))
+                                .menu("Select All Occurrences", Box::new(SelectAllOccurrences))
+                                .separator()
+                                .menu("Start / Continue Debugging", Box::new(DebugStart))
+                                .menu("Toggle Breakpoint", Box::new(ToggleBreakpoint))
+                                .menu_with_disabled(
+                                    "Format Document",
+                                    truncated,
+                                    Box::new(FormatDocument),
+                                )
+                                .separator()
+                                .menu_with_disabled("Undo", truncated, Box::new(Undo))
+                                .menu_with_disabled("Redo", truncated, Box::new(Redo))
+                                .separator()
+                                .menu_with_disabled(
+                                    "Cut",
+                                    truncated,
+                                    Box::new(gpui_component::input::Cut),
+                                )
+                                .menu("Copy", Box::new(gpui_component::input::Copy))
+                                .menu_with_disabled(
+                                    "Paste",
+                                    truncated,
+                                    Box::new(gpui_component::input::Paste),
+                                )
+                                .menu("Select All", Box::new(gpui_component::input::SelectAll))
+                        })
                         .appearance(false)
                         .size_full(),
                 ),
@@ -2568,27 +3077,31 @@ impl FilesPanel {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let open_path = self
+        let open_path = self.media.as_ref().map(|media| media.path.as_str()).or(self
             .open
             .as_ref()
             .map(|open| open.relative_path.as_str())
             .or(self
                 .open_error
                 .as_ref()
-                .map(|failed| failed.relative_path.as_str()))
-            .map(|path| path.replace('/', " › "));
+                .map(|failed| failed.relative_path.as_str())));
         let dirty = self
             .open
             .as_ref()
             .is_some_and(|open| open.buffer.is_dirty());
         h_flex()
-            .h(px(36.))
+            .h(px(40.))
             .px_3()
             .gap_2()
             .items_center()
             .flex_shrink_0()
             .border_b_1()
             .border_color(cx.theme().border)
+            .child(
+                open_path
+                    .map(|path| crate::icons::file_icon(path, cx))
+                    .unwrap_or_else(|| crate::icons::folder_icon(true, cx)),
+            )
             .child(
                 div()
                     .flex_1()
@@ -2600,7 +3113,11 @@ impl FilesPanel {
                     } else {
                         cx.theme().muted_foreground
                     })
-                    .child(open_path.unwrap_or_else(|| "Files".into())),
+                    .child(
+                        open_path
+                            .map(|path| path.replace('/', "  ›  "))
+                            .unwrap_or_else(|| "Files".into()),
+                    ),
             )
             .children(dirty.then(|| {
                 div()
@@ -2609,7 +3126,49 @@ impl FilesPanel {
                     .flex_shrink_0()
                     .bg(cx.theme().muted_foreground)
             }))
+            .children(self.open.as_ref().map(|_| {
+                let editor = self.editor.read(cx);
+                let text = editor.text();
+                Button::new("file-information")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Info)
+                    .tooltip(format!(
+                        "{} lines · {} bytes · {}{}",
+                        text.len_lines(ropey::LineType::LF),
+                        text.len(),
+                        open_path.map(language_for_path).unwrap_or_default(),
+                        if dirty { " · Unsaved changes" } else { "" }
+                    ))
+            }))
+            .children(
+                self.open
+                    .as_ref()
+                    .filter(|f| extras::is_markdown(&f.relative_path))
+                    .map(|_| {
+                        Button::new("file-markdown-toggle")
+                            .ghost()
+                            .small()
+                            .label(if self.markdown_preview {
+                                "Source"
+                            } else {
+                                "Preview"
+                            })
+                            .on_click(cx.listener(|panel, _, _, cx| {
+                                panel.markdown_preview = !panel.markdown_preview;
+                                cx.notify();
+                            }))
+                    }),
+            )
             .children(self.open.is_some().then(|| {
+                Button::new("files-annotate-selection")
+                    .icon(IconName::SquarePen)
+                    .ghost()
+                    .xsmall()
+                    .tooltip("Comment on selected lines (or current line)")
+                    .on_click(cx.listener(|panel, _, _, cx| panel.comment_on_selection(cx)))
+            }))
+            .children(open_path.is_some().then(|| {
                 Button::new("files-close-file")
                     .icon(IconName::Close)
                     .ghost()
@@ -2854,6 +3413,7 @@ fn render_hunk_peek(
 
 impl Render for FilesPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_breakpoint_gutter(cx);
         // Electron's `wordWrap` client setting, applied to the live buffer
         // (`EditorView.lineWrapping` in a compartment there, `set_soft_wrap`
         // here). The fork's editor defaults to wrapping, which is also the
@@ -2866,9 +3426,15 @@ impl Render for FilesPanel {
         }
         // A file that failed to open still holds the surface: breadcrumb,
         // toggle and aside behave as they do for a file that loaded.
-        let file_open = self.open.is_some() || self.open_error.is_some();
+        let file_open = self.open.is_some() || self.open_error.is_some() || self.media.is_some();
         v_flex()
             .size_full()
+            .on_action(cx.listener(Self::edit_lines))
+            .on_action(cx.listener(|panel, _: &TreeSearch, window, cx| {
+                panel.explorer_open = true;
+                panel.filter.update(cx, |input, cx| input.focus(window, cx));
+                cx.notify();
+            }))
             .on_action(cx.listener(|panel, _: &SaveFile, window, cx| {
                 panel.save_now(window, cx);
             }))
@@ -2888,10 +3454,54 @@ impl Render for FilesPanel {
             .on_action(cx.listener(|panel, _: &ShowCompletions, window, cx| {
                 panel.show_completions(window, cx);
             }))
+            .on_action(cx.listener(|panel, _: &FindReferences, window, cx| {
+                panel.find_references(window, cx);
+            }))
+            .on_action(cx.listener(|panel, _: &ShowSignatureHelp, window, cx| {
+                panel.show_signature_help(true, window, cx);
+            }))
+            .on_action(
+                cx.listener(|panel, _: &RenameSymbol, window, cx| panel.rename_symbol(window, cx)),
+            )
+            .on_action(cx.listener(|panel, _: &ShowCodeActions, window, cx| {
+                panel.show_code_actions(window, cx)
+            }))
+            .on_action(
+                cx.listener(|panel, _: &InsertSnippet, window, cx| panel.show_snippets(window, cx)),
+            )
+            .on_action(cx.listener(|panel, _: &SelectNextOccurrence, _, cx| {
+                panel
+                    .editor
+                    .update(cx, |s, cx| s.select_next_occurrence(false, cx));
+            }))
+            .on_action(cx.listener(|panel, _: &SelectAllOccurrences, _, cx| {
+                panel
+                    .editor
+                    .update(cx, |s, cx| s.select_next_occurrence(true, cx));
+            }))
+            .on_action(cx.listener(|panel, _: &AddCursorAbove, _, cx| {
+                panel
+                    .editor
+                    .update(cx, |s, cx| s.add_cursor_vertical(false, cx));
+            }))
+            .on_action(cx.listener(|panel, _: &AddCursorBelow, _, cx| {
+                panel
+                    .editor
+                    .update(cx, |s, cx| s.add_cursor_vertical(true, cx));
+            }))
+            .on_action(cx.listener(|p, _: &DebugStart, w, cx| p.debug_start(w, cx)))
+            .on_action(cx.listener(|p, _: &DebugStop, w, cx| p.debug_stop(w, cx)))
+            .on_action(cx.listener(|p, _: &DebugPause, w, cx| p.debug_pause(w, cx)))
+            .on_action(cx.listener(|p, _: &DebugNext, w, cx| p.debug_command("next", w, cx)))
+            .on_action(cx.listener(|p, _: &DebugStepIn, w, cx| p.debug_command("stepIn", w, cx)))
+            .on_action(cx.listener(|p, _: &DebugStepOut, w, cx| p.debug_command("stepOut", w, cx)))
+            .on_action(cx.listener(|p, _: &ToggleBreakpoint, w, cx| p.toggle_breakpoint(w, cx)))
+            .on_action(cx.listener(|p, _: &DebugEvaluate, w, cx| p.debug_evaluate(w, cx)))
             // Escape closes the peek, as it does in Electron's gutter keymap.
             // The input handles its own Escape first (completion, IME) and
             // propagates; with no peek open this is a no-op.
             .on_action(cx.listener(|panel, _: &Escape, _, cx| {
+                panel.cancel_signature_help(cx);
                 panel.close_hunk_peek(cx);
             }))
             .on_action(cx.listener(|panel, action: &VimKeystroke, window, cx| {
@@ -2901,10 +3511,13 @@ impl Render for FilesPanel {
                 ClientSettings::toggle_vim_mode(cx);
                 panel.sync_client_settings(cx);
             }))
-            .bg(cx.theme().background)
+            // The dock already paints the glass tint; stay clear here so the
+            // two full-size panes do not compound into an opaque surface.
+            .bg(crate::glass::root(cx))
             .border_l_1()
             .border_color(cx.theme().border)
             .child(self.render_header(cx))
+            .children(self.render_signature_help(window, cx))
             .children(self.status.clone().map(|status| {
                 div()
                     .px_3()
@@ -2924,15 +3537,16 @@ impl Render for FilesPanel {
                     // the toggle says.
                     .when(self.explorer_open || !file_open, |this| {
                         this.child(
-                            // Electron: explorer aside is ~22rem with a left
-                            // border while a file is open, and fills the panel
-                            // when nothing is open.
+                            // A proportional aside leaves useful editor space
+                            // even in a compact dock; full-width when browsing.
                             div()
                                 .h_full()
                                 .min_h_0()
                                 .map(|this| {
                                     if file_open {
-                                        this.w(px(300.))
+                                        this.w(gpui::relative(0.38))
+                                            .min_w(px(168.))
+                                            .max_w(px(280.))
                                             .flex_shrink_0()
                                             .border_l_1()
                                             .border_color(cx.theme().border)
@@ -2944,6 +3558,7 @@ impl Render for FilesPanel {
                         )
                     }),
             )
+            .children(self.debugger.visible.then(|| self.render_debugger(cx)))
     }
 }
 
@@ -2952,6 +3567,141 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
     use vitre_sidecar::SupervisorStatus;
+
+    #[test]
+    fn inline_edit_indices_preserve_every_tree_row() {
+        for index in [0, 1, 25_000, 50_000] {
+            let slot = TreeEditSlot {
+                index,
+                depth: 0,
+                is_dir: false,
+                replaces: false,
+            };
+            assert_eq!(slot.tree_index(index), None);
+            for tree_index in [0, 1, 24_999, 25_000, 49_999, 50_000] {
+                assert_eq!(
+                    slot.tree_index(slot.display_index(tree_index)),
+                    Some(tree_index)
+                );
+            }
+            let rename = TreeEditSlot {
+                replaces: true,
+                ..slot
+            };
+            assert_eq!(rename.tree_index(index), None);
+            assert_eq!(rename.display_index(index), index);
+            assert_eq!(rename.tree_index(index + 1), Some(index + 1));
+        }
+    }
+
+    #[gpui::test]
+    fn large_tree_virtualizes_and_reveals_inline_edits(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let guard = runtime.enter();
+        let (_sidecar, status) = tokio::sync::watch::channel(SupervisorStatus::Idle);
+        let client = Arc::new(EnvironmentClient::start(status));
+        drop(guard);
+        runtime.shutdown_background();
+        cx.update(gpui_component::init);
+        let (panel, cx) = cx.add_window_view(|window, cx| {
+            FilesPanel::new(client, "/tmp/project".into(), window, cx)
+        });
+        let entries = (0..50_000)
+            .map(|index| vitre_contracts::ProjectEntry {
+                path: tnes(format!("file-{index}.rs")),
+                kind: vitre_contracts::ProjectEntryKind::File,
+                ignored: None,
+            })
+            .collect::<Vec<_>>();
+        panel.update(cx, |panel, cx| {
+            panel.tree = Some(FileTreeModel::build(&entries));
+            panel.tree_rows.get_mut().take();
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("file-tree-row-0").is_some());
+        assert!(
+            cx.debug_bounds("file-tree-row-25000").is_none(),
+            "off-screen rows must not be laid out"
+        );
+        assert!(cx.debug_bounds("file-tree-row-49999").is_none());
+        let first_rows = panel.read_with(cx, |panel, _| panel.visible_rows());
+        assert_eq!(first_rows.len(), 50_000);
+
+        panel.update(cx, |panel, cx| panel.focus_edge(true, cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            cx.debug_bounds("file-tree-row-49999").is_some(),
+            "End must reveal the final file"
+        );
+        assert!(cx.debug_bounds("file-tree-row-0").is_none());
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.tree_focused.as_deref(), Some("file-49999.rs"));
+            assert!(
+                Arc::ptr_eq(&first_rows, &panel.visible_rows()),
+                "scroll/focus must reuse the cached projection"
+            );
+        });
+
+        cx.update(|window, cx| panel.update(cx, |panel, cx| panel.begin_tree_rename(window, cx)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            cx.debug_bounds("file-tree-edit-row").is_some(),
+            "off-screen rename must remain reachable"
+        );
+        panel.update(cx, |panel, cx| panel.cancel_edit(cx));
+
+        // Root creation while scrolled to the bottom inserts and reveals row 0.
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.start_edit(
+                    TreeEditTarget::Create {
+                        parent: String::new(),
+                        kind: ProjectMutateEntryInputCreateKind::File,
+                    },
+                    window,
+                    cx,
+                )
+            })
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("file-tree-edit-row").is_some());
+        assert!(cx.debug_bounds("file-tree-row-0").is_some());
+        assert!(cx.debug_bounds("file-tree-row-49999").is_none());
+        panel.update(cx, |panel, cx| {
+            panel.cancel_edit(cx);
+            panel.focus_edge(false, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("file-tree-row-0").is_some());
+        // Replacing a listing and changing expansion must invalidate the
+        // cached projection; external file reveals must expand and scroll too.
+        panel.update(cx, |panel, cx| {
+            let entries = ["src/a.rs", "src/b.rs"].map(|path| vitre_contracts::ProjectEntry {
+                path: tnes(path),
+                kind: vitre_contracts::ProjectEntryKind::File,
+                ignored: None,
+            });
+            panel.tree = Some(FileTreeModel::build(&entries));
+            panel.tree_rows.get_mut().take();
+            let closed = panel.visible_rows();
+            assert_eq!(closed.len(), 1);
+            panel.toggle_dir("src", cx);
+            assert_eq!(panel.visible_rows().len(), 3);
+            assert!(!Arc::ptr_eq(&closed, &panel.visible_rows()));
+            panel.toggle_dir("src", cx);
+            assert_eq!(panel.visible_rows().len(), 1);
+            panel.open = Some(OpenFile {
+                relative_path: "src/b.rs".into(),
+                buffer: FileBuffer::open(None),
+                truncated: false,
+                debounce: 0,
+            });
+            panel.follow_open_file_in_tree(cx);
+            assert_eq!(panel.visible_rows().len(), 3);
+            assert_eq!(panel.tree_focused.as_deref(), Some("src/b.rs"));
+        });
+    }
 
     #[test]
     fn language_for_path_uses_extension_and_known_names() {

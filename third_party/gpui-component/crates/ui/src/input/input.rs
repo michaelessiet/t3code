@@ -390,7 +390,9 @@ impl RenderOnce for Input {
                 highlight_styles: cx.theme().highlight_theme.clone(),
                 editor_invisible: cx.theme().highlight_theme.style.editor_invisible,
                 editor_active_line: cx.theme().highlight_theme.style.editor_active_line,
-                editor_gutter_background: cx.theme().highlight_theme.style.editor_gutter_background,
+                // The gutter is part of the editor surface. Syntax themes may
+                // specify an opaque gutter swatch that clashes with app themes.
+                editor_gutter_background: Some(cx.theme().editor_background()),
                 fold_icon_renderer: Some(Rc::new(|ix, is_folded| {
                     Button::new(("fold-icon", ix))
                         .ghost()
@@ -582,6 +584,9 @@ impl RenderOnce for Input {
                         this.border_1().border_color(cx.theme().input)
                     })
             })
+            // Code editors keep their canvas even without the input border.
+            // The fixed gutter paints this same theme token while text scrolls.
+            .when(presentation.is_code_editor(), |this| this.bg(bg))
             .items_center()
             .gap(gap_x)
             .refine_style(&self.style)

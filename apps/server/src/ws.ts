@@ -412,6 +412,9 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.lspDefinition, AuthOrchestrationReadScope],
   [WS_METHODS.lspReferences, AuthOrchestrationReadScope],
   [WS_METHODS.lspRename, AuthOrchestrationReadScope],
+  [WS_METHODS.lspCodeActions, AuthOrchestrationReadScope],
+  [WS_METHODS.lspResolveCodeAction, AuthOrchestrationReadScope],
+  [WS_METHODS.lspSemanticTokens, AuthOrchestrationReadScope],
   [WS_METHODS.lspFormat, AuthOrchestrationReadScope],
   [WS_METHODS.lspServerStatus, AuthOrchestrationReadScope],
   [WS_METHODS.subscribeLspDiagnostics, AuthOrchestrationReadScope],
@@ -2032,6 +2035,18 @@ const makeWsRpcLayer = (
           }),
         [WS_METHODS.lspFormat]: (input) =>
           observeRpcEffect(WS_METHODS.lspFormat, lspManager.format(input), {
+            "rpc.aggregate": "lsp",
+          }),
+        [WS_METHODS.lspCodeActions]: (input) =>
+          observeRpcEffect(WS_METHODS.lspCodeActions, lspManager.codeActions(input), {
+            "rpc.aggregate": "lsp",
+          }),
+        [WS_METHODS.lspResolveCodeAction]: (input) =>
+          observeRpcEffect(WS_METHODS.lspResolveCodeAction, lspManager.resolveCodeAction(input), {
+            "rpc.aggregate": "lsp",
+          }),
+        [WS_METHODS.lspSemanticTokens]: (input) =>
+          observeRpcEffect(WS_METHODS.lspSemanticTokens, lspManager.semanticTokens(input), {
             "rpc.aggregate": "lsp",
           }),
         [WS_METHODS.lspServerStatus]: (input) =>

@@ -987,6 +987,7 @@ impl SyntaxHighlighter {
         }
 
         let query_nodes = collect_query_nodes(root_node, &range);
+        let mut captures = Vec::new();
 
         for query_node in &query_nodes {
             let mut query_cursor = QueryCursor::new();
@@ -1005,25 +1006,26 @@ impl SyntaxHighlighter {
                     let node_range: Range<usize> = node.start_byte()..node.end_byte();
                     let highlight_name = SharedString::from(highlight_name.to_string());
 
-                    // Merge near range and same highlight name
-                    let last_item = highlights.last();
-                    let last_range = last_item.map(|item| &item.range).unwrap_or(&(0..0));
-                    let last_highlight_name = last_item.map(|item| item.name.clone());
-
-                    if last_range == &node_range {
-                        // case:
-                        // last_range: 213..220, last_highlight_name: Some("property")
-                        // last_range: 213..220, last_highlight_name: Some("string")
-                        highlights.push(HighlightItem::new(
-                            node_range,
-                            last_highlight_name.unwrap_or(highlight_name),
-                        ));
-                    } else {
-                        highlights.push(HighlightItem::new(node_range, highlight_name.clone()));
-                    }
+                    captures.push((node_range, query_match.pattern_index, highlight_name));
                 }
             }
         }
+
+        // Match iteration order follows tree traversal, not query priority:
+        // a JSX attribute's enclosing pattern can arrive before its generic
+        // property identifier. Paint containing ranges first, then use query
+        // order to resolve identical ranges (later refinements win).
+        captures.sort_by(|(a, ai, _), (b, bi, _)| {
+            a.start
+                .cmp(&b.start)
+                .then_with(|| b.end.cmp(&a.end))
+                .then(ai.cmp(bi))
+        });
+        highlights.extend(
+            captures
+                .into_iter()
+                .map(|(range, _, name)| HighlightItem::new(range, name)),
+        );
 
         // Injected languages are more specific than the host language. Keep
         // them last so their colors win over broad Markdown captures such as

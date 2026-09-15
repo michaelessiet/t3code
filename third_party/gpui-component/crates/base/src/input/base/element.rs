@@ -1131,6 +1131,9 @@ impl<M: InputModeKind> TextElement<M> {
         } else {
             px(0.)
         };
+        if state.breakpoint_gutter.is_some() {
+            line_number_width += px(12.);
+        }
 
         if state.mode.is_folding() {
             // Add extra space for fold icons
@@ -2653,6 +2656,16 @@ impl<M: InputModeKind> Element for TextElement<M> {
             if let Some(path) = prepaint.selection_path.take() {
                 window.paint_path(path, editor_style.selection);
             }
+            for range in &self.state.read(cx).secondary_selections {
+                let visible = &prepaint.last_layout.visible_range_offset;
+                let range = range.start.max(visible.start)..range.end.min(visible.end);
+                if range.start < range.end
+                    && let Some(path) =
+                        Self::layout_match_range(range, &prepaint.last_layout, &bounds)
+                {
+                    window.paint_path(path, editor_style.selection);
+                }
+            }
 
             // Paint hover highlight
             if let Some(path) = prepaint.hover_highlight_path.take() {
@@ -2766,6 +2779,35 @@ impl<M: InputModeKind> Element for TextElement<M> {
             if let Some(cursor_bounds) = prepaint.cursor_bounds_with_scroll() {
                 window.paint_quad(fill(cursor_bounds, editor_style.caret));
             }
+            let layout = &prepaint.last_layout;
+            for range in &self.state.read(cx).secondary_selections {
+                let mut offset_y = layout.visible_top;
+                for (&offset, line) in layout
+                    .visible_line_byte_offsets
+                    .iter()
+                    .zip(layout.lines.iter())
+                {
+                    if range.end >= offset && range.end <= offset + line.len() {
+                        if let Some(position) =
+                            line.position_for_index(range.end - offset, layout, false)
+                        {
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    bounds.origin
+                                        + point(
+                                            layout.line_number_width + position.x,
+                                            offset_y + position.y,
+                                        ),
+                                    size(px(1.5), layout.line_height),
+                                ),
+                                editor_style.caret,
+                            ));
+                        }
+                        break;
+                    }
+                    offset_y += line.size(layout.line_height).height;
+                }
+            }
         }
 
         // Paint line numbers
@@ -2796,7 +2838,13 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 // Line numbers start after the diff marker column, which
                 // owns the leading slice of the gutter width.
                 let p = point(
-                    input_bounds.origin.x + prepaint.last_layout.diff_gutter_width,
+                    input_bounds.origin.x
+                        + prepaint.last_layout.diff_gutter_width
+                        + if self.state.read(cx).breakpoint_gutter.is_some() {
+                            px(12.)
+                        } else {
+                            px(0.)
+                        },
                     origin.y + offset_y,
                 );
                 let is_active = prepaint.current_row == Some(buffer_line);
@@ -2818,6 +2866,26 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 for line in lines {
                     _ = line.paint(p, line_height, TextAlign::Left, None, window, cx);
                     offset_y += line_height;
+                }
+                if let Some(marks) = &self.state.read(cx).breakpoint_gutter
+                    && let Some((_, verified)) = marks.iter().find(|(line, _)| *line == buffer_line)
+                {
+                    let dot = Bounds::new(
+                        point(
+                            input_bounds.origin.x + prepaint.last_layout.diff_gutter_width + px(2.),
+                            p.y + (line_height - px(8.)) / 2.,
+                        ),
+                        size(px(8.), px(8.)),
+                    );
+                    let color = gpui::rgb(0xf87171);
+                    if *verified {
+                        window.paint_quad(fill(dot, color).corner_radii(px(4.)));
+                    } else {
+                        window.paint_quad(
+                            gpui::outline(dot, color, gpui::BorderStyle::Solid)
+                                .corner_radii(px(4.)),
+                        );
+                    }
                 }
 
                 // Add ghost line height after cursor row for line numbers alignment

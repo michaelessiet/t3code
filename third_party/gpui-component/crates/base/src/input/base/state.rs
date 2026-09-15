@@ -382,6 +382,9 @@ pub enum InputEvent {
     DiffGutterClick {
         line: usize,
     },
+    BreakpointClick {
+        line: usize,
+    },
 }
 
 pub(super) const CONTEXT: &str = "Input";
@@ -565,6 +568,7 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) block_cursor: Option<BlockCursor>,
     /// See [`Self::set_diff_gutter`].
     pub(super) diff_gutter: Option<DiffGutter>,
+    pub(super) breakpoint_gutter: Option<Vec<(usize, bool)>>,
     /// See [`Self::set_block_overlay`].
     pub(super) block_overlay: Option<BlockOverlay>,
     /// See [`Self::set_line_highlight`].
@@ -580,6 +584,9 @@ pub struct InputBaseState<M: InputModeKind> {
     /// - "Hello 世界💝" = 16
     /// - "💝" = 4
     pub(super) selected_range: Selection,
+    pub(super) secondary_selections: Vec<Range<usize>>,
+    pub(super) snippet_stops: Vec<Vec<Range<usize>>>,
+    pub(super) snippet_index: usize,
     /// Range for save the selected word, use to keep word range when drag move.
     pub(super) selected_word_range: Option<Selection>,
     pub(super) selection_reversed: bool,
@@ -892,6 +899,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             extra_key_context: None,
             block_cursor: None,
             diff_gutter: None,
+            breakpoint_gutter: None,
             block_overlay: None,
             line_highlight: None,
             soft_wrap: true,
@@ -901,6 +909,9 @@ impl<M: InputModeKind> InputBaseState<M> {
             blink_cursor,
             undo_manager,
             selected_range: Selection::default(),
+            secondary_selections: Vec::new(),
+            snippet_stops: Vec::new(),
+            snippet_index: 0,
             selected_word_range: None,
             selection_reversed: false,
             ime_marked_range: None,
@@ -1033,6 +1044,15 @@ impl<M: InputModeKind> InputBaseState<M> {
         }
         self.line_highlight = highlight;
         cx.notify();
+    }
+
+    /// Enable the breakpoint gutter; lines are zero-based and the boolean
+    /// distinguishes verified (filled) from pending (hollow) breakpoints.
+    pub fn set_breakpoints(&mut self, lines: Option<Vec<(usize, bool)>>, cx: &mut Context<Self>) {
+        if self.breakpoint_gutter != lines {
+            self.breakpoint_gutter = lines;
+            cx.notify();
+        }
     }
 
     pub fn replaceable(mut self, allow: bool) -> Self {
@@ -1223,6 +1243,25 @@ impl<M: InputModeKind> InputBaseState<M> {
         (self.disabled, self.readonly) = (false, false);
         f(self);
         (self.disabled, self.readonly) = (was_disabled, was_readonly);
+    }
+
+    /// Apply one undoable editor command using UTF-8 byte offsets. Unlike
+    /// programmatic replacement, this respects read-only and disabled inputs.
+    /// Emits Change, but does not trigger completion for command-generated text.
+    pub fn edit_range(
+        &mut self,
+        range: Range<usize>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_editable() || range.start > range.end || range.end > self.text.len() {
+            return;
+        }
+        self.clear_multi_edit();
+        self.undo_manager.pending_intent = Some(EditIntent::Atomic);
+        let range = self.range_to_utf16(&range);
+        self.replace_text_in_range_silent(Some(range), text, window, cx);
     }
 
     /// Insert text at the current cursor position.
@@ -1828,6 +1867,10 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     pub(super) fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.secondary_selections.is_empty() || !self.snippet_stops.is_empty() {
+            self.delete_multi(false, window, cx);
+            return;
+        }
         let intent = if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor()), cx);
             EditIntent::Backspace
@@ -1840,6 +1883,10 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     pub(super) fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.secondary_selections.is_empty() || !self.snippet_stops.is_empty() {
+            self.delete_multi(true, window, cx);
+            return;
+        }
         let intent = if self.selected_range.is_empty() {
             self.select_to(self.next_boundary(self.cursor()), cx);
             EditIntent::DeleteForward
@@ -1993,6 +2040,11 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     pub(super) fn escape(&mut self, action: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.secondary_selections.is_empty() || !self.snippet_stops.is_empty() {
+            self.clear_multi_edit();
+            cx.notify();
+            return;
+        }
         if M::handle_context_menu_action(self, Box::new(action.clone()), window, cx) {
             return;
         }
@@ -2073,6 +2125,47 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.selecting = true;
         let offset = self.index_for_mouse_position(event.position);
 
+        if self.breakpoint_gutter.is_some()
+            && event.button == MouseButton::Left
+            && let (Some(bounds), Some(layout)) = (&self.last_bounds, &self.last_layout)
+        {
+            let x = event.position.x - bounds.origin.x - layout.diff_gutter_width;
+            if x >= px(0.) && x < px(12.) {
+                self.selecting = false;
+                cx.emit(InputEvent::BreakpointClick {
+                    line: self.text.offset_to_position(offset).line as usize,
+                });
+                return;
+            }
+        }
+
+        if event.button == MouseButton::Left && event.modifiers.alt && self.is_code_editor() {
+            self.selecting = false;
+            self.snippet_stops.clear();
+            self.add_selection(offset..offset, cx);
+            self.focus_handle.focus(window, cx);
+            return;
+        }
+        self.clear_multi_edit();
+
+        // Secondary-click preserves an existing selection and never invokes
+        // normal-click behavior (including Control-click definition lookup).
+        if event.button == MouseButton::Right
+            || (cfg!(target_os = "macos")
+                && event.button == MouseButton::Left
+                && event.modifiers.control)
+        {
+            self.selecting = false;
+            self.focus_handle.focus(window, cx);
+            if self.enable_context_menu {
+                if !self.selected_range.contains(offset) {
+                    self.move_to(offset, None, cx);
+                }
+                self.pending_context_menu = Some((event.position, offset));
+            }
+            return;
+        }
+
         if M::on_click(self, event, offset, window, cx) {
             return;
         }
@@ -2089,17 +2182,6 @@ impl<M: InputModeKind> InputBaseState<M> {
             return;
         }
 
-        // Show Mouse context menu
-        if event.button == MouseButton::Right {
-            if self.enable_context_menu {
-                if !self.selected_range.contains(offset) {
-                    self.move_to(offset, None, cx);
-                }
-                self.pending_context_menu = Some((event.position, offset));
-            }
-            return;
-        }
-
         if event.modifiers.shift {
             self.select_to(offset, cx);
         } else {
@@ -2113,7 +2195,11 @@ impl<M: InputModeKind> InputBaseState<M> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if event.button == MouseButton::Right {
+        if event.button == MouseButton::Right
+            || (cfg!(target_os = "macos")
+                && event.button == MouseButton::Left
+                && event.modifiers.control)
+        {
             if let Some((position, offset)) = self.pending_context_menu.take() {
                 self.handle_right_click_menu(position, offset, window, cx);
             }
@@ -2350,7 +2436,12 @@ impl<M: InputModeKind> InputBaseState<M> {
             return;
         }
 
-        let selected_text = self.text.slice(self.selected_range).to_string();
+        let selected_text = self
+            .selections()
+            .iter()
+            .map(|range| self.text.slice(range.clone()).to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         cx.write_to_clipboard(ClipboardItem::new_string(selected_text));
     }
 
@@ -2359,7 +2450,12 @@ impl<M: InputModeKind> InputBaseState<M> {
             return;
         }
 
-        let selected_text = self.text.slice(self.selected_range).to_string();
+        let selected_text = self
+            .selections()
+            .iter()
+            .map(|range| self.text.slice(range.clone()).to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         cx.write_to_clipboard(ClipboardItem::new_string(selected_text));
 
         self.undo_manager.pending_intent = Some(EditIntent::Atomic);
@@ -2427,6 +2523,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     pub(super) fn undo(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_multi_edit();
         self.undo_manager.set_ignoring(true);
         if let Some(changes) = self.undo_manager.undo() {
             let selection = changes.last().unwrap().selection_before;
@@ -2440,6 +2537,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     pub(super) fn redo(&mut self, _: &Redo, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_multi_edit();
         self.undo_manager.set_ignoring(true);
         if let Some(changes) = self.undo_manager.redo() {
             let selection = changes.last().unwrap().selection_after;
@@ -2510,6 +2608,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// Non-empty ranges expand to character boundaries. Empty ranges remain empty and are
     /// clipped to the preceding character boundary.
     pub fn set_selected_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        self.clear_multi_edit();
         let end_bias = if range.start == range.end {
             Bias::Left
         } else {
@@ -2609,6 +2708,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     ///
     /// Ensure the offset use self.next_boundary or self.previous_boundary to get the correct offset.
     pub(crate) fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.clear_multi_edit();
         M::clear_inline_completion(self, cx);
 
         let offset = offset.clamp(0, self.text.len());
@@ -3098,6 +3198,16 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if range_utf16.is_none()
+            && (!self.secondary_selections.is_empty() || !self.snippet_stops.is_empty())
+            && self.ime_marked_range.is_none()
+        {
+            self.replace_multi(new_text, window, cx);
+            return;
+        }
+        if range_utf16.is_some() {
+            self.clear_multi_edit();
+        }
         let requested_intent = self.undo_manager.pending_intent.take();
         if !self.is_editable() {
             return;
@@ -3239,6 +3349,9 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Composition owns a single platform text range; never duplicate a
+        // partially composed candidate into secondary selections.
+        self.clear_multi_edit();
         let requested_intent = self.undo_manager.pending_intent.take();
         if !self.is_editable() {
             return;
@@ -3508,6 +3621,36 @@ impl<M: InputModeKind> Render for InputBaseState<M> {
             .on_action(window.listener_for(&entity, InputBaseState::on_action_search))
             .on_action(window.listener_for(&entity, InputBaseState::on_action_replace))
             .on_key_down(window.listener_for(&entity, InputBaseState::on_key_down))
+            // Inputs own text-editing menus even inside a row/project context
+            // menu. Capture before an ancestor can consume the secondary click.
+            .capture_any_mouse_down(window.listener_for(
+                &entity,
+                |state, event: &MouseDownEvent, window, cx| {
+                    if event.button == MouseButton::Right
+                        || (cfg!(target_os = "macos")
+                            && event.button == MouseButton::Left
+                            && event.modifiers.control)
+                    {
+                        cx.stop_propagation();
+                        window.prevent_default();
+                        state.on_mouse_down(event, window, cx);
+                    }
+                },
+            ))
+            .capture_any_mouse_up(window.listener_for(
+                &entity,
+                |state, event: &MouseUpEvent, window, cx| {
+                    if event.button == MouseButton::Right
+                        || (cfg!(target_os = "macos")
+                            && event.button == MouseButton::Left
+                            && event.modifiers.control)
+                    {
+                        cx.stop_propagation();
+                        window.prevent_default();
+                        state.on_mouse_up(event, window, cx);
+                    }
+                },
+            ))
             .on_mouse_down(
                 MouseButton::Left,
                 window.listener_for(&entity, InputBaseState::on_mouse_down),

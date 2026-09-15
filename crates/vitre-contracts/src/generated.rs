@@ -2820,6 +2820,41 @@ pub struct LaunchEditorInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LspCodeAction {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::support::double_option"
+    )]
+    #[serde(rename = "disabledReason")]
+    pub disabled_reason: Option<Option<TrimmedNonEmptyString>>,
+    pub files: Vec<LspFileEdits>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::support::double_option"
+    )]
+    pub kind: Option<Option<TrimmedNonEmptyString>>,
+    pub preferred: bool,
+    #[serde(rename = "resolveData")]
+    pub resolve_data: TrimmedNonEmptyString,
+    pub title: TrimmedNonEmptyString,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LspCodeActionsInput {
+    pub cwd: TrimmedNonEmptyString,
+    pub range: LspRange,
+    #[serde(rename = "relativePath")]
+    pub relative_path: TrimmedNonEmptyString,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LspCodeActionsResult {
+    pub actions: Vec<LspCodeAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LspCompletionItem {
     #[serde(
         default,
@@ -3120,12 +3155,33 @@ pub struct LspRenameInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LspResolveCodeActionInput {
+    pub cwd: TrimmedNonEmptyString,
+    #[serde(rename = "relativePath")]
+    pub relative_path: TrimmedNonEmptyString,
+    #[serde(rename = "resolveData")]
+    pub resolve_data: TrimmedNonEmptyString,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LspResolveCompletionInput {
     pub cwd: TrimmedNonEmptyString,
     #[serde(rename = "relativePath")]
     pub relative_path: TrimmedNonEmptyString,
     #[serde(rename = "resolveData")]
     pub resolve_data: TrimmedNonEmptyString,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LspSemanticToken {
+    pub kind: TrimmedNonEmptyString,
+    pub modifiers: Vec<TrimmedNonEmptyString>,
+    pub range: LspRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LspSemanticTokensResult {
+    pub tokens: Vec<LspSemanticToken>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -12186,6 +12242,24 @@ pub mod methods {
         Unknown(serde_json::Value),
     }
 
+    pub struct LspCodeActions;
+
+    impl RpcMethod for LspCodeActions {
+        const TAG: &'static str = "lsp.codeActions";
+        const STREAM: bool = false;
+        type Payload = super::LspCodeActionsInput;
+        type Success = super::LspCodeActionsResult;
+        type Error = LspCodeActionsError;
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(untagged)]
+    pub enum LspCodeActionsError {
+        LspError(super::LspError),
+        EnvironmentAuthorizationError(super::EnvironmentAuthorizationError),
+        Unknown(serde_json::Value),
+    }
+
     pub struct LspCompletion;
 
     impl RpcMethod for LspCompletion {
@@ -12348,6 +12422,24 @@ pub mod methods {
         Unknown(serde_json::Value),
     }
 
+    pub struct LspResolveCodeAction;
+
+    impl RpcMethod for LspResolveCodeAction {
+        const TAG: &'static str = "lsp.resolveCodeAction";
+        const STREAM: bool = false;
+        type Payload = super::LspResolveCodeActionInput;
+        type Success = super::LspCodeAction;
+        type Error = LspResolveCodeActionError;
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(untagged)]
+    pub enum LspResolveCodeActionError {
+        LspError(super::LspError),
+        EnvironmentAuthorizationError(super::EnvironmentAuthorizationError),
+        Unknown(serde_json::Value),
+    }
+
     pub struct LspResolveCompletion;
 
     impl RpcMethod for LspResolveCompletion {
@@ -12361,6 +12453,24 @@ pub mod methods {
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     #[serde(untagged)]
     pub enum LspResolveCompletionError {
+        LspError(super::LspError),
+        EnvironmentAuthorizationError(super::EnvironmentAuthorizationError),
+        Unknown(serde_json::Value),
+    }
+
+    pub struct LspSemanticTokens;
+
+    impl RpcMethod for LspSemanticTokens {
+        const TAG: &'static str = "lsp.semanticTokens";
+        const STREAM: bool = false;
+        type Payload = super::LspCodeActionsInput;
+        type Success = super::LspSemanticTokensResult;
+        type Error = LspSemanticTokensError;
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(untagged)]
+    pub enum LspSemanticTokensError {
         LspError(super::LspError),
         EnvironmentAuthorizationError(super::EnvironmentAuthorizationError),
         Unknown(serde_json::Value),

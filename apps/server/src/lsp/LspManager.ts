@@ -29,6 +29,11 @@ import {
   type LspLocationsResult,
   type LspPositionInput,
   type LspRenameInput,
+  type LspCodeAction,
+  type LspCodeActionsInput,
+  type LspCodeActionsResult,
+  type LspResolveCodeActionInput,
+  type LspSemanticTokensResult,
   type LspResolveCompletionInput,
   type LspServerStatusResult,
   type LspSignatureHelpResult,
@@ -46,6 +51,8 @@ import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import type * as Protocol from "vscode-languageserver-protocol";
+import { fullDocumentRange, mapCodeAction, mapSemanticTokens } from "./LspEditorFeatures.ts";
 
 import { resolveRegistry, type LanguageServerConfig } from "./LanguageServers.ts";
 import { LspClient, LspClientError } from "./LspClient.ts";
@@ -58,7 +65,6 @@ import {
   mapLocations,
   mapSignatureHelp,
   mapTextEdits,
-  mapWorkspaceEdit,
   uriToLocationPath,
 } from "./LspMappings.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
@@ -84,7 +90,7 @@ type ManagedServer = {
   readonly workspaceRoot: string;
   clientPromise: Promise<LspClient>;
   state: "starting" | "running" | "failed" | "not_installed";
-  readonly openDocuments: Map<string, number>;
+  readonly openDocuments: Map<string, { readonly version: number; readonly contents: string }>;
   lastActivityAt: number;
   failedAt: number | null;
   /** Crash exits without a healthy run in between; drives retry backoff. */
@@ -161,6 +167,15 @@ export class LspManager extends Context.Service<
     readonly definition: (input: LspPositionInput) => Effect.Effect<LspLocationsResult, LspError>;
     readonly references: (input: LspPositionInput) => Effect.Effect<LspLocationsResult, LspError>;
     readonly rename: (input: LspRenameInput) => Effect.Effect<LspWorkspaceEditResult, LspError>;
+    readonly codeActions: (
+      input: LspCodeActionsInput,
+    ) => Effect.Effect<LspCodeActionsResult, LspError>;
+    readonly resolveCodeAction: (
+      input: LspResolveCodeActionInput,
+    ) => Effect.Effect<LspCodeAction, LspError>;
+    readonly semanticTokens: (
+      input: LspCodeActionsInput,
+    ) => Effect.Effect<LspSemanticTokensResult, LspError>;
     readonly format: (input: LspFormattingInput) => Effect.Effect<LspFormattingResult, LspError>;
     readonly serverStatus: (input: {
       readonly cwd: string;
@@ -175,6 +190,7 @@ export const make = Effect.gen(function* () {
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
   const serverSettings = yield* ServerSettingsService;
   const workspaceWatcher = yield* WorkspaceWatcher;
+  const rawDiagnostics = new Map<string, ReadonlyArray<Protocol.Diagnostic>>();
 
   // Custom-server definitions from user settings, kept fresh by the
   // settings watcher below. Read per-request and merged with built-ins via
@@ -235,6 +251,8 @@ export const make = Effect.gen(function* () {
         onDiagnostics: (uri, diagnostics) => {
           const location = uriToLocationPath(workspaceRoot, uri);
           if (location.relativePath === undefined) return;
+          if (diagnostics.length === 0) rawDiagnostics.delete(uri);
+          else rawDiagnostics.set(uri, diagnostics);
           runtimePublish({
             cwd: workspaceRoot,
             event: {
@@ -251,6 +269,7 @@ export const make = Effect.gen(function* () {
           // A dead server's diagnostics are stale; mirror the settings-watcher
           // cleanup so clients drop the squiggles.
           for (const uri of managed.openDocuments.keys()) {
+            rawDiagnostics.delete(uri);
             const location = uriToLocationPath(workspaceRoot, uri);
             if (location.relativePath === undefined) continue;
             runtimePublish({
@@ -469,7 +488,7 @@ export const make = Effect.gen(function* () {
       if ((yield* currentRegistry).bindingForPath(input.relativePath) === null) return;
       const { workspaceRoot, binding, managed, client } = yield* clientFor(input);
       const uri = documentUri(workspaceRoot, input.relativePath);
-      managed.openDocuments.set(uri, 0);
+      managed.openDocuments.set(uri, { version: 0, contents: input.contents });
       yield* Effect.tryPromise({
         try: () =>
           client.notify("textDocument/didOpen", {
@@ -495,13 +514,33 @@ export const make = Effect.gen(function* () {
       if ((yield* currentRegistry).bindingForPath(input.relativePath) === null) return;
       const { workspaceRoot, binding, managed, client } = yield* clientFor(input);
       const uri = documentUri(workspaceRoot, input.relativePath);
-      managed.openDocuments.set(uri, input.version);
+      const previous = managed.openDocuments.get(uri);
+      const sync = client.serverCapabilities.textDocumentSync;
+      const incremental = (typeof sync === "number" ? sync : sync?.change) === 2;
+      managed.openDocuments.set(uri, { version: input.version, contents: input.contents });
       yield* Effect.tryPromise({
         try: () =>
-          client.notify("textDocument/didChange", {
-            textDocument: { uri, version: input.version },
-            contentChanges: [{ text: input.contents }],
-          }),
+          incremental && previous === undefined
+            ? // A newly restarted server needs the document before any changes.
+              client.notify("textDocument/didOpen", {
+                textDocument: {
+                  uri,
+                  languageId: binding.languageId,
+                  version: input.version,
+                  text: input.contents,
+                },
+              })
+            : client.notify("textDocument/didChange", {
+                textDocument: { uri, version: input.version },
+                contentChanges: [
+                  {
+                    ...(incremental && previous !== undefined
+                      ? { range: fullDocumentRange(previous.contents) }
+                      : {}),
+                    text: input.contents,
+                  },
+                ],
+              }),
         catch: (error) =>
           clientFailureToLspError(error, {
             cwd: input.cwd,
@@ -518,6 +557,7 @@ export const make = Effect.gen(function* () {
       const { workspaceRoot, binding, managed, client } = yield* clientFor(input);
       const uri = documentUri(workspaceRoot, input.relativePath);
       managed.openDocuments.delete(uri);
+      rawDiagnostics.delete(uri);
       yield* Effect.tryPromise({
         try: () => client.notify("textDocument/didClose", { textDocument: { uri } }),
         catch: (error) =>
@@ -591,16 +631,69 @@ export const make = Effect.gen(function* () {
     }));
 
   const rename: LspManager["Service"]["rename"] = (input) =>
-    clientRequest(input, async ({ client, uri, workspaceRoot }) => ({
-      files: mapWorkspaceEdit(
-        workspaceRoot,
-        await client.request("textDocument/rename", {
+    clientRequest(input, async ({ client, uri, workspaceRoot }) => {
+      const edit = await client.request<Protocol.WorkspaceEdit | null>("textDocument/rename", {
+        textDocument: { uri },
+        position: input.position,
+        newName: input.newName,
+      });
+      const action = mapCodeAction(workspaceRoot, {
+        title: "Rename",
+        ...(edit === null ? {} : { edit }),
+      });
+      if (action.disabledReason !== undefined) throw new Error(action.disabledReason);
+      return { files: action.files };
+    });
+
+  const codeActions: LspManager["Service"]["codeActions"] = (input) =>
+    clientRequest(input, async ({ client, uri, workspaceRoot }) => {
+      if (!client.serverCapabilities.codeActionProvider) return { actions: [] };
+      const result = await client.request<Array<Protocol.CodeAction | Protocol.Command> | null>(
+        "textDocument/codeAction",
+        {
           textDocument: { uri },
-          position: input.position,
-          newName: input.newName,
-        }),
-      ),
-    }));
+          range: input.range,
+          context: {
+            diagnostics: (rawDiagnostics.get(uri) ?? []).filter(
+              (d) =>
+                d.range.start.line <= input.range.end.line &&
+                d.range.end.line >= input.range.start.line,
+            ),
+          },
+        },
+      );
+      return { actions: (result ?? []).map((action) => mapCodeAction(workspaceRoot, action)) };
+    });
+
+  const resolveCodeAction: LspManager["Service"]["resolveCodeAction"] = (input) =>
+    clientRequest(input, async ({ client, workspaceRoot }) => {
+      const raw: Protocol.CodeAction = JSON.parse(input.resolveData);
+      if (raw === null || typeof raw !== "object" || typeof raw.title !== "string")
+        throw new Error("Invalid code action");
+      const capability = client.serverCapabilities.codeActionProvider;
+      const action =
+        typeof capability === "object" && capability.resolveProvider && raw.data !== undefined
+          ? await client.request<Protocol.CodeAction>("codeAction/resolve", raw)
+          : raw;
+      return mapCodeAction(workspaceRoot, action);
+    });
+
+  const semanticTokens: LspManager["Service"]["semanticTokens"] = (input) =>
+    clientRequest(input, async ({ client, uri }) => {
+      const capability = client.serverCapabilities.semanticTokensProvider;
+      if (!capability) return { tokens: [] };
+      const result = capability.full
+        ? await client.request<Protocol.SemanticTokens | null>("textDocument/semanticTokens/full", {
+            textDocument: { uri },
+          })
+        : capability.range
+          ? await client.request<Protocol.SemanticTokens | null>(
+              "textDocument/semanticTokens/range",
+              { textDocument: { uri }, range: input.range },
+            )
+          : null;
+      return { tokens: mapSemanticTokens(result, capability.legend) };
+    });
 
   const format: LspManager["Service"]["format"] = (input) =>
     clientRequest(input, async ({ client, uri }) => ({
@@ -679,6 +772,7 @@ export const make = Effect.gen(function* () {
           servers.delete(key);
           // Clear stale squiggles for documents the disposed server had open.
           for (const uri of managed.openDocuments.keys()) {
+            rawDiagnostics.delete(uri);
             const location = uriToLocationPath(managed.workspaceRoot, uri);
             if (location.relativePath === undefined) continue;
             runtimePublish({
@@ -757,6 +851,9 @@ export const make = Effect.gen(function* () {
     definition,
     references,
     rename,
+    codeActions,
+    resolveCodeAction,
+    semanticTokens,
     format,
     serverStatus,
     subscribeDiagnostics,

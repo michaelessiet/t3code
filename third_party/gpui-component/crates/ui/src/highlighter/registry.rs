@@ -112,6 +112,7 @@ pub struct SyntaxColors {
     pub attribute: Option<ThemeStyle>,
     pub boolean: Option<ThemeStyle>,
     pub comment: Option<ThemeStyle>,
+    #[serde(rename = "comment.doc", alias = "comment_doc")]
     pub comment_doc: Option<ThemeStyle>,
     pub constant: Option<ThemeStyle>,
     pub constructor: Option<ThemeStyle>,
@@ -290,16 +291,10 @@ impl SyntaxColors {
         if style.is_some() {
             style
         } else {
-            // Fallback `keyword.modifier` to `keyword`
-            if name.contains(".") {
-                if let Some(prefix) = name.split(".").next() {
-                    return self.style(prefix);
-                }
-
-                None
-            } else {
-                None
-            }
+            // Use the closest configured parent: string.special.path should
+            // inherit string.special before falling back to string.
+            name.rsplit_once('.')
+                .and_then(|(parent, _)| self.style(parent))
         }
     }
 

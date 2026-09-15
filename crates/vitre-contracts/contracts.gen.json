@@ -4431,6 +4431,77 @@
       "required": ["cwd", "editor"],
       "type": "object"
     },
+    "LspCodeAction": {
+      "additionalProperties": false,
+      "properties": {
+        "disabledReason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrimmedNonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/LspFileEdits"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrimmedNonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preferred": {
+          "type": "boolean"
+        },
+        "resolveData": {
+          "$ref": "#/$defs/TrimmedNonEmptyString"
+        },
+        "title": {
+          "$ref": "#/$defs/TrimmedNonEmptyString"
+        }
+      },
+      "required": ["title", "preferred", "files", "resolveData"],
+      "type": "object"
+    },
+    "LspCodeActionsInput": {
+      "additionalProperties": false,
+      "properties": {
+        "cwd": {
+          "$ref": "#/$defs/TrimmedNonEmptyString"
+        },
+        "range": {
+          "$ref": "#/$defs/LspRange"
+        },
+        "relativePath": {
+          "$ref": "#/$defs/TrimmedNonEmptyString"
+        }
+      },
+      "required": ["cwd", "relativePath", "range"],
+      "type": "object"
+    },
+    "LspCodeActionsResult": {
+      "additionalProperties": false,
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/LspCodeAction"
+          },
+          "type": "array"
+        }
+      },
+      "required": ["actions"],
+      "type": "object"
+    },
     "LspCompletionItem": {
       "additionalProperties": false,
       "properties": {
@@ -4936,6 +5007,22 @@
       "required": ["cwd", "relativePath", "position", "newName"],
       "type": "object"
     },
+    "LspResolveCodeActionInput": {
+      "additionalProperties": false,
+      "properties": {
+        "cwd": {
+          "$ref": "#/$defs/TrimmedNonEmptyString"
+        },
+        "relativePath": {
+          "$ref": "#/$defs/TrimmedNonEmptyString"
+        },
+        "resolveData": {
+          "$ref": "#/$defs/TrimmedNonEmptyString"
+        }
+      },
+      "required": ["cwd", "relativePath", "resolveData"],
+      "type": "object"
+    },
     "LspResolveCompletionInput": {
       "additionalProperties": false,
       "properties": {
@@ -4950,6 +5037,38 @@
         }
       },
       "required": ["cwd", "relativePath", "resolveData"],
+      "type": "object"
+    },
+    "LspSemanticToken": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/TrimmedNonEmptyString"
+        },
+        "modifiers": {
+          "items": {
+            "$ref": "#/$defs/TrimmedNonEmptyString"
+          },
+          "type": "array"
+        },
+        "range": {
+          "$ref": "#/$defs/LspRange"
+        }
+      },
+      "required": ["range", "kind", "modifiers"],
+      "type": "object"
+    },
+    "LspSemanticTokensResult": {
+      "additionalProperties": false,
+      "properties": {
+        "tokens": {
+          "items": {
+            "$ref": "#/$defs/LspSemanticToken"
+          },
+          "type": "array"
+        }
+      },
+      "required": ["tokens"],
       "type": "object"
     },
     "LspServerStatus": {
@@ -20948,6 +21067,13 @@
     },
     {
       "errors": ["#/$defs/LspError", "#/$defs/EnvironmentAuthorizationError"],
+      "payload": "#/$defs/LspCodeActionsInput",
+      "stream": false,
+      "success": "#/$defs/LspCodeActionsResult",
+      "tag": "lsp.codeActions"
+    },
+    {
+      "errors": ["#/$defs/LspError", "#/$defs/EnvironmentAuthorizationError"],
       "payload": "#/$defs/LspPositionInput",
       "stream": false,
       "success": "#/$defs/LspCompletionResult",
@@ -21011,10 +21137,24 @@
     },
     {
       "errors": ["#/$defs/LspError", "#/$defs/EnvironmentAuthorizationError"],
+      "payload": "#/$defs/LspResolveCodeActionInput",
+      "stream": false,
+      "success": "#/$defs/LspCodeAction",
+      "tag": "lsp.resolveCodeAction"
+    },
+    {
+      "errors": ["#/$defs/LspError", "#/$defs/EnvironmentAuthorizationError"],
       "payload": "#/$defs/LspResolveCompletionInput",
       "stream": false,
       "success": "#/$defs/LspCompletionItem",
       "tag": "lsp.resolveCompletion"
+    },
+    {
+      "errors": ["#/$defs/LspError", "#/$defs/EnvironmentAuthorizationError"],
+      "payload": "#/$defs/LspCodeActionsInput",
+      "stream": false,
+      "success": "#/$defs/LspSemanticTokensResult",
+      "tag": "lsp.semanticTokens"
     },
     {
       "errors": ["#/$defs/LspError", "#/$defs/EnvironmentAuthorizationError"],

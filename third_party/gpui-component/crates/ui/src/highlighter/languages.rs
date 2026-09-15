@@ -184,21 +184,21 @@ impl Language {
             #[cfg(feature = "tree-sitter-bash")]
             "bash" | "sh" => Some(Self::Bash),
             #[cfg(feature = "tree-sitter-c")]
-            "c" => Some(Self::C),
+            "c" | "h" => Some(Self::C),
             #[cfg(feature = "tree-sitter-cmake")]
             "cmake" => Some(Self::CMake),
             #[cfg(feature = "tree-sitter-cpp")]
-            "cpp" | "c++" => Some(Self::Cpp),
+            "cpp" | "c++" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Some(Self::Cpp),
             #[cfg(feature = "tree-sitter-csharp")]
             "csharp" | "cs" => Some(Self::CSharp),
             #[cfg(feature = "tree-sitter-css")]
             "css" | "scss" => Some(Self::Css),
             #[cfg(feature = "tree-sitter-diff")]
-            "diff" => Some(Self::Diff),
+            "diff" | "patch" => Some(Self::Diff),
             #[cfg(feature = "tree-sitter-ejs")]
             "ejs" => Some(Self::Ejs),
             #[cfg(feature = "tree-sitter-elixir")]
-            "elixir" | "ex" => Some(Self::Elixir),
+            "elixir" | "ex" | "exs" => Some(Self::Elixir),
             #[cfg(feature = "tree-sitter-erb")]
             "erb" => Some(Self::Erb),
             #[cfg(feature = "tree-sitter-go")]
@@ -206,11 +206,13 @@ impl Language {
             #[cfg(feature = "tree-sitter-graphql")]
             "graphql" => Some(Self::GraphQL),
             #[cfg(feature = "tree-sitter-html")]
-            "html" => Some(Self::Html),
+            "html" | "htm" => Some(Self::Html),
             #[cfg(feature = "tree-sitter-java")]
             "java" => Some(Self::Java),
             #[cfg(feature = "tree-sitter-javascript")]
-            "javascript" | "js" => Some(Self::JavaScript),
+            "javascript" | "js" | "jsx" | "javascriptreact" | "mjs" | "cjs" => {
+                Some(Self::JavaScript)
+            }
             #[cfg(feature = "tree-sitter-jsdoc")]
             "jsdoc" => Some(Self::JsDoc),
             #[cfg(feature = "tree-sitter-kotlin")]
@@ -228,13 +230,13 @@ impl Language {
             #[cfg(feature = "tree-sitter-proto")]
             "proto" | "protobuf" => Some(Self::Proto),
             #[cfg(feature = "tree-sitter-python")]
-            "python" | "py" => Some(Self::Python),
+            "python" | "py" | "pyi" | "pyw" => Some(Self::Python),
             #[cfg(feature = "tree-sitter-ruby")]
             "ruby" | "rb" => Some(Self::Ruby),
             #[cfg(feature = "tree-sitter-rust")]
             "rust" | "rs" => Some(Self::Rust),
             #[cfg(feature = "tree-sitter-scala")]
-            "scala" => Some(Self::Scala),
+            "scala" | "sc" => Some(Self::Scala),
             #[cfg(feature = "tree-sitter-sql")]
             "sql" => Some(Self::Sql),
             #[cfg(feature = "tree-sitter-svelte")]
@@ -244,9 +246,9 @@ impl Language {
             #[cfg(feature = "tree-sitter-toml")]
             "toml" => Some(Self::Toml),
             #[cfg(feature = "tree-sitter-tsx")]
-            "tsx" => Some(Self::Tsx),
+            "tsx" | "typescriptreact" => Some(Self::Tsx),
             #[cfg(feature = "tree-sitter-typescript")]
-            "typescript" | "ts" => Some(Self::TypeScript),
+            "typescript" | "ts" | "mts" | "cts" => Some(Self::TypeScript),
             #[cfg(feature = "tree-sitter-yaml")]
             "yaml" | "yml" => Some(Self::Yaml),
             #[cfg(feature = "tree-sitter-zig")]
@@ -320,6 +322,28 @@ impl Language {
                 languages.push("tsx");
                 #[cfg(feature = "tree-sitter-yaml")]
                 languages.push("yaml");
+                #[cfg(feature = "tree-sitter-graphql")]
+                languages.push("graphql");
+            }
+            #[cfg(feature = "tree-sitter-tsx")]
+            Self::Tsx => {
+                // React files also contain JSDoc and tagged templates. Use
+                // the same injection targets as plain TypeScript.
+                #[cfg(feature = "tree-sitter-jsdoc")]
+                languages.push("jsdoc");
+                languages.push("json");
+                #[cfg(feature = "tree-sitter-css")]
+                languages.push("css");
+                #[cfg(feature = "tree-sitter-html")]
+                languages.push("html");
+                #[cfg(feature = "tree-sitter-javascript")]
+                languages.push("javascript");
+                #[cfg(feature = "tree-sitter-typescript")]
+                languages.push("typescript");
+                #[cfg(feature = "tree-sitter-yaml")]
+                languages.push("yaml");
+                #[cfg(feature = "tree-sitter-sql")]
+                languages.push("sql");
                 #[cfg(feature = "tree-sitter-graphql")]
                 languages.push("graphql");
             }
@@ -497,7 +521,12 @@ impl Language {
                 "",
             ),
             #[cfg(feature = "tree-sitter-swift")]
-            Self::Swift => (tree_sitter_swift::LANGUAGE, "", "", ""),
+            Self::Swift => (
+                tree_sitter_swift::LANGUAGE,
+                tree_sitter_swift::HIGHLIGHTS_QUERY,
+                "",
+                "",
+            ),
             #[cfg(feature = "tree-sitter-scala")]
             Self::Scala => (
                 tree_sitter_scala::LANGUAGE,
@@ -513,11 +542,21 @@ impl Language {
                 "",
             ),
             #[cfg(feature = "tree-sitter-csharp")]
-            Self::CSharp => (tree_sitter_c_sharp::LANGUAGE, "", "", ""),
+            Self::CSharp => (
+                tree_sitter_c_sharp::LANGUAGE,
+                tree_sitter_c_sharp::HIGHLIGHTS_QUERY,
+                "",
+                "",
+            ),
             #[cfg(feature = "tree-sitter-graphql")]
             Self::GraphQL => (tree_sitter_graphql::LANGUAGE, "", "", ""),
             #[cfg(feature = "tree-sitter-proto")]
-            Self::Proto => (tree_sitter_proto::LANGUAGE, "", "", ""),
+            Self::Proto => (
+                tree_sitter_proto::LANGUAGE,
+                include_str!("languages/proto/highlights.scm"),
+                "",
+                "",
+            ),
             #[cfg(feature = "tree-sitter-make")]
             Self::Make => (
                 tree_sitter_make::LANGUAGE,
@@ -526,7 +565,12 @@ impl Language {
                 "",
             ),
             #[cfg(feature = "tree-sitter-cmake")]
-            Self::CMake => (tree_sitter_cmake::LANGUAGE, "", "", ""),
+            Self::CMake => (
+                tree_sitter_cmake::LANGUAGE,
+                tree_sitter_cmake::HIGHLIGHTS_QUERY,
+                "",
+                "",
+            ),
             #[cfg(feature = "tree-sitter-typescript")]
             Self::TypeScript => (
                 tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
@@ -537,8 +581,8 @@ impl Language {
             #[cfg(feature = "tree-sitter-tsx")]
             Self::Tsx => (
                 tree_sitter_typescript::LANGUAGE_TSX,
-                tree_sitter_typescript::HIGHLIGHTS_QUERY,
-                "",
+                include_str!("languages/typescript/highlights.scm"),
+                include_str!("languages/javascript/injections.scm"),
                 tree_sitter_typescript::LOCALS_QUERY,
             ),
             #[cfg(feature = "tree-sitter-diff")]
@@ -608,14 +652,33 @@ impl Language {
 
         let language = tree_sitter::Language::new(language);
 
-        LanguageConfig::new(
+        let mut config = LanguageConfig::new(
             self.name(),
             language,
             self.injection_languages(),
             query,
             injection,
             locals,
-        )
+        );
+        // The TSX crate's exported query contains only TypeScript additions.
+        // JSX needs the full JavaScript/TypeScript rules plus the tag rules;
+        // JavaScript's grammar supports JSX too (including JSX in .js files).
+        let jsx = match self {
+            #[cfg(feature = "tree-sitter-javascript")]
+            Self::JavaScript => true,
+            #[cfg(feature = "tree-sitter-tsx")]
+            Self::Tsx => true,
+            _ => false,
+        };
+        if jsx {
+            config.highlights = format!(
+                "{}\n{}",
+                config.highlights,
+                include_str!("languages/javascript/jsx.scm")
+            )
+            .into();
+        }
+        config
     }
 }
 

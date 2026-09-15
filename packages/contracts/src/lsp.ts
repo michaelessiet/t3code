@@ -149,6 +149,40 @@ export const LspWorkspaceEditResult = Schema.Struct({
 });
 export type LspWorkspaceEditResult = typeof LspWorkspaceEditResult.Type;
 
+export const LspCodeActionsInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  relativePath: TrimmedNonEmptyString,
+  range: LspRange,
+});
+export type LspCodeActionsInput = typeof LspCodeActionsInput.Type;
+
+export const LspCodeAction = Schema.Struct({
+  title: Schema.String,
+  kind: Schema.optional(Schema.String),
+  preferred: Schema.Boolean,
+  disabledReason: Schema.optional(Schema.String),
+  files: Schema.Array(LspFileEdits),
+  resolveData: Schema.String,
+});
+export type LspCodeAction = typeof LspCodeAction.Type;
+export const LspCodeActionsResult = Schema.Struct({ actions: Schema.Array(LspCodeAction) });
+export type LspCodeActionsResult = typeof LspCodeActionsResult.Type;
+export const LspResolveCodeActionInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  relativePath: TrimmedNonEmptyString,
+  resolveData: Schema.String,
+});
+export type LspResolveCodeActionInput = typeof LspResolveCodeActionInput.Type;
+
+export const LspSemanticToken = Schema.Struct({
+  range: LspRange,
+  kind: Schema.String,
+  modifiers: Schema.Array(Schema.String),
+});
+export type LspSemanticToken = typeof LspSemanticToken.Type;
+export const LspSemanticTokensResult = Schema.Struct({ tokens: Schema.Array(LspSemanticToken) });
+export type LspSemanticTokensResult = typeof LspSemanticTokensResult.Type;
+
 export const LspFormattingInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   relativePath: TrimmedNonEmptyString,

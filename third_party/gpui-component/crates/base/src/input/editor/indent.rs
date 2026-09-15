@@ -231,6 +231,14 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     pub(super) fn indent(&mut self, block: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.snippet_tab(false, cx) {
+            return;
+        }
+        if !self.secondary_selections.is_empty() {
+            let value = self.mode.tab_size().to_string();
+            self.replace_multi(&value, window, cx);
+            return;
+        }
         if !self.is_multi_line() || !self.mode.is_indentable() {
             cx.propagate();
             return;
@@ -289,6 +297,9 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     pub(super) fn outdent(&mut self, block: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.snippet_tab(true, cx) {
+            return;
+        }
         if !self.is_multi_line() || !self.mode.is_indentable() {
             cx.propagate();
             return;

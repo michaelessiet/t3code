@@ -237,9 +237,9 @@ impl CompletionMenu {
             // and apply the auto-import edits as a second transaction — they
             // never overlap the completion range.
             let needs_resolve = item.additional_text_edits.is_none() && item.data.is_some();
-            let resolve = editor.update_in(cx, |editor, window, cx| {
+            let (resolve, snapshot) = editor.update_in(cx, |editor, window, cx| {
                 editor.insert_completion(&item, range, window, cx);
-                if needs_resolve {
+                let resolve = if needs_resolve {
                     editor
                         .lsp()
                         .completion_provider
@@ -247,14 +247,20 @@ impl CompletionMenu {
                         .map(|provider| provider.resolve_completion(item.clone(), window, cx))
                 } else {
                     None
-                }
+                };
+                (resolve, editor.text().clone())
             })?;
             if let Some(task) = resolve
                 && let Ok(resolved) = task.await
                 && let Some(edits) = resolved.additional_text_edits.as_ref()
             {
                 editor.update_in(cx, |editor, window, cx| {
-                    editor.apply_completion_additional_edits(edits, window, cx);
+                    // Resolve ranges describe the buffer after insertion.
+                    // Never apply stale auto-import offsets after typing or
+                    // switching files while the server was resolving.
+                    if editor.text() == &snapshot {
+                        editor.apply_completion_additional_edits(edits, window, cx);
+                    }
                 })?;
             }
             anyhow::Ok(())

@@ -43,6 +43,8 @@ mod mask_pattern;
 mod mode;
 #[path = "base/movement.rs"]
 mod movement;
+#[path = "editor/multi_edit.rs"]
+mod multi_edit;
 #[path = "base/native.rs"]
 mod native;
 #[path = "base/rope_ext.rs"]

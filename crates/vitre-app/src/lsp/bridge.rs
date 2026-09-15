@@ -17,7 +17,7 @@
 //! convert offsets for a file it doesn't hold, and the `show_document`
 //! handler (files.rs) converts against the target file once it loads.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 use std::rc::Rc;
@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use futures::{FutureExt as _, future::Shared};
 use gpui::{App, Task, WeakEntity, Window};
 use gpui_component::input::EditorState;
 use lsp_types::{
@@ -48,6 +49,8 @@ use vitre_contracts::{
 use vitre_state::lsp_gating;
 
 use super::positions::{WirePosition, offset_to_wire, wire_range_to_offsets};
+
+mod semantic;
 
 /// Electron's `DOC_SYNC_DEBOUNCE_MS` (lspBridge.ts): keystrokes coalesce for
 /// 200ms before a full-text didChange goes out.
@@ -112,6 +115,11 @@ pub struct LspBridge {
     /// first `lsp.serverStatus` lands — the static built-in list gates until
     /// then (useLspBridge.ts cold-load behavior).
     supported: RefCell<Option<Vec<String>>>,
+    requested_path: RefCell<Option<String>>,
+    epoch: Rc<Cell<u64>>,
+    /// Serialize open/change/close, including changes still in flight when a
+    /// position request sees an already queued fingerprint.
+    sync: RefCell<Shared<Task<bool>>>,
 }
 
 impl LspBridge {
@@ -126,6 +134,9 @@ impl LspBridge {
             editor,
             doc: RefCell::new(None),
             supported: RefCell::new(None),
+            requested_path: RefCell::new(None),
+            epoch: Rc::new(Cell::new(0)),
+            sync: RefCell::new(Task::ready(true).shared()),
         })
     }
 
@@ -138,7 +149,7 @@ impl LspBridge {
             cwd: tnes(&self.cwd),
         };
         let bridge = self.clone();
-        cx.spawn(async move |_| {
+        cx.spawn(async move |cx| {
             let Ok(result) = client.call::<LspServerStatus>(&payload).await else {
                 return;
             };
@@ -146,6 +157,16 @@ impl LspBridge {
             // fallback only covers the not-yet-loaded window.
             let extensions = result.supported_extensions.flatten().unwrap_or_default();
             *bridge.supported.borrow_mut() = Some(extensions);
+            let pending = bridge.requested_path.borrow().clone();
+            if bridge.current_document().is_none()
+                && let Some(path) = pending.filter(|path| bridge.is_supported(path))
+                && let Some(editor) = bridge.editor.upgrade()
+            {
+                cx.update(|cx| {
+                    let contents = editor.read(cx).text().to_string();
+                    bridge.open_document(&path, contents, cx);
+                });
+            }
         })
         .detach();
     }
@@ -167,6 +188,7 @@ impl LspBridge {
     /// extension is supported. Returns whether LSP attached.
     pub fn open_document(self: &Rc<Self>, relative_path: &str, contents: String, cx: &mut App) {
         self.close_document(cx);
+        *self.requested_path.borrow_mut() = Some(relative_path.to_string());
         if !self.is_supported(relative_path) {
             return;
         }
@@ -182,13 +204,18 @@ impl LspBridge {
             cwd: tnes(&self.cwd),
             relative_path: tnes(relative_path),
         };
-        cx.spawn(async move |_| {
-            let _ = client.call::<LspDidOpen>(&payload).await;
-        })
-        .detach();
+        let previous = self.sync.borrow().clone();
+        *self.sync.borrow_mut() = cx
+            .spawn(async move |_| {
+                previous.await;
+                client.call::<LspDidOpen>(&payload).await.is_ok()
+            })
+            .shared();
     }
 
     pub fn close_document(&self, cx: &mut App) {
+        self.epoch.set(self.epoch.get().wrapping_add(1));
+        self.requested_path.borrow_mut().take();
         let Some(doc) = self.doc.borrow_mut().take() else {
             return;
         };
@@ -197,10 +224,13 @@ impl LspBridge {
             cwd: tnes(&self.cwd),
             relative_path: tnes(doc.relative_path),
         };
-        cx.spawn(async move |_| {
-            let _ = client.call::<LspDidClose>(&payload).await;
-        })
-        .detach();
+        let previous = self.sync.borrow().clone();
+        *self.sync.borrow_mut() = cx
+            .spawn(async move |_| {
+                previous.await;
+                client.call::<LspDidClose>(&payload).await.is_ok()
+            })
+            .shared();
     }
 
     /// A user edit landed in the editor: coalesce for 200ms, then send the
@@ -215,13 +245,14 @@ impl LspBridge {
             doc.debounce
         };
         let bridge = self.clone();
+        let epoch = self.epoch.get();
         cx.spawn(async move |cx| {
             cx.background_executor().timer(DOC_SYNC_DEBOUNCE).await;
             let latest = bridge
                 .doc
                 .borrow()
                 .as_ref()
-                .is_some_and(|doc| doc.debounce == generation);
+                .is_some_and(|doc| doc.debounce == generation && bridge.epoch.get() == epoch);
             if latest {
                 cx.update(|cx| bridge.flush_from_editor(cx).detach());
             }
@@ -231,34 +262,48 @@ impl LspBridge {
 
     /// Send a didChange now if `text` has drifted from the server's copy.
     /// Position requests await the returned task so the server never answers
-    /// against stale text (Electron's `sync.flush()`); the mouse-hover path
-    /// deliberately skips it, matching `lspHoverExtension`.
+    /// against stale text, including mouse hover.
     ///
     /// The buffer is passed in rather than read back from the editor entity:
     /// the provider callbacks that flush run *inside* an editor update, where
     /// reading the entity again panics.
     fn flush(&self, text: &Rope, cx: &mut App) -> Task<()> {
-        let payload = {
+        let previous = self.sync.borrow().clone();
+        let (payload, changed) = {
             let mut doc = self.doc.borrow_mut();
             let Some(doc) = doc.as_mut() else {
                 return Task::ready(());
             };
             let fingerprint = TextFingerprint::of_rope(text);
-            if fingerprint == doc.synced {
+            let changed = fingerprint != doc.synced;
+            if !changed && previous.peek() == Some(&true) {
                 return Task::ready(());
             }
             doc.synced = fingerprint;
             doc.version += 1;
-            LspDidChangeInput {
-                contents: tnes(text.to_string()),
-                cwd: tnes(&self.cwd),
-                relative_path: tnes(&doc.relative_path),
-                version: NonNegativeInt(doc.version),
-            }
+            (
+                LspDidChangeInput {
+                    contents: tnes(text.to_string()),
+                    cwd: tnes(&self.cwd),
+                    relative_path: tnes(&doc.relative_path),
+                    version: NonNegativeInt(doc.version),
+                },
+                changed,
+            )
         };
         let client = self.client.clone();
+        let task = cx
+            .spawn(async move |_| {
+                let synced = previous.await;
+                if !changed && synced {
+                    return true;
+                }
+                client.call::<LspDidChange>(&payload).await.is_ok()
+            })
+            .shared();
+        *self.sync.borrow_mut() = task.clone();
         cx.spawn(async move |_| {
-            let _ = client.call::<LspDidChange>(&payload).await;
+            task.await;
         })
     }
 
@@ -278,7 +323,11 @@ impl LspBridge {
         self.flush(&text, cx)
     }
 
-    fn position_payload(&self, relative_path: &str, position: WirePosition) -> LspPositionInput {
+    pub fn position_payload(
+        &self,
+        relative_path: &str,
+        position: WirePosition,
+    ) -> LspPositionInput {
         LspPositionInput {
             cwd: tnes(&self.cwd),
             position: WireLspPosition {
@@ -311,7 +360,7 @@ impl gpui_component::input::CompletionProvider for LspBridge {
         let line_start =
             text.line_to_byte_idx(text.byte_to_line_idx(offset, LineType::LF), LineType::LF);
         let line_before = text.slice(line_start..offset).to_string();
-        let Some(anchor_in_line) = lsp_gating::completion_anchor(&line_before, explicit) else {
+        let Some(anchor_in_line) = completion_anchor(&line_before, explicit) else {
             return empty();
         };
         let anchor = editor_position(text, line_start + anchor_in_line);
@@ -321,27 +370,22 @@ impl gpui_component::input::CompletionProvider for LspBridge {
         let snapshot = text.clone();
         let client = self.client.clone();
         let flush = self.flush(text, cx);
+        let epoch = self.epoch.clone();
+        let generation = epoch.get();
         cx.spawn(async move |_| {
             flush.await;
             let result = client
                 .call::<LspCompletion>(&payload)
                 .await
                 .map_err(|error| anyhow!("lsp.completion failed: {error}"))?;
+            if epoch.get() != generation {
+                return Ok(CompletionResponse::Array(vec![]));
+            }
             // The server answers a member position with every member; the
             // typed prefix narrows it here because gpui-component's menu
             // renders the provider's list verbatim (completion_menu.rs), while
             // CodeMirror filtered it for the Electron bridge.
-            let mut ranked: Vec<(u8, CompletionItem)> = result
-                .items
-                .into_iter()
-                .filter_map(|item| {
-                    let rank = query_rank(&item.label.0, &query)?;
-                    Some((rank, completion_item(item, &snapshot, anchor, cursor)))
-                })
-                .collect();
-            // Stable, so the server's `sortText` order survives within a rank.
-            ranked.sort_by_key(|(rank, _)| *rank);
-            let items = ranked.into_iter().map(|(_, item)| item).collect();
+            let items = ranked_completions(result.items, &snapshot, anchor, cursor, &query);
             // `isIncomplete` is ignored, as in the Electron bridge — the menu
             // re-queries on every keystroke anyway.
             Ok(CompletionResponse::Array(items))
@@ -367,11 +411,16 @@ impl gpui_component::input::CompletionProvider for LspBridge {
         };
         let client = self.client.clone();
         let editor = self.editor.clone();
+        let epoch = self.epoch.clone();
+        let generation = epoch.get();
         cx.spawn(async move |cx| {
             let resolved = client
                 .call::<LspResolveCompletion>(&payload)
                 .await
                 .map_err(|error| anyhow!("lsp.resolveCompletion failed: {error}"))?;
+            if epoch.get() != generation {
+                return Err(anyhow!("Document changed during completion"));
+            }
             // Auto-import ranges convert against the buffer as it stands now;
             // they never overlap the completion range (Electron makes the
             // same assumption).
@@ -408,10 +457,7 @@ impl gpui_component::input::CompletionProvider for LspBridge {
         // Cheap per-keystroke gate; `completions` re-checks with full line
         // context. Word chars keep an open query alive, trigger chars start
         // member access (lspBridge.ts COMPLETION_TRIGGER_CHARS).
-        new_text.chars().last().is_some_and(|last| {
-            last.is_ascii_alphanumeric()
-                || matches!(last, '_' | '$' | '.' | '"' | '\'' | '/' | '@' | '<')
-        })
+        completion_anchor(new_text, false).is_some()
     }
 }
 
@@ -429,11 +475,18 @@ impl gpui_component::input::HoverProvider for LspBridge {
         let payload = self.position_payload(&relative_path, offset_to_wire(text, offset));
         let snapshot = text.clone();
         let client = self.client.clone();
+        let flush = self.flush(text, cx);
+        let epoch = self.epoch.clone();
+        let generation = epoch.get();
         cx.spawn(async move |_| {
+            flush.await;
             let result = client
                 .call::<LspHover>(&payload)
                 .await
                 .map_err(|error| anyhow!("lsp.hover failed: {error}"))?;
+            if epoch.get() != generation {
+                return Ok(None);
+            }
             Ok(result.map(|inline| Hover {
                 contents: HoverContents::Markup(MarkupContent {
                     kind: MarkupKind::Markdown,
@@ -464,12 +517,17 @@ impl gpui_component::input::DefinitionProvider for LspBridge {
         let cwd = self.cwd.clone();
         let client = self.client.clone();
         let flush = self.flush(text, cx);
+        let epoch = self.epoch.clone();
+        let generation = epoch.get();
         cx.spawn(async move |_| {
             flush.await;
             let result = client
                 .call::<LspDefinition>(&payload)
                 .await
                 .map_err(|error| anyhow!("lsp.definition failed: {error}"))?;
+            if epoch.get() != generation {
+                return Ok(vec![]);
+            }
             let links = result
                 .locations
                 .into_iter()
@@ -576,8 +634,8 @@ fn markdown(value: String) -> Documentation {
 /// Electron leans on CodeMirror's own `FuzzyMatcher` here (`lspCompletionSource`
 /// returns the anchor as `from` and leaves the default filter on), which is
 /// case-insensitive and subsequence-based, ranking prefix matches first. This
-/// is that shape in miniature — matching the *label*, as CodeMirror does, not
-/// the LSP `filterText`.
+/// is that shape in miniature. Callers use LSP `filterText` where supplied,
+/// so decorated labels and auto-import suggestions remain discoverable.
 fn query_rank(label: &str, query: &str) -> Option<u8> {
     if query.is_empty() {
         return Some(0);
@@ -595,6 +653,44 @@ fn query_rank(label: &str, query: &str) -> Option<u8> {
         .chars()
         .all(|needle| rest.any(|candidate| candidate == needle))
         .then_some(2)
+}
+
+fn completion_anchor(line: &str, explicit: bool) -> Option<usize> {
+    static WORD: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    WORD.get_or_init(|| regex::Regex::new(r"[\p{XID_Continue}$]+$").unwrap())
+        .find(line)
+        .map(|word| word.start())
+        .or_else(|| lsp_gating::completion_anchor(line, explicit))
+}
+
+fn ranked_completions(
+    items: Vec<WireCompletionItem>,
+    text: &Rope,
+    anchor: lsp_types::Position,
+    cursor: lsp_types::Position,
+    query: &str,
+) -> Vec<CompletionItem> {
+    let mut ranked: Vec<_> = items
+        .into_iter()
+        .filter_map(|item| {
+            let filter = item
+                .filter_text
+                .as_ref()
+                .and_then(|v| v.as_ref())
+                .map_or(item.label.0.as_str(), |v| v.0.as_str());
+            let rank = query_rank(filter, query)?;
+            Some((rank, completion_item(item, text, anchor, cursor)))
+        })
+        .collect();
+    ranked.sort_by(|(a_rank, a), (b_rank, b)| {
+        a_rank.cmp(b_rank).then_with(|| {
+            a.sort_text
+                .as_ref()
+                .unwrap_or(&a.label)
+                .cmp(b.sort_text.as_ref().unwrap_or(&b.label))
+        })
+    });
+    ranked.into_iter().map(|(_, item)| item).collect()
 }
 
 /// Wire completion item → `lsp_types`. When the server names no range, the
@@ -797,6 +893,36 @@ mod tests {
         let range = editor_range(&text, &wire_range(0, 4, 0, 8));
         assert_eq!(range.start, lsp_types::Position::new(0, 4));
         assert_eq!(range.end, lsp_types::Position::new(0, 6));
+    }
+
+    #[test]
+    fn completion_honors_filter_text_sort_text_and_unicode_identifiers() {
+        assert_eq!(completion_anchor("obj.café", false), Some(4));
+        assert_eq!(completion_anchor("obj.cafe\u{301}", false), Some(4));
+        assert_eq!(completion_anchor("obj.世界", false), Some(4));
+        assert_eq!(completion_anchor("obj.", false), Some(4));
+        let items = [
+            serde_json::json!({"label":"First display", "filterText":"Button", "sortText":"02"}),
+            serde_json::json!({"label":"Second display", "filterText":"Button", "sortText":"01"}),
+            serde_json::json!({"label":"Button", "filterText":"unrelated", "sortText":"00"}),
+        ]
+        .into_iter()
+        .map(|value| serde_json::from_value(value).unwrap())
+        .collect();
+        let items = ranked_completions(
+            items,
+            &Rope::from("But"),
+            lsp_types::Position::new(0, 0),
+            lsp_types::Position::new(0, 3),
+            "But",
+        );
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Second display", "First display"]
+        );
     }
 
     #[test]
