@@ -10,6 +10,7 @@
 //! the supervisor to publish the next session, then re-issues the
 //! subscription with the projection's `afterSequence` resume cursor.
 
+mod requests;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -64,6 +65,7 @@ pub struct ThreadState {
 const RESUBSCRIBE_AFTER_COMPLETION: Duration = Duration::from_secs(2);
 
 pub struct EnvironmentClient {
+    requests: Arc<requests::Requests>,
     supervisor: Arc<EnvironmentSupervisor>,
     shell_rx: watch::Receiver<ShellState>,
     /// Sync tasks spawn through this handle so [`Self::open_thread`] works
@@ -128,6 +130,7 @@ impl EnvironmentClient {
         let shell = runtime.spawn(run_shell(supervisor.sessions(), shell_tx));
 
         Self {
+            requests: Arc::new(requests::Requests::default()),
             supervisor,
             shell_rx,
             runtime,
@@ -159,14 +162,7 @@ impl EnvironmentClient {
         &self,
         command: &ClientOrchestrationCommand,
     ) -> Result<DispatchResult, TypedError<OrchestrationDispatchCommandErrorX>> {
-        let handle = self.supervisor.sessions().borrow().clone();
-        let Some(handle) = handle else {
-            return Err(TypedError::Rpc(RpcError::ConnectionClosed));
-        };
-        handle
-            .session
-            .call_typed::<OrchestrationDispatchCommand>(command)
-            .await
+        self.call::<OrchestrationDispatchCommand>(command).await
     }
 
     /// Call any typed (non-stream) RPC method on the current session.
@@ -174,11 +170,17 @@ impl EnvironmentClient {
         &self,
         payload: &M::Payload,
     ) -> Result<M::Success, TypedError<M::Error>> {
+        let _request = self.requests.start(M::TAG);
         let handle = self.supervisor.sessions().borrow().clone();
         let Some(handle) = handle else {
             return Err(TypedError::Rpc(RpcError::ConnectionClosed));
         };
         handle.session.call_typed::<M>(payload).await
+    }
+
+    /// Method names only; never exposes command payloads, prompts or tokens.
+    pub fn slow_requests(&self, threshold: Duration) -> Vec<String> {
+        self.requests.slow(threshold)
     }
 
     /// Open a typed stream on the current session. The subscription ends when

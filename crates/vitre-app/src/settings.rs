@@ -8,10 +8,9 @@
 //! view *instead of* the sidebar/chat/dock split — so no chat state is torn
 //! down while you are in here.
 //!
-//! The rows themselves come from gpui-component's `setting` framework
-//! (`Settings > SettingPage > SettingGroup > SettingItem > SettingField`),
-//! which supplies the nav, the search box, the row chrome and the per-page
-//! reset button. Its fields take plain `Fn(&App) -> T` / `Fn(T, &mut App)`
+//! Typed rows come from gpui-component's `setting` framework; `layout` owns
+//! the application navigation, search, spacing and reset affordances.
+//! The fields take plain `Fn(&App) -> T` / `Fn(T, &mut App)`
 //! closures, which is why the client half of the settings lives in a global
 //! ([`ClientSettings`]) and the server half is reached through a weak handle
 //! to this view.
@@ -29,6 +28,13 @@
 //!   as Electron does it — *not* applied optimistically: the switch moves when
 //!   the server's new settings come back.
 
+mod forms;
+mod graph;
+mod keybindings;
+mod layout;
+mod operations;
+mod providers;
+
 use std::sync::Arc;
 
 use gpui::{
@@ -38,19 +44,20 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::setting::{
     NumberFieldOptions, RenderOptions, SettingField, SettingGroup, SettingItem, SettingPage,
-    Settings,
 };
 use gpui_component::{
     ActiveTheme as _, IconName, Sizable as _, StyledExt as _, Theme, ThemeMode, h_flex, v_flex,
 };
 use vitre_client::EnvironmentClient;
 use vitre_contracts::generated::{
-    AutoCompactThresholdTokens2, ServerSettings, ServerSettingsPatch, ServerUpdateSettingsPayload,
-    methods::{ServerGetSettings, ServerUpdateSettings},
+    AutoCompactThresholdTokens2, KeybindingShortcut, KeybindingWhenNode, ServerConfig,
+    ServerSettings, ServerSettingsPatch, ServerUpdateSettingsPayload,
+    methods::{ServerGetConfig, ServerGetSettings, ServerUpdateSettings},
 };
 
 use crate::client_settings::{
-    ClientSettings, MAX_AUTO_SAVE_DELAY_MS, MIN_AUTO_SAVE_DELAY_MS, ThemeSetting,
+    ClientSettings, DEFAULT_GLASS_OPACITY, MAX_AUTO_SAVE_DELAY_MS, MAX_GLASS_OPACITY,
+    MIN_AUTO_SAVE_DELAY_MS, MIN_GLASS_OPACITY, ThemeSetting,
 };
 
 actions!(
@@ -85,30 +92,121 @@ enum ServerState {
     Failed(SharedString),
 }
 
+fn loading_page(title: &'static str, message: &'static str) -> SettingPage {
+    SettingPage::new(title)
+        .icon(IconName::Info)
+        .resettable(false)
+        .group(
+            SettingGroup::new().item(SettingItem::render(move |_: &RenderOptions, _, cx| {
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(message)
+                    .into_any_element()
+            })),
+        )
+}
+
+fn enum_wire_name(value: &impl serde::Serialize) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn format_shortcut(shortcut: &KeybindingShortcut) -> String {
+    let mut parts = Vec::new();
+    if shortcut.mod_key {
+        parts.push(if cfg!(target_os = "macos") {
+            "⌘"
+        } else {
+            "Ctrl"
+        });
+    }
+    if shortcut.meta_key && !(shortcut.mod_key && cfg!(target_os = "macos")) {
+        parts.push("⌘");
+    }
+    if shortcut.ctrl_key && (!shortcut.mod_key || cfg!(target_os = "macos")) {
+        parts.push("Ctrl");
+    }
+    if shortcut.alt_key {
+        parts.push(if cfg!(target_os = "macos") {
+            "⌥"
+        } else {
+            "Alt"
+        });
+    }
+    if shortcut.shift_key {
+        parts.push(if cfg!(target_os = "macos") {
+            "⇧"
+        } else {
+            "Shift"
+        });
+    }
+    parts.push(shortcut.key.0.as_str());
+    parts.join(if cfg!(target_os = "macos") { "" } else { "+" })
+}
+
+fn format_when(node: &KeybindingWhenNode) -> String {
+    match node {
+        KeybindingWhenNode::Identifier { name } => name.clone(),
+        KeybindingWhenNode::Not { node } => format!("!{}", format_when(node)),
+        KeybindingWhenNode::And { left, right } => {
+            format!("({} && {})", format_when(left), format_when(right))
+        }
+        KeybindingWhenNode::Or { left, right } => {
+            format!("({} || {})", format_when(left), format_when(right))
+        }
+        KeybindingWhenNode::Unknown(_) => "unknown".into(),
+    }
+}
+
 pub struct SettingsPanel {
+    layout: layout::SettingsLayout,
+    providers: providers::ProviderUi,
+    graph: graph::GraphSettingsUi,
     client: Option<Arc<EnvironmentClient>>,
+    cwd: Option<String>,
     server: ServerState,
+    /// The broader server snapshot backs provider/keybinding/language-server
+    /// pages. Settings writes still use their narrower RPC above.
+    config: Option<Box<ServerConfig>>,
     /// The last write that failed, shown above the rows it belongs to. A read
     /// failure replaces the rows instead (there is nothing to show).
     write_error: Option<SharedString>,
     /// The read loop, dropped with the surface.
     reader: Option<gpui::Task<()>>,
     focus_handle: gpui::FocusHandle,
+    keybinding_editor: Option<keybindings::KeybindingEditor>,
+    form: Option<forms::SettingsForm>,
+    operations: operations::Operations,
 }
 
 impl SettingsPanel {
-    pub fn new(client: Option<Arc<EnvironmentClient>>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        client: Option<Arc<EnvironmentClient>>,
+        cwd: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let connected = client.is_some();
         let mut panel = Self {
+            layout: Default::default(),
+            providers: Default::default(),
+            graph: Default::default(),
             client,
+            cwd,
             server: if connected {
                 ServerState::Loading
             } else {
                 ServerState::Failed("Not connected to an environment yet.".into())
             },
+            config: None,
             write_error: None,
             reader: None,
             focus_handle: cx.focus_handle(),
+            keybinding_editor: None,
+            form: None,
+            operations: Default::default(),
         };
         panel.load(cx);
         panel
@@ -123,6 +221,7 @@ impl SettingsPanel {
         }
         self.client = Some(client);
         self.server = ServerState::Loading;
+        self.config = None;
         self.load(cx);
         cx.notify();
     }
@@ -140,24 +239,43 @@ impl SettingsPanel {
         self.reader = Some(cx.spawn(async move |this, cx| {
             let mut sessions = client.sessions();
             loop {
-                if sessions.borrow_and_update().is_some() {
+                let Some(handle)=sessions.borrow_and_update().clone()else{if sessions.changed().await.is_err(){return;}continue;};
+                {
                     let result = client
                         .call::<ServerGetSettings>(&serde_json::json!({}))
                         .await;
+                    let config = client.call::<ServerGetConfig>(&serde_json::json!({})).await;
                     let applied = this.update(cx, |panel, cx| {
                         panel.server = match result {
                             Ok(settings) => ServerState::Loaded(Box::new(settings)),
                             Err(error) => ServerState::Failed(error.user_message().into()),
                         };
+                        panel.config = config.ok().map(Box::new);
                         cx.notify();
                     });
                     if applied.is_err() {
                         return;
                     }
                 }
-                if sessions.changed().await.is_err() {
-                    return;
+                if let Ok(mut stream)=handle.session.subscribe_typed::<vitre_contracts::methods::SubscribeServerConfig>(&serde_json::json!({})){
+                    loop{
+                        let event=tokio::select!{changed=sessions.changed()=>{if changed.is_err(){return;}break;},event=stream.next()=>event};
+                        let Some(vitre_rpc::TypedStreamEvent::Values(events))=event else{break};
+                        for event in events{
+                            if this.update(cx,|p,cx|{
+                                use vitre_contracts::ServerConfigStreamEvent as Event;
+                                match event{
+                                    Event::ServerConfigStreamSnapshotEvent(event)=>{p.server=ServerState::Loaded(Box::new(event.config.settings.clone()));p.config=Some(Box::new(event.config));},
+                                    Event::ServerConfigStreamSettingsUpdatedEvent(event)=>p.server=ServerState::Loaded(Box::new(event.payload.settings)),
+                                    Event::ServerConfigStreamKeybindingsUpdatedEvent(event)=>{if let Some(config)=p.config.as_mut(){config.keybindings=event.payload.keybindings;config.issues=event.payload.issues;}},
+                                    Event::ServerConfigStreamProviderStatusesEvent(event)=>{if let Some(config)=p.config.as_mut(){config.providers=event.payload.providers;}},_=>{}
+                                }cx.notify();
+                            }).is_err(){return;}
+                        }
+                        if stream.ack().is_err(){break;}
+                    }
                 }
+                cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
             }
         }));
     }
@@ -226,33 +344,96 @@ impl SettingsPanel {
     }
 
     fn appearance_group() -> SettingGroup {
-        SettingGroup::new().title("Appearance").item(
-            SettingItem::new(
-                "Theme",
-                SettingField::dropdown(
-                    ThemeSetting::ALL
-                        .into_iter()
-                        .map(|theme| (theme.as_str().into(), theme.label().into()))
-                        .collect(),
-                    |cx: &App| ClientSettings::theme(cx).as_str().into(),
-                    |value: SharedString, cx: &mut App| {
-                        let Some(theme) = ThemeSetting::from_str(value.as_ref()) else {
-                            return;
-                        };
-                        ClientSettings::update(cx, |settings| settings.theme = theme);
-                        apply_theme(theme, None, cx);
-                    },
+        SettingGroup::new()
+            .title("Appearance")
+            .item(
+                SettingItem::new(
+                    "Theme",
+                    SettingField::dropdown(
+                        ThemeSetting::ALL
+                            .into_iter()
+                            .map(|theme| (theme.as_str().into(), theme.label().into()))
+                            .collect(),
+                        |cx: &App| ClientSettings::theme(cx).as_str().into(),
+                        |value: SharedString, cx: &mut App| {
+                            let Some(theme) = ThemeSetting::from_str(value.as_ref()) else {
+                                return;
+                            };
+                            ClientSettings::update(cx, |settings| settings.theme = theme);
+                            apply_theme(theme, None, cx);
+                        },
+                    )
+                    .default_value(ThemeSetting::System.as_str()),
                 )
-                .default_value(ThemeSetting::System.as_str()),
+                .description("Match the system appearance, or pin Vitre to light or dark.")
+                .keywords(["appearance", "dark", "light"]),
             )
-            .description("Match the system appearance, or pin Vitre to light or dark.")
-            .keywords(["appearance", "dark", "light"]),
-        )
+            .item(
+                SettingItem::new(
+                    "Glass opacity",
+                    SettingField::number_input(
+                        NumberFieldOptions {
+                            min: MIN_GLASS_OPACITY.into(),
+                            max: MAX_GLASS_OPACITY.into(),
+                            step: 5.,
+                        },
+                        |cx: &App| ClientSettings::get(cx).glass_opacity.into(),
+                        |value: f64, cx: &mut App| {
+                            let opacity = value
+                                .round()
+                                .clamp(MIN_GLASS_OPACITY.into(), MAX_GLASS_OPACITY.into())
+                                as u32;
+                            ClientSettings::update(cx, |settings| settings.glass_opacity = opacity);
+                        },
+                    )
+                    .default_value(DEFAULT_GLASS_OPACITY as f64)
+                    .w(px(150.)),
+                )
+                .description("Tint over the native background blur, from 40% to fully opaque.")
+                .keywords(["glass", "blur", "opacity", "transparency"]),
+            )
     }
 
     fn editor_group() -> SettingGroup {
         SettingGroup::new()
             .title("Editor")
+            .item(SettingItem::new(
+                "Font size",
+                SettingField::number_input(
+                    NumberFieldOptions {
+                        min: 10.,
+                        max: 32.,
+                        step: 1.,
+                    },
+                    |cx: &App| ClientSettings::get(cx).editor_font_size as f64,
+                    |value, cx: &mut App| {
+                        ClientSettings::update(cx, |s| s.editor_font_size = value.round() as u32)
+                    },
+                )
+                .default_value(14.)
+                .w(px(150.)),
+            ))
+            .item(SettingItem::new(
+                "Auto save mode",
+                SettingField::dropdown(
+                    vec![
+                        ("afterDelay".into(), "After delay".into()),
+                        ("onFocusChange".into(), "On focus change".into()),
+                    ],
+                    |cx: &App| {
+                        if ClientSettings::get(cx).auto_save_on_focus_change {
+                            "onFocusChange".into()
+                        } else {
+                            "afterDelay".into()
+                        }
+                    },
+                    |value: SharedString, cx: &mut App| {
+                        ClientSettings::update(cx, |s| {
+                            s.auto_save_on_focus_change = value == "onFocusChange"
+                        })
+                    },
+                ),
+            ))
             .item(
                 SettingItem::new(
                     "Vim mode",
@@ -522,36 +703,191 @@ impl SettingsPanel {
             )
     }
 
+    fn keybindings_page(&self, cx: &Context<Self>) -> SettingPage {
+        let Some(config) = self.config.as_ref() else {
+            return loading_page("Keybindings", "Loading the resolved server keymap…");
+        };
+        let path = config.keybindings_config_path.0.clone();
+        let mut group = SettingGroup::new().title("Active keybindings");
+        let owner = cx.entity().downgrade();
+        group = group.item(SettingItem::render(move |_: &RenderOptions, _, _| {
+            let owner = owner.clone();
+            Button::new("add-keybinding")
+                .label("Add shortcut")
+                .on_click(move |_, window, cx| {
+                    let _ = owner.update(cx, |panel, cx| panel.edit_keybinding(None, window, cx));
+                })
+                .into_any_element()
+        }));
+        group = group.item(SettingItem::render(move |_: &RenderOptions, _, cx| {
+            v_flex()
+                .gap_0p5()
+                .child(div().text_sm().child("Live server keymap"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(SharedString::from(path.clone())),
+                )
+                .into_any_element()
+        }));
+        for rule in &config.keybindings {
+            let rule = rule.clone();
+            let owner = cx.entity().downgrade();
+            let command = enum_wire_name(&rule.command);
+            let shortcut = format_shortcut(&rule.shortcut);
+            let when = rule
+                .when_ast
+                .as_ref()
+                .and_then(|node| node.as_ref())
+                .map(format_when);
+            group = group.item(SettingItem::render(move |_: &RenderOptions, _, cx| {
+                let owner = owner.clone();
+                let rule = rule.clone();
+                h_flex()
+                    .w_full()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_sm().child(SharedString::from(command.clone())))
+                            .children(when.clone().map(|when| {
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(SharedString::from(format!("when {when}")))
+                            })),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .rounded(px(5.))
+                            .bg(cx.theme().muted)
+                            .font_family("monospace")
+                            .text_xs()
+                            .child(SharedString::from(shortcut.clone())),
+                    )
+                    .child(
+                        Button::new("edit-keybinding")
+                            .label("Edit")
+                            .ghost()
+                            .small()
+                            .on_click(move |_, window, cx| {
+                                let _ = owner.update(cx, |panel, cx| {
+                                    panel.edit_keybinding(Some(rule.clone()), window, cx)
+                                });
+                            }),
+                    )
+                    .into_any_element()
+            }));
+        }
+        SettingPage::new("Keybindings")
+            .icon(IconName::Settings)
+            .resettable(false)
+            .description("Resolved live shortcuts. Changes from keybindings.json apply without restarting Vitre.")
+            .group(group)
+    }
+
+    fn language_servers_page(&self, cx: &Context<Self>) -> SettingPage {
+        let mut group = SettingGroup::new().title("Custom language servers");
+        let owner = cx.entity().downgrade();
+        let status = self.operations.lsp_status.clone().unwrap_or_else(|| {
+            "Choose Refresh status to inspect servers for the active workspace.".into()
+        });
+        group = group.item(SettingItem::render(move |_: &RenderOptions, _, _| {
+            let owner = owner.clone();
+            v_flex()
+                .gap_2()
+                .child(div().text_sm().child(status.clone()))
+                .child(
+                    Button::new("refresh-lsp-status")
+                        .label("Refresh status")
+                        .on_click(move |_, _, cx| {
+                            let _ = owner.update(cx, |p, cx| p.refresh_lsp_status(cx));
+                        }),
+                )
+                .into_any_element()
+        }));
+        group = group.item(self.form_button(
+            "Add language server",
+            forms::FormKind::LanguageServer(String::new()),
+            cx,
+        ));
+        let servers = self
+            .server_settings()
+            .and_then(|settings| settings.language_servers.as_ref())
+            .and_then(|servers| servers.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        if servers.is_empty() {
+            group = group.item(SettingItem::render(|_: &RenderOptions, _, cx| {
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("No custom language servers configured.")
+                    .into_any_element()
+            }));
+        }
+        for server in servers {
+            group = group.item(self.form_button(
+                &format!("Edit {}", server.server_id),
+                forms::FormKind::LanguageServer(server.server_id.clone()),
+                cx,
+            ));
+            let title = if server.display_name.is_empty() {
+                server.server_id
+            } else {
+                server.display_name
+            };
+            let detail = format!("{} · {}", server.language_id, server.command);
+            group = group.item(SettingItem::render(move |_: &RenderOptions, _, cx| {
+                v_flex()
+                    .gap_0p5()
+                    .child(div().text_sm().child(SharedString::from(title.clone())))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(SharedString::from(detail.clone())),
+                    )
+                    .into_any_element()
+            }));
+        }
+        SettingPage::new("Language servers")
+            .icon(IconName::SquareTerminal)
+            .resettable(false)
+            .description("Language servers configured on the connected sidecar.")
+            .group(group)
+    }
+
+    fn form_button(&self, label: &str, kind: forms::FormKind, cx: &Context<Self>) -> SettingItem {
+        let owner = cx.entity().downgrade();
+        let label = SharedString::from(label.to_string());
+        SettingItem::render(move |_: &RenderOptions, _, _| {
+            let owner = owner.clone();
+            let kind = kind.clone();
+            Button::new(label.clone())
+                .label(label.clone())
+                .on_click(move |_, window, cx| {
+                    let _ = owner.update(cx, |panel, cx| panel.open_form(kind.clone(), window, cx));
+                })
+                .into_any_element()
+        })
+    }
+
     /// The sections Electron has and Vitre does not, named rather than
     /// silently missing — every one is a row in `docs/vitre-parity.md`.
     fn absent_page() -> SettingPage {
         let pending = [
             (
-                "Providers",
-                "Provider instances, the add-provider wizard, custom models and accent colours.",
-            ),
-            (
-                "Keybindings",
-                "The chord recorder and when-expression editor. Vitre's chords are still fixed.",
-            ),
-            (
-                "Language servers",
-                "Per-language server status and configuration.",
-            ),
-            ("Source control", "Repository discovery, clone and publish."),
-            (
                 "Connections",
                 "Network exposure, pairing links and authorized clients — waits on remote environments.",
             ),
-            ("Knowledge graph", "Graph indexing and rebuild controls."),
             (
-                "Diagnostics",
-                "Process metrics, resource history and traces.",
-            ),
-            ("Beta", "Feature flags."),
-            (
-                "Archived threads",
-                "Browse, restore and delete archived threads.",
+                "Native app updates",
+                "Requires M6 native packaging, signing and a Rust-app release feed. Electron updates cannot update this binary.",
             ),
         ];
         SettingPage::new("Not yet in Vitre")
@@ -581,17 +917,60 @@ impl SettingsPanel {
 
     fn pages(&self, cx: &Context<Self>) -> Vec<SettingPage> {
         let weak = cx.entity().downgrade();
+        let mut models = vec![(
+            SharedString::from(""),
+            SharedString::from("Provider default"),
+        )];
+        let mut editors = vec![(
+            SharedString::from(""),
+            SharedString::from("First installed editor"),
+        )];
+        if let Some(config) = &self.config {
+            for editor in &config.available_editors {
+                let id = enum_wire_name(editor);
+                editors.push((id.clone().into(), id.into()));
+            }
+            for provider in &config.providers {
+                for model in &provider.models {
+                    let value=serde_json::json!({"instanceId":provider.instance_id.0,"model":model.slug.0}).to_string();
+                    models.push((
+                        value.into(),
+                        format!("{} · {}", provider.instance_id.0, model.slug.0).into(),
+                    ));
+                }
+            }
+        }
         vec![
             SettingPage::new("General")
                 .icon(IconName::Settings)
                 .description("Preferences for this copy of Vitre, and for the sidecar it talks to.")
                 .group(Self::appearance_group())
                 .group(Self::editor_group())
+                .group(SettingGroup::new().title("External editor").item(SettingItem::new("Favorite editor",SettingField::dropdown(editors,|cx:&App|ClientSettings::get(cx).favorite_editor.map(|e|enum_wire_name(&e)).unwrap_or_default().into(),|value:SharedString,cx:&mut App|ClientSettings::update(cx,|s|s.favorite_editor=serde_json::from_value(serde_json::json!(value.as_ref())).ok())))))
                 .group(Self::threads_group())
+                .group(SettingGroup::new().title("Time display").item(SettingItem::new("Timestamp format",SettingField::dropdown(vec![("locale".into(),"Relative / local default".into()),("12-hour".into(),"12 hour".into()),("24-hour".into(),"24 hour".into())],|cx:&App|ClientSettings::get(cx).timestamp_format.into(),|value:SharedString,cx:&mut App|ClientSettings::update(cx,|s|s.timestamp_format=value.to_string())))))
+                .group(SettingGroup::new().title("New threads").item(SettingItem::new("Default model",SettingField::dropdown(models,|cx:&App|ClientSettings::get(cx).default_model.and_then(|v|serde_json::to_string(&v).ok()).unwrap_or_default().into(),|value:SharedString,cx:&mut App|ClientSettings::update(cx,|s|s.default_model=serde_json::from_str(&value).ok())))))
+                .group(SettingGroup::new().title("Conversation").item(SettingItem::new("Message timestamps",SettingField::switch(|cx:&App|ClientSettings::get(cx).show_message_timestamps,|value,cx:&mut App|ClientSettings::update(cx,|s|s.show_message_timestamps=value)))))
+                .group(SettingGroup::new().title("Browser automation").item(SettingItem::new("Allow agents to control the browser",SettingField::switch(
+                    |cx:&App|ClientSettings::get(cx).preview_automation_enabled,
+                    |value,cx:&mut App|ClientSettings::update(cx,|settings|settings.preview_automation_enabled=value),
+                )).description("Agents may navigate, inspect and interact with pages in Vitre's embedded browser. Turning this off disconnects the host.")))
                 .group(Self::assistant_group(
                     &weak,
                     self.server_settings().is_some(),
-                )),
+                ))
+                .group(self.about_group(cx)),
+            self.providers_page(cx),
+            self.keybindings_page(cx),
+            self.language_servers_page(cx),
+            self.graph_page(cx),
+            self.archives_page(cx),
+            self.diagnostics_page(cx),
+            self.source_control_page(cx),
+            SettingPage::new("Beta").resettable(false).group(SettingGroup::new()
+                .item(SettingItem::new("Sidebar v2",SettingField::switch(|cx:&App|ClientSettings::get(cx).sidebar_v2_enabled,|v,cx:&mut App|ClientSettings::update(cx,|s|s.sidebar_v2_enabled=v))).description("Creation-ordered thread cards. Settled conversations use compact rows. You can switch back at any time."))
+                .item(SettingItem::new("Auto-settle inactive threads",SettingField::switch(|cx:&App|ClientSettings::get(cx).sidebar_auto_settle_after_days.is_some(),|v,cx:&mut App|ClientSettings::update(cx,|s|s.sidebar_auto_settle_after_days=v.then_some(3)))).description("Only while Sidebar v2 is enabled. Running work, approvals, plans and manual overrides are left alone."))
+                .item(SettingItem::new("Inactivity days",SettingField::number_input(NumberFieldOptions{min:1.,max:90.,step:1.},|cx:&App|ClientSettings::get(cx).sidebar_auto_settle_after_days.unwrap_or(3) as f64,|v,cx:&mut App|ClientSettings::update(cx,|s|s.sidebar_auto_settle_after_days=Some(v.round() as u32))).w(px(150.))))),
             Self::absent_page(),
         ]
     }
@@ -659,42 +1038,15 @@ impl Focusable for SettingsPanel {
 }
 
 impl Render for SettingsPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .size_full()
             .track_focus(&self.focus_handle)
             .debug_selector(|| "settings-surface".into())
             .key_context("Settings")
             .on_action(cx.listener(|_, _: &SettingsClose, _, cx| cx.emit(SettingsClosed)))
-            .bg(cx.theme().background)
-            // Clear the hiddenInset traffic lights, as the workspace this
-            // replaces does.
-            .pt(px(44.))
-            .child(
-                h_flex()
-                    .h(px(40.))
-                    .flex_none()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        Button::new("settings-back")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::ArrowLeft)
-                            .label("Back")
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsClosed))),
-                    )
-                    .child(div().text_sm().font_semibold().child("Settings")),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(Settings::new("vitre-settings").pages(self.pages(cx))),
-            )
+            .bg(crate::glass::background(cx))
+            .child(self.render_layout(window, cx))
     }
 }
 
@@ -715,7 +1067,7 @@ mod tests {
     #[gpui::test]
     fn the_server_rows_stay_disabled_until_the_sidecar_answers(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
-        let (panel, cx) = cx.add_window_view(|_, cx| SettingsPanel::new(None, cx));
+        let (panel, cx) = cx.add_window_view(|_, cx| SettingsPanel::new(None, None, cx));
 
         let (ready, message) = cx.update(|_, cx| {
             let panel = panel.read(cx);
@@ -743,7 +1095,7 @@ mod tests {
                 Some("Settings"),
             )])
         });
-        let (panel, cx) = cx.add_window_view(|_, cx| SettingsPanel::new(None, cx));
+        let (panel, cx) = cx.add_window_view(|_, cx| SettingsPanel::new(None, None, cx));
 
         let closed = std::rc::Rc::new(std::cell::Cell::new(false));
         let flag = closed.clone();
@@ -767,7 +1119,7 @@ mod tests {
     #[gpui::test]
     fn every_row_survives_being_rendered(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
-        let (_panel, cx) = cx.add_window_view(|_, cx| SettingsPanel::new(None, cx));
+        let (_panel, cx) = cx.add_window_view(|_, cx| SettingsPanel::new(None, None, cx));
 
         cx.update(|window, cx| window.draw(cx).clear(cx));
 

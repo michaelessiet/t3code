@@ -32,6 +32,11 @@ const LEGACY_FILE_NAME: &str = "editor-state.json";
 /// so a hand-edited file cannot park the debounce at zero.
 pub const MIN_AUTO_SAVE_DELAY_MS: u32 = 100;
 pub const MAX_AUTO_SAVE_DELAY_MS: u32 = 10_000;
+/// Electron's desktop glass control uses the same percentage range and an
+/// 80% default. Keeping a floor avoids unreadable text over bright wallpaper.
+pub const MIN_GLASS_OPACITY: u32 = 40;
+pub const MAX_GLASS_OPACITY: u32 = 100;
+pub const DEFAULT_GLASS_OPACITY: u32 = 80;
 
 /// Which palette the window paints with.
 ///
@@ -83,13 +88,24 @@ impl ThemeSetting {
 /// The on-disk shape. Keys and defaults are Electron's
 /// (`ClientSettingsSchema`); a missing key takes the default, which is what
 /// `Schema.withDecodingDefault` does on that side.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct StoredSettings {
     pub theme: ThemeSetting,
+    pub ui_font_size: f32,
+    pub preview_automation_enabled: bool,
+    pub glass_opacity: u32,
     pub vim_mode: bool,
     pub word_wrap: bool,
     pub auto_save_enabled: bool,
+    pub auto_save_on_focus_change: bool,
+    pub show_message_timestamps: bool,
+    pub editor_font_size: u32,
+    pub default_model: Option<vitre_contracts::ModelSelection>,
+    pub favorite_editor: Option<vitre_contracts::EditorId>,
+    pub sidebar_v2_enabled: bool,
+    pub sidebar_auto_settle_after_days: Option<u32>,
+    pub timestamp_format: String,
     pub auto_save_delay_ms: u32,
     pub show_file_conflict_warning: bool,
     pub confirm_thread_delete: bool,
@@ -104,9 +120,20 @@ impl Default for StoredSettings {
     fn default() -> Self {
         Self {
             theme: ThemeSetting::System,
+            ui_font_size: 16.,
+            preview_automation_enabled: false,
+            glass_opacity: DEFAULT_GLASS_OPACITY,
             vim_mode: false,
             word_wrap: true,
             auto_save_enabled: true,
+            auto_save_on_focus_change: false,
+            show_message_timestamps: true,
+            editor_font_size: 14,
+            default_model: None,
+            favorite_editor: None,
+            sidebar_v2_enabled: false,
+            sidebar_auto_settle_after_days: None,
+            timestamp_format: "locale".into(),
             auto_save_delay_ms: 500,
             show_file_conflict_warning: true,
             confirm_thread_delete: true,
@@ -118,9 +145,23 @@ impl Default for StoredSettings {
 impl StoredSettings {
     /// Clamp anything a hand-edited file could put out of range.
     fn sanitized(mut self) -> Self {
+        self.sidebar_auto_settle_after_days =
+            self.sidebar_auto_settle_after_days.map(|d| d.clamp(1, 90));
+        if !["locale", "12-hour", "24-hour"].contains(&self.timestamp_format.as_str()) {
+            self.timestamp_format = "locale".into();
+        }
+        self.editor_font_size = self.editor_font_size.clamp(10, 32);
+        self.ui_font_size = if self.ui_font_size.is_finite() {
+            self.ui_font_size.clamp(12., 24.)
+        } else {
+            16.
+        };
         self.auto_save_delay_ms = self
             .auto_save_delay_ms
             .clamp(MIN_AUTO_SAVE_DELAY_MS, MAX_AUTO_SAVE_DELAY_MS);
+        self.glass_opacity = self
+            .glass_opacity
+            .clamp(MIN_GLASS_OPACITY, MAX_GLASS_OPACITY);
         self
     }
 }
@@ -172,11 +213,10 @@ impl ClientSettings {
         }
     }
 
-    /// Every value at once. `StoredSettings` is `Copy`, so callers that want
-    /// two fields do not pay for two global lookups.
+    /// A snapshot of the client-owned preferences.
     pub fn get(cx: &App) -> StoredSettings {
         cx.try_global::<ClientSettings>()
-            .map(|settings| settings.values)
+            .map(|settings| settings.values.clone())
             .unwrap_or_default()
     }
 
@@ -188,14 +228,14 @@ impl ClientSettings {
             return;
         };
         let path = settings.path.clone();
-        let mut values = settings.values;
+        let mut values = settings.values.clone();
         edit(&mut values);
         let values = values.sanitized();
         if values == settings.values {
             return;
         }
         cx.set_global(Self {
-            values,
+            values: values.clone(),
             path: path.clone(),
         });
         // Best-effort, like every other Vitre UI preference: a failed write is
@@ -246,8 +286,7 @@ impl ClientSettings {
     /// the only way a buffer reaches disk.
     pub fn auto_save_delay(cx: &App) -> Option<Duration> {
         let settings = Self::get(cx);
-        settings
-            .auto_save_enabled
+        (settings.auto_save_enabled && !settings.auto_save_on_focus_change)
             .then(|| Duration::from_millis(settings.auto_save_delay_ms.into()))
     }
 
@@ -262,11 +301,29 @@ impl ClientSettings {
     pub fn theme(cx: &App) -> ThemeSetting {
         Self::get(cx).theme
     }
+
+    /// The tint alpha layered over the platform blur, as a normalized value.
+    pub fn glass_opacity(cx: &App) -> f32 {
+        Self::get(cx).glass_opacity as f32 / 100.0
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn new_native_preferences_round_trip_and_automation_stays_opt_in() {
+        let defaults = StoredSettings::default();
+        assert!(!defaults.preview_automation_enabled);
+        assert!(!defaults.sidebar_v2_enabled);
+        assert!(defaults.sidebar_auto_settle_after_days.is_none());
+        let configured:StoredSettings=serde_json::from_value(serde_json::json!({"editorFontSize":20,"timestampFormat":"24-hour","autoSaveOnFocusChange":true,"previewAutomationEnabled":true,"sidebarV2Enabled":true,"sidebarAutoSettleAfterDays":7})).unwrap();
+        let decoded: StoredSettings =
+            serde_json::from_str(&serde_json::to_string(&configured).unwrap()).unwrap();
+        assert_eq!(decoded, configured);
+        assert!(decoded.auto_save_on_focus_change);
+        assert_eq!(decoded.timestamp_format, "24-hour");
+    }
 
     #[test]
     fn defaults_match_the_electron_contract() {
@@ -278,6 +335,7 @@ mod tests {
         assert!(defaults.show_file_conflict_warning);
         assert!(defaults.confirm_thread_delete);
         assert_eq!(defaults.theme, ThemeSetting::System);
+        assert_eq!(defaults.glass_opacity, DEFAULT_GLASS_OPACITY);
     }
 
     #[test]
@@ -286,6 +344,7 @@ mod tests {
         assert!(stored.vim_mode);
         assert!(stored.word_wrap, "the rest fall back to their defaults");
         assert_eq!(stored.auto_save_delay_ms, 500);
+        assert_eq!(stored.glass_opacity, DEFAULT_GLASS_OPACITY);
     }
 
     #[test]
@@ -295,6 +354,14 @@ mod tests {
         let slow: StoredSettings =
             serde_json::from_str(r#"{"autoSaveDelayMs": 900000}"#).expect("ok");
         assert_eq!(slow.sanitized().auto_save_delay_ms, MAX_AUTO_SAVE_DELAY_MS);
+    }
+
+    #[test]
+    fn glass_opacity_is_clamped_to_the_desktop_contract_bounds() {
+        let faint: StoredSettings = serde_json::from_str(r#"{"glassOpacity": 5}"#).expect("ok");
+        assert_eq!(faint.sanitized().glass_opacity, MIN_GLASS_OPACITY);
+        let solid: StoredSettings = serde_json::from_str(r#"{"glassOpacity": 500}"#).expect("ok");
+        assert_eq!(solid.sanitized().glass_opacity, MAX_GLASS_OPACITY);
     }
 
     #[test]

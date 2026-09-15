@@ -92,6 +92,14 @@ pub(crate) fn spawn_backend(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    // Put the backend and any descendants it launches in a dedicated process
+    // group. The supervisor can then terminate the whole tree on app exit.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+
     let mut child = command.spawn()?;
 
     let envelope = serde_json::json!({
