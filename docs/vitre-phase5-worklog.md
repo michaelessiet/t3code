@@ -14,8 +14,10 @@ changes were preserved and excluded from the phase commits.
 - [x] Screenshot-driven cleanup and regression of existing chat/model/search/editor surfaces
 - [x] Focused verification and handover/parity reconciliation (details below)
 
-Release signing/feed provisioning remains a separate M6 dependency for native
-self-updates and OS protocol registration.
+A local Apple Silicon DMG recipe and embedded-runtime self-test now exist.
+Developer ID signing, notarization and release-feed provisioning remain M6
+dependencies for public distribution, native self-updates and OS protocol
+registration.
 
 ## Verification
 

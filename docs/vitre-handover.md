@@ -91,16 +91,16 @@ backend; a Rust backend rewrite is not part of this migration.
 
 The roadmap's phase numbers and the master plan's milestone numbers differ:
 
-| Scope                          | Snapshot                                                                                                                                                                          |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Foundation and Phase 0 / M0–M2 | Foundation, core chat, files/editor and committed M2 polish landed. Later parity refinements remain below.                                                                        |
-| Phase 1 / chat-core catch-up   | Local core and native cleanup implemented: rich messages, composer commands, model/mode controls, plans, attachments, references and activity presentation.                       |
-| Phase 2 / M3                   | Dock, diff, terminal, source control, review contexts and project scripts implemented. Dock animation and definition-close regressions fixed September 15.                        |
-| Phase 3 / M4                   | Embedded macOS browser, device controls, automation host, picker, capture/recording and mini player implemented; some end-to-end and failure testing remains.                     |
-| Phase 4 / M5                   | Local settings and shell plumbing exist, but the settings parity audit is **reopened**: features and design do not yet fully match T3 Code. See the September 15 follow-up below. |
-| Local Phase 5 / M8 long tail   | Drafts, search/replace, attached folders, explorer enhancements, snooze and graph UI implemented; see acceptance limits below.                                                    |
-| Remote-environments track      | Deferred: multi-environment catalog, Connections settings, T3 Connect sign-in, hosted pairing, cloud relay, SSH and WSL.                                                          |
-| M6 release work                | Outstanding: signed native bundles, release/update feed, automatic updates and OS protocol registration.                                                                          |
+| Scope                          | Snapshot                                                                                                                                                                                                                     |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Foundation and Phase 0 / M0–M2 | Foundation, core chat, files/editor and committed M2 polish landed. Later parity refinements remain below.                                                                                                                   |
+| Phase 1 / chat-core catch-up   | Local core and native cleanup implemented: rich messages, composer commands, model/mode controls, plans, attachments, references and activity presentation.                                                                  |
+| Phase 2 / M3                   | Dock, diff, terminal, source control, review contexts and project scripts implemented. Dock animation and definition-close regressions fixed September 15.                                                                   |
+| Phase 3 / M4                   | Embedded macOS browser, device controls, automation host, picker, capture/recording and mini player implemented; some end-to-end and failure testing remains.                                                                |
+| Phase 4 / M5                   | Local settings and shell plumbing exist, but the settings parity audit is **reopened**: features and design do not yet fully match T3 Code. See the September 15 follow-up below.                                            |
+| Local Phase 5 / M8 long tail   | Drafts, search/replace, attached folders, explorer enhancements, snooze and graph UI implemented; see acceptance limits below.                                                                                               |
+| Remote-environments track      | Deferred: multi-environment catalog, Connections settings, T3 Connect sign-in, hosted pairing, cloud relay, SSH and WSL.                                                                                                     |
+| M6 release work                | A reproducible Apple Silicon `.app`/DMG recipe, embedded Node runtime and packaged sidecar/auth/RPC self-test are present. Developer ID signing, notarization, release/update feed and automatic updates remain outstanding. |
 
 ### Remaining work and acceptance limits
 
@@ -118,6 +118,11 @@ The roadmap's phase numbers and the master plan's milestone numbers differ:
 - **Platform coverage:** recent integrated verification is on macOS. Linux
   and Windows native behavior remains unverified; non-macOS preview capture
   is not implemented.
+- **Distribution:** `scripts/vitre/build-dmg.sh` produces a locally installable,
+  ad-hoc-signed Apple Silicon DMG and rejects a package whose embedded sidecar
+  cannot complete auth/RPC startup without shell `PATH`. It is not notarized;
+  public distribution still requires Developer ID credentials and the M6
+  release/update pipeline.
 - **Local parity refinements:** diff syntax coloring; terminal hover
   underlines and localhost-preview routing; branch-mismatch reconciliation;
   remaining provider/model metadata treatment and notification routing/actions.
@@ -294,6 +299,13 @@ server-tree Phase 5 graph/workspace suites passed 28 tests and the LSP suites
 passed 19. Running server tests from the repository root also discovers an old
 `.claude/worktrees/vitre-m0` copy; run focused server files from `apps/server`
 to avoid that unrelated duplicate-suite failure.
+
+The Apple Silicon packaging pass built and mounted `Vitre-0.0.28-arm64.dmg`,
+verified its APFS checksum and ad-hoc bundle seal, then reran the packaged
+self-test directly from the read-only image with Node absent from `PATH`. The
+embedded server completed all migrations, token exchange, WebSocket setup,
+`server.getConfig` and ping. This validates local installation mechanics, not
+Gatekeeper/notarization acceptance for public distribution.
 
 The earlier manual test launch (historically PID `19701`, sidecar `19813`) is
 gone; the current manual instance is recorded above. Use `./run-vitre.sh` for a

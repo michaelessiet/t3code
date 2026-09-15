@@ -19,7 +19,7 @@ mod sidebar_prefs;
 mod ui;
 mod vim;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -76,22 +76,39 @@ async fn fetch_environment(info: BackendInfo) -> anyhow::Result<EnvSummary> {
     })
 }
 
+fn packaged_resource_for_executable(executable: &Path, relative: &str) -> Option<PathBuf> {
+    executable
+        .parent()
+        .and_then(Path::parent)
+        .map(|contents| contents.join("Resources").join(relative))
+}
+
+fn packaged_resource(relative: &str) -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|executable| packaged_resource_for_executable(&executable, relative))
+        .filter(|path| path.exists())
+}
+
 fn resolve_server_entry() -> PathBuf {
     if let Ok(entry) = std::env::var("VITRE_SERVER_ENTRY") {
         return PathBuf::from(entry);
     }
     // Packaged layout (M6): Resources/server/bin.mjs next to the executable.
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(resources) = exe
-            .parent()
-            .and_then(|dir| dir.parent())
-            .map(|dir| dir.join("Resources/server/bin.mjs"))
-        && resources.exists()
-    {
-        return resources;
+    if let Some(entry) = packaged_resource("server/bin.mjs") {
+        return entry;
     }
     // Dev layout: run from the repo root.
     PathBuf::from("apps/server/dist/bin.mjs")
+}
+
+fn resolve_node_binary() -> String {
+    if let Ok(binary) = std::env::var("VITRE_NODE") {
+        return binary;
+    }
+    packaged_resource("node/bin/node")
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "node".into())
 }
 
 /// Electron's `mod+` chord prefix, resolved for this platform. Binding both
@@ -144,7 +161,7 @@ fn selftest(config: SidecarConfig) -> ! {
 fn main() {
     let home = vitre_home();
     let config = SidecarConfig {
-        node_binary: std::env::var("VITRE_NODE").unwrap_or_else(|_| "node".into()),
+        node_binary: resolve_node_binary(),
         server_entry: resolve_server_entry(),
         t3_home: home.clone(),
         fixed_port: None,
@@ -405,4 +422,26 @@ fn main() {
         .expect("failed to open window");
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod packaging_tests {
+    use super::*;
+
+    #[test]
+    fn packaged_resources_resolve_from_the_macos_bundle_executable() {
+        let executable = Path::new("/Applications/Vitre.app/Contents/MacOS/Vitre");
+        assert_eq!(
+            packaged_resource_for_executable(executable, "server/bin.mjs"),
+            Some(PathBuf::from(
+                "/Applications/Vitre.app/Contents/Resources/server/bin.mjs"
+            ))
+        );
+        assert_eq!(
+            packaged_resource_for_executable(executable, "node/bin/node"),
+            Some(PathBuf::from(
+                "/Applications/Vitre.app/Contents/Resources/node/bin/node"
+            ))
+        );
+    }
 }
