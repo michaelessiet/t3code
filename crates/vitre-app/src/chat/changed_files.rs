@@ -448,11 +448,7 @@ impl ChatApp {
                             cx,
                         );
                     }))
-                    .child(
-                        Icon::new(IconName::File)
-                            .size_3()
-                            .text_color(cx.theme().muted_foreground.opacity(0.7)),
-                    )
+                    .child(crate::icons::file_icon(&file.path.0, cx))
                     .child(div().truncate().child(SharedString::from(name))),
             );
         }
@@ -501,7 +497,7 @@ impl ChatApp {
         tree: &TreeContext,
         cx: &mut Context<Self>,
     ) {
-        let indent = px(8. + depth as f32 * 14.);
+        let indent = px(8. + depth as f32 * crate::ui::TREE_INDENT);
         for node in nodes {
             match node {
                 TurnDiffNode::Dir(dir) => {
@@ -546,15 +542,7 @@ impl ChatApp {
                             .size_3p5()
                             .text_color(cx.theme().muted_foreground.opacity(0.7)),
                         )
-                        .child(
-                            Icon::new(if expanded {
-                                IconName::FolderOpen
-                            } else {
-                                IconName::Folder
-                            })
-                            .size_3p5()
-                            .text_color(cx.theme().muted_foreground.opacity(0.75)),
-                        )
+                        .child(crate::icons::folder_icon(expanded, cx))
                         .child(
                             div()
                                 .min_w_0()
@@ -610,11 +598,7 @@ impl ChatApp {
                         row = row.child(div().size_3p5().flex_shrink_0());
                     }
                     row = row
-                        .child(
-                            Icon::new(IconName::File)
-                                .size_3p5()
-                                .text_color(cx.theme().muted_foreground.opacity(0.7)),
-                        )
+                        .child(crate::icons::file_icon(&file.path, cx))
                         .child(
                             div()
                                 .min_w_0()

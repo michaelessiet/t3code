@@ -299,6 +299,26 @@ impl SidebarPrefs {
         self.thread_last_visited.get(thread_id).map(String::as_str)
     }
 
+    /// Match T3's explicit unread action: rewind the visit to just before the
+    /// latest completion. Ordinary visits remain monotonic.
+    pub fn mark_thread_unread(&mut self, thread_id: &str, completed_at: Option<&str>) -> bool {
+        let Some(at) = completed_at
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .and_then(|at| at.checked_sub_signed(chrono::Duration::milliseconds(1)))
+        else {
+            return false;
+        };
+        let at = at
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        if self.thread_last_visited(thread_id) == Some(at.as_str()) {
+            return false;
+        }
+        self.thread_last_visited.insert(thread_id.to_owned(), at);
+        self.persist();
+        true
+    }
+
     /// `markThreadVisited`: the stamp only ever moves forward, and an
     /// unparseable timestamp is ignored. Returns whether anything changed, so
     /// callers can skip the re-render (and the write) on a repeat visit.
@@ -434,6 +454,26 @@ mod tests {
         assert!(!prefs.reorder_projects(&all, &["a".to_owned()], &["a".to_owned()]));
         // Neither is dropping on a row that is no longer on screen.
         assert!(!prefs.reorder_projects(&all, &["a".to_owned()], &["gone".to_owned()]));
+    }
+
+    #[test]
+    fn mark_unread_rewinds_completion_and_survives_reload() {
+        let home = temp_home();
+        let mut prefs = SidebarPrefs::load(&home);
+        prefs.mark_thread_visited("thread-1", "2026-09-15T12:00:00.000Z");
+        assert!(prefs.mark_thread_unread("thread-1", Some("2026-09-15T11:30:00.000Z")));
+        assert_eq!(
+            prefs.thread_last_visited("thread-1"),
+            Some("2026-09-15T11:29:59.999Z")
+        );
+        assert!(!prefs.mark_thread_unread("thread-1", Some("2026-09-15T11:30:00.000Z")));
+        assert!(!prefs.mark_thread_unread("thread-1", None));
+        assert!(!prefs.mark_thread_unread("thread-1", Some("invalid")));
+        assert_eq!(
+            SidebarPrefs::load(&home).thread_last_visited("thread-1"),
+            prefs.thread_last_visited("thread-1")
+        );
+        assert!(prefs.mark_thread_visited("thread-1", "2026-09-15T12:00:00.000Z"));
     }
 
     #[test]

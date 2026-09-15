@@ -43,11 +43,10 @@ use vitre_state::worktree_cleanup::{
     orphaned_worktree_path_for_thread,
 };
 
-use crate::assets::VitreIcon;
 use crate::client_settings::ClientSettings;
 
 use super::project_actions::{ProjectMember, project_context_menu};
-use super::{ChatApp, SyncPhase, fresh_id, now_iso, relative_time, tnes};
+use super::{ChatApp, QuickSearchMode, SyncPhase, fresh_id, now_iso, relative_time, tnes};
 
 /// Hover group that reveals a project header's "new thread" button, and a
 /// thread row's archive button. Electron does the same with
@@ -85,8 +84,6 @@ pub(super) struct SidebarThreadRow {
     status: Option<ThreadStatus>,
     /// Relative timestamp label, from the same candidate chain Electron uses.
     time: Option<SharedString>,
-    /// A running turn suppresses the archive affordance.
-    running: bool,
 }
 
 /// The two colours a status pill paints with: the label/glyph colour and the
@@ -145,7 +142,7 @@ impl Render for DraggedProjectRow {
             .gap_2()
             .items_center()
             .rounded(cx.theme().radius)
-            .bg(cx.theme().sidebar)
+            .bg(crate::glass::sidebar(cx))
             .border_1()
             .border_color(cx.theme().primary.opacity(0.4))
             .shadow_md()
@@ -161,6 +158,33 @@ impl Render for DraggedProjectRow {
 }
 
 impl ChatApp {
+    pub(super) fn ordered_thread_ids(&self) -> Vec<ThreadId> {
+        self.sidebar_rows
+            .iter()
+            .flat_map(|project| project.threads.iter().map(|thread| thread.id.clone()))
+            .collect()
+    }
+
+    pub(super) fn cycle_thread(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let ids = self.ordered_thread_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let current = self
+            .thread
+            .as_ref()
+            .and_then(|open| ids.iter().position(|id| id == &open.id))
+            .unwrap_or(0);
+        let next = (current as isize + delta).rem_euclid(ids.len() as isize) as usize;
+        self.select_thread(ids[next].clone(), cx);
+    }
+
+    pub(super) fn jump_thread(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(id) = self.ordered_thread_ids().get(index).cloned() {
+            self.select_thread(id, cx);
+        }
+    }
+
     /// Recompute the cached sidebar rows.
     ///
     /// Called on shell updates, thread selection and preference edits — never
@@ -296,10 +320,6 @@ impl ChatApp {
                                 .or(Some(thread.updated_at.0.as_str()))
                                 .and_then(relative_time)
                                 .map(SharedString::from),
-                            running: thread.session.as_ref().is_some_and(|session| {
-                                session.status == OrchestrationSessionStatus::Running
-                                    && session.active_turn_id.is_some()
-                            }),
                         })
                         .collect(),
                 }
@@ -373,7 +393,7 @@ impl ChatApp {
 
     /// Archive a thread (`ThreadArchive`). The shell drops it from the row on
     /// the resulting event, so nothing is removed optimistically.
-    fn archive_thread(&mut self, id: ThreadId, cx: &mut Context<Self>) {
+    pub(super) fn archive_thread(&mut self, id: ThreadId, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -397,7 +417,12 @@ impl ChatApp {
     /// Electron's sidebar `delete` action: a confirm dialog first
     /// (`confirmThreadDelete` defaults on), then the orphaned-worktree offer,
     /// then the actual stop/close/delete pipeline.
-    fn delete_thread_request(&mut self, id: ThreadId, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn delete_thread_request(
+        &mut self,
+        id: ThreadId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !ClientSettings::confirm_thread_delete(cx) {
             self.delete_thread_offer_worktree_cleanup(id, window, cx);
             return;
@@ -663,94 +688,70 @@ impl ChatApp {
             .as_ref()
             .is_some_and(|open| open.id == thread.id);
         let id = thread.id.clone();
-        let archive_id = thread.id.clone();
-        let archive_label = format!("Archive {}", thread.title);
-        let delete_id = thread.id.clone();
-        let delete_label = format!("Delete {}", thread.title);
+        let menu_owner = cx.entity().downgrade();
+        let menu_target = self.thread_menu_target(&thread.id);
+        let context_owner = menu_owner.clone();
+        let context_target = menu_target.clone();
 
-        let meta: gpui::AnyElement = if thread.running {
-            // A running turn keeps its timestamp visible; there is no archive
-            // affordance to swap it out for.
-            div()
-                .text_size(px(10.))
-                .text_color(cx.theme().muted_foreground.opacity(0.4))
-                .children(thread.time.clone())
-                .into_any_element()
-        } else {
-            div()
-                .flex()
-                .items_center()
-                .justify_end()
-                .min_w(px(48.))
-                .child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(if selected {
-                            cx.theme().foreground.opacity(0.72)
-                        } else {
-                            cx.theme().muted_foreground.opacity(0.4)
-                        })
-                        .group_hover(THREAD_ROW_GROUP, |style| style.invisible())
-                        .children(thread.time.clone()),
-                )
-                .child(
-                    h_flex()
-                        .absolute()
-                        .right_0p5()
-                        .gap_0p5()
-                        .invisible()
-                        .group_hover(THREAD_ROW_GROUP, |style| style.visible())
-                        .child(
-                            Button::new(SharedString::from(format!("archive-{}", thread.id.0)))
-                                .icon(Icon::new(IconName::Archive).size_3p5())
-                                .ghost()
-                                .xsmall()
-                                .tooltip(archive_label)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.archive_thread(archive_id.clone(), cx);
-                                })),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("delete-{}", thread.id.0)))
-                                .icon(Icon::new(VitreIcon::Trash2).size_3p5())
-                                .ghost()
-                                .xsmall()
-                                .tooltip(delete_label)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.delete_thread_request(delete_id.clone(), window, cx);
-                                })),
-                        ),
-                )
-                .into_any_element()
-        };
+        let meta = div()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground.opacity(0.72))
+            .children(thread.time.clone());
 
         let mut row = h_flex()
             .id(SharedString::from(format!("thread-{}", thread.id.0)))
+            .debug_selector({
+                let id = thread.id.0.clone();
+                move || format!("sidebar-thread-{id}")
+            })
             .group(THREAD_ROW_GROUP)
             .relative()
             .h_8()
             .w_full()
             .px_2()
-            .gap_1p5()
+            .gap_2()
             .items_center()
-            .rounded(cx.theme().radius)
+            .rounded(px(8.))
             .cursor_pointer()
             .text_sm()
+            .children(selected.then(|| {
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(9.))
+                    .bottom(px(9.))
+                    .w(px(2.))
+                    .rounded_full()
+                    .bg(cx.theme().primary)
+            }))
             .children(
                 thread
                     .status
                     .map(|status| self.status_label(status, cx).into_any_element()),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(thread.title.clone()),
-            )
+            .child(self.render_thread_title(&thread.id, thread.title.clone(), cx))
             .child(div().ml_auto().flex().flex_shrink_0().child(meta))
+            .child(
+                Button::new(SharedString::from(format!("thread-menu-{}", thread.id.0)))
+                    .ghost()
+                    .xsmall()
+                    .label("⋯")
+                    .tooltip("Conversation actions")
+                    .dropdown_menu(move |menu, window, cx| {
+                        if let Some(target) = &menu_target {
+                            super::thread_actions::thread_context_menu(
+                                menu,
+                                &menu_owner,
+                                target,
+                                false,
+                                window,
+                                cx,
+                            )
+                        } else {
+                            menu
+                        }
+                    }),
+            )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select_thread(id.clone(), cx);
             }));
@@ -762,7 +763,25 @@ impl ChatApp {
             row.text_color(cx.theme().sidebar_foreground.opacity(0.8))
                 .hover(|style| style.bg(cx.theme().list_hover))
         };
-        row.into_any_element()
+        // An inline title editor owns native Cut/Copy/Paste while renaming.
+        if self.is_thread_renaming(&thread.id) {
+            return row.into_any_element();
+        }
+        row.context_menu(move |menu, window, cx| {
+            if let Some(target) = &context_target {
+                super::thread_actions::thread_context_menu(
+                    menu,
+                    &context_owner,
+                    target,
+                    false,
+                    window,
+                    cx,
+                )
+            } else {
+                menu
+            }
+        })
+        .into_any_element()
     }
 
     fn render_project_row(
@@ -825,7 +844,8 @@ impl ChatApp {
         let header = h_flex()
             .id(SharedString::from(format!("project-{}", row.key)))
             .group(PROJECT_HEADER_GROUP)
-            .h_8()
+            .relative()
+            .h(px(36.))
             .w_full()
             .gap_2()
             .px_2()
@@ -868,14 +888,16 @@ impl ChatApp {
                 },
             )
             .child(leading)
-            // Electron renders the project's favicon here and falls back to a
-            // folder glyph; Vitre has no asset pipeline for the favicon yet, so
-            // it always renders the fallback.
             .child(
-                Icon::new(IconName::Folder)
-                    .size_3p5()
-                    .flex_shrink_0()
-                    .text_color(cx.theme().muted_foreground.opacity(0.5)),
+                self.project_icon(
+                    &row.display_name,
+                    row.members
+                        .iter()
+                        .find(|m| m.project_id == row.project_id)
+                        .map(|m| m.workspace_root.as_ref())
+                        .unwrap_or(&row.key),
+                    cx,
+                ),
             )
             .child(
                 h_flex()
@@ -951,7 +973,13 @@ impl ChatApp {
         if !row.window.show_panel && !row.window.show_empty_state {
             return None;
         }
-        let mut list = v_flex().w_full().mx_1().px_1p5().gap_0p5();
+        let mut list = v_flex()
+            .ml(px(15.))
+            .mr_1()
+            .pl(px(10.))
+            .border_l_1()
+            .border_color(cx.theme().sidebar_border.opacity(0.6))
+            .gap_0p5();
         if row.window.show_empty_state {
             list = list.child(
                 div()
@@ -1107,9 +1135,13 @@ impl ChatApp {
             SyncPhase::Live => "live",
         };
 
-        let mut list = v_flex().gap_0p5().px_1();
-        for row in &self.sidebar_rows {
-            list = list.child(self.render_project_row(row, cx));
+        let mut list = v_flex().gap_2().px_2().pb_3();
+        if ClientSettings::get(cx).sidebar_v2_enabled {
+            list = list.child(self.render_beta_sidebar(cx));
+        } else {
+            for row in &self.sidebar_rows {
+                list = list.child(self.render_project_row(row, cx));
+            }
         }
         if self.sidebar_rows.is_empty() {
             list = list.child(
@@ -1125,7 +1157,7 @@ impl ChatApp {
         v_flex()
             .w_full()
             .h_full()
-            .bg(cx.theme().sidebar)
+            .bg(crate::glass::sidebar(cx))
             .text_color(cx.theme().sidebar_foreground)
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
@@ -1133,20 +1165,28 @@ impl ChatApp {
             .pt(px(44.))
             .child(
                 h_flex()
-                    .px_2()
-                    .pb_2()
+                    .px_3()
+                    .pb_3()
                     .gap_1p5()
                     .items_center()
                     .child(
                         h_flex()
+                            .id("sidebar-search")
                             .flex_1()
                             .min_w_0()
-                            .h_8()
-                            .px_2()
+                            .h(px(34.))
+                            .px_2p5()
                             .gap_2()
                             .items_center()
                             .rounded(cx.theme().radius)
                             .bg(cx.theme().muted)
+                            .border_1()
+                            .border_color(cx.theme().sidebar_border)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(cx.theme().list_hover))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_quick_search(QuickSearchMode::Open, window, cx)
+                            }))
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child(Icon::new(IconName::Search).size_4())
@@ -1156,7 +1196,11 @@ impl ChatApp {
                                     .ml_auto()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground.opacity(0.6))
-                                    .child(phase),
+                                    .child(if cfg!(target_os = "macos") {
+                                        "⌘P"
+                                    } else {
+                                        "Ctrl P"
+                                    }),
                             ),
                     )
                     .child(self.render_sort_menu(cx))
@@ -1203,14 +1247,71 @@ impl ChatApp {
                         ),
                     )
                     .child(
-                        div()
+                        h_flex()
+                            .id("sidebar-connection-status")
                             .px_3()
                             .pb_3()
                             .pt_2()
                             .text_xs()
+                            .gap_2()
                             .text_color(cx.theme().muted_foreground.opacity(0.75))
-                            .child(self.sidecar_status.clone()),
+                            .child(
+                                div()
+                                    .size(px(5.))
+                                    .rounded_full()
+                                    .bg(match self.shell.phase {
+                                        SyncPhase::Live => cx.theme().success,
+                                        SyncPhase::Synchronizing => cx.theme().warning,
+                                        SyncPhase::Disconnected => cx.theme().muted_foreground,
+                                    }),
+                            )
+                            .child(format!("Local environment · {phase}"))
+                            .tooltip({
+                                let status = self.sidecar_status.clone();
+                                move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(status.clone())
+                                        .build(window, cx)
+                                }
+                            }),
                     ),
             )
+    }
+}
+
+impl ChatApp {
+    pub(super) fn snooze_thread(
+        &mut self,
+        id: ThreadId,
+        hours: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let command = match hours {
+            Some(hours) => ClientOrchestrationCommand::ThreadSnooze {
+                command_id: CommandId(fresh_id("snooze")),
+                thread_id: id,
+                snoozed_until: tnes(
+                    (chrono::Utc::now() + chrono::Duration::hours(hours)).to_rfc3339(),
+                ),
+                r#type: Default::default(),
+            },
+            None => ClientOrchestrationCommand::ThreadUnsnooze {
+                command_id: CommandId(fresh_id("unsnooze")),
+                thread_id: id,
+                reason: vitre_contracts::ClientOrchestrationCommandThreadUnsnoozeReason::User,
+                r#type: Default::default(),
+            },
+        };
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = client.dispatch(&command).await {
+                let _ = this.update(cx, |app, cx| {
+                    app.runtime_notice = Some(e.user_message().into());
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 }

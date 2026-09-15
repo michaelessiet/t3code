@@ -74,6 +74,7 @@ const WRITE_FAILED: &str = "Terminal write failed";
 const RESUBSCRIBE_AFTER_COMPLETION: Duration = Duration::from_secs(2);
 
 pub enum TerminalViewEvent {
+    OpenLink(super::terminal_links::TerminalLink),
     /// The session reported `closed`/`exited` (Electron's `onSessionExited`);
     /// the drawer responds by running its close flow for this tab.
     SessionExited,
@@ -146,6 +147,56 @@ impl Focusable for TerminalView {
     fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
         self.focus_handle.clone()
     }
+}
+
+fn grid_link_at(
+    term: &Term<EventProxy>,
+    point: AlacPoint,
+    cwd: &str,
+) -> Option<super::terminal_links::TerminalLink> {
+    let grid = term.grid();
+    if let Some(link) = grid[point].hyperlink() {
+        return super::terminal_links::parse_link(link.uri(), cwd);
+    }
+    let last = Column(grid.columns().saturating_sub(1));
+    let mut start = point.line;
+    while start > grid.topmost_line()
+        && point.line.0 - start.0 < 32
+        && grid[AlacLine(start.0 - 1)][last]
+            .flags
+            .contains(CellFlags::WRAPLINE)
+    {
+        start -= 1;
+    }
+    let mut text = String::new();
+    let mut byte = 0;
+    let mut line = start;
+    loop {
+        for col in 0..grid.columns() {
+            let cell = &grid[line][Column(col)];
+            if cell
+                .flags
+                .intersects(CellFlags::WIDE_CHAR_SPACER | CellFlags::LEADING_WIDE_CHAR_SPACER)
+            {
+                continue;
+            }
+            if line == point.line && col <= point.column.0 {
+                byte = text.len();
+            }
+            text.push(cell.c);
+            if let Some(extra) = cell.zerowidth() {
+                text.extend(extra);
+            }
+        }
+        if line >= grid.bottommost_line()
+            || line.0 - start.0 >= 64
+            || !grid[line][last].flags.contains(CellFlags::WRAPLINE)
+        {
+            break;
+        }
+        line += 1;
+    }
+    super::terminal_links::link_at(&text, byte, cwd)
 }
 
 impl TerminalView {
@@ -587,6 +638,10 @@ impl TerminalView {
         Some((point, side))
     }
 
+    fn link_at_point(&self, point: AlacPoint) -> Option<super::terminal_links::TerminalLink> {
+        grid_link_at(&self.term, point, &self.launch.cwd)
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -598,6 +653,15 @@ impl TerminalView {
         let Some((point, side)) = self.grid_point(event.position) else {
             return;
         };
+        // OSC-8 and logical wrapped lines; never mutate selection to detect a link.
+        if (event.modifiers.platform || event.modifiers.control)
+            && let Some(link) = self.link_at_point(point)
+        {
+            cx.emit(TerminalViewEvent::OpenLink(link));
+            self.selecting = false;
+            cx.notify();
+            return;
+        }
         // xterm: click starts, double-click selects the word, triple the line.
         let ty = match event.click_count {
             1 => SelectionType::Simple,
@@ -1476,6 +1540,43 @@ fn hsla_to_rgb(hsla: Hsla) -> AnsiRgb {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wrapped_vt_links_with_wide_characters_and_osc8() {
+        use super::super::terminal_links::TerminalLink;
+        use super::*;
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mut term = Term::new(
+            TermConfig::default(),
+            &TermSize::new(12, 6),
+            EventProxy(events),
+        );
+        let mut processor: Processor = Processor::new();
+        processor.advance(&mut term, "界 http://localhost:5173/a?q=x#part".as_bytes());
+        assert_eq!(
+            grid_link_at(&term, AlacPoint::new(AlacLine(1), Column(3)), "/repo"),
+            Some(TerminalLink::Url("http://localhost:5173/a?q=x#part".into()))
+        );
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mut term = Term::new(
+            TermConfig::default(),
+            &TermSize::new(30, 6),
+            EventProxy(events),
+        );
+        processor.advance(
+            &mut term,
+            b"\x1b]8;;file:///repo/main.rs:12:4\x07open file\x1b]8;;\x07",
+        );
+        assert_eq!(
+            grid_link_at(&term, AlacPoint::new(AlacLine(0), Column(4)), "/repo"),
+            Some(TerminalLink::File {
+                path: "/repo/main.rs".into(),
+                line: Some(12),
+                column: Some(4)
+            })
+        );
+        assert!(term.selection.is_none());
+    }
+
     use super::*;
 
     fn stroke(key: &str, control: bool, alt: bool, shift: bool, platform: bool) -> Keystroke {

@@ -306,7 +306,7 @@ impl ChatApp {
             .thread
             .as_ref()
             .is_some()
-            .then(|| self.open_project_root())
+            .then(|| self.search_root())
             .flatten();
         if desired == self.branch.cwd {
             return;
@@ -329,6 +329,9 @@ impl ChatApp {
     /// Workspace root of the open thread's project (NOT the worktree) — the
     /// badge and checkout-target logic compare against this.
     fn thread_project_root(&self) -> Option<String> {
+        if let Some(root) = self.root_for_file_tab() {
+            return Some(root);
+        }
         let open = self.thread.as_ref()?;
         let project_id = self.shell_thread(&open.id)?.project_id.clone();
         self.project_root(&project_id)
@@ -548,8 +551,16 @@ impl ChatApp {
             .as_ref()
             .and_then(|open| self.shell_thread(&open.id))
             .and_then(|thread| thread.worktree_path.as_ref().map(|path| path.0.clone()));
-        let target =
-            resolve_branch_selection_target(&picked, &project_cwd, active_worktree.as_deref());
+        let additional = self.root_for_file_tab().is_some();
+        let origin = self.thread.as_ref().map(|t| t.id.clone());
+        let target = if additional {
+            BranchSelectionTarget::Checkout {
+                checkout_cwd: project_cwd.clone(),
+                next_worktree_path: None,
+            }
+        } else {
+            resolve_branch_selection_target(&picked, &project_cwd, active_worktree.as_deref())
+        };
         match target {
             BranchSelectionTarget::Reuse { next_worktree_path } => {
                 // The ref already lives in a worktree: adopt it, no git call.
@@ -587,7 +598,11 @@ impl ChatApp {
                                     .map(|name| name.0)
                                     .unwrap_or_else(|| derived.clone());
                                 app.branch.optimistic_branch = Some(final_name.clone());
-                                app.set_thread_branch(final_name, next_worktree_path, cx);
+                                if !additional
+                                    && app.thread.as_ref().map(|t| &t.id) == origin.as_ref()
+                                {
+                                    app.set_thread_branch(final_name, next_worktree_path, cx);
+                                }
                             }
                             Err(error) => {
                                 // Roll back to the pre-action overlay.
@@ -628,6 +643,8 @@ impl ChatApp {
             .and_then(|thread| thread.worktree_path.as_ref().map(|path| path.0.clone()));
         let previous_optimistic = self.branch.optimistic_branch.clone();
         self.branch.optimistic_branch = Some(name.clone());
+        let additional = self.root_for_file_tab().is_some();
+        let origin = self.thread.as_ref().map(|t| t.id.clone());
         self.branch.action_pending = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -645,7 +662,9 @@ impl ChatApp {
                         // worktree stays unchanged.
                         let final_name = result.ref_name.0;
                         app.branch.optimistic_branch = Some(final_name.clone());
-                        app.set_thread_branch(final_name, active_worktree, cx);
+                        if !additional && app.thread.as_ref().map(|t| &t.id) == origin.as_ref() {
+                            app.set_thread_branch(final_name, active_worktree, cx);
+                        }
                     }
                     Err(error) => {
                         app.branch.optimistic_branch = previous_optimistic;
@@ -726,9 +745,15 @@ impl ChatApp {
         self.branch.cwd.as_ref()?;
         let open = self.thread.as_ref()?;
         let shell_thread = self.shell_thread(&open.id);
-        let thread_branch =
-            shell_thread.and_then(|thread| thread.branch.as_ref().map(|branch| branch.0.clone()));
-        let has_worktree = shell_thread.is_some_and(|thread| thread.worktree_path.is_some());
+        let additional = self.root_for_file_tab().is_some();
+        let thread_branch = (!additional)
+            .then(|| {
+                shell_thread
+                    .and_then(|thread| thread.branch.as_ref().map(|branch| branch.0.clone()))
+            })
+            .flatten();
+        let has_worktree =
+            !additional && shell_thread.is_some_and(|thread| thread.worktree_path.is_some());
 
         // Closed-state label: the status stream, then any cached current ref.
         let status = self.git.status.as_ref();

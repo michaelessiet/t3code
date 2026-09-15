@@ -30,6 +30,7 @@ impl ChatApp {
         self.pending_review_comments
             .retain(|existing| existing.id != comment.id);
         self.pending_review_comments.push(comment);
+        self.schedule_draft_save(cx);
         cx.notify();
     }
 
@@ -39,6 +40,7 @@ impl ChatApp {
         self.pending_review_comments
             .retain(|existing| existing.id != id);
         if self.pending_review_comments.len() != before {
+            self.schedule_draft_save(cx);
             cx.notify();
         }
     }

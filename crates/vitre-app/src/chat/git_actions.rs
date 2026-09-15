@@ -140,7 +140,7 @@ impl ChatApp {
     /// Cheap when nothing changed — safe to call from render.
     pub(super) fn sync_git_status(&mut self, cx: &mut Context<Self>) {
         let desired = if self.thread.is_some() {
-            self.open_project_root()
+            self.search_root()
         } else {
             None
         };

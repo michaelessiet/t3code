@@ -119,6 +119,64 @@ pub(super) struct ThreadLaunchDefaults {
 }
 
 impl ChatApp {
+    pub(super) fn dock_terminal_create(&mut self, cx: &mut Context<Self>) {
+        let (Some(key), Some(defaults)) = (self.dock_thread_key(), self.thread_launch_defaults())
+        else {
+            return;
+        };
+        let existing = self.all_known_terminal_ids(&key, &defaults.thread_id);
+        let id = next_terminal_id(existing.iter().map(String::as_str));
+        if !self.right_panel.map.open_terminal(&key, &id) {
+            return;
+        }
+        self.right_panel.save();
+        if let Some(client) = self.client.clone() {
+            let payload = TerminalOpenInput {
+                cols: None,
+                rows: None,
+                cwd: tnes(&defaults.cwd),
+                env: Some(Some(
+                    defaults
+                        .env
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                        .collect(),
+                )),
+                terminal_id: tnes(&id),
+                thread_id: tnes(&defaults.thread_id),
+                worktree_path: Some(Some(defaults.worktree.as_deref().map(tnes))),
+            };
+            cx.spawn(async move |_, _| {
+                let _ = client.call::<TerminalOpen>(&payload).await;
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    pub(super) fn render_dock_terminal(
+        &mut self,
+        key: &str,
+        terminal_id: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state = ThreadTerminalUiState {
+            terminal_ids: vec![terminal_id.to_string()],
+            active_terminal_id: terminal_id.to_string(),
+            ..Default::default()
+        };
+        self.ensure_terminal_views(key, &state, cx);
+        let view = self
+            .terminal_views
+            .get(&(key.to_string(), terminal_id.to_string()))
+            .cloned();
+        div()
+            .size_full()
+            .p_1()
+            .children(view.map(|view| div().size_full().child(view)))
+            .into_any_element()
+    }
+
     /// The drawer's scoped key: `${environmentId}:${threadId}`. Unlike the
     /// dock there is no `:home` pseudo-thread — Electron's drawer only exists
     /// inside a thread view.
@@ -489,10 +547,24 @@ impl ChatApp {
         let Some(defaults) = self.thread_launch_defaults() else {
             return;
         };
+        let dock_ids = self
+            .right_panel
+            .map
+            .thread(key)
+            .surfaces
+            .iter()
+            .flat_map(|surface| match surface {
+                RightPanelSurface::Terminal { terminal_ids, .. } => terminal_ids.clone(),
+                _ => Vec::new(),
+            });
+        let drawer_ids = self.terminal_ui.map.thread(key).terminal_ids;
         let live: HashSet<(String, String)> = state
             .terminal_ids
             .iter()
-            .map(|id| (key.to_string(), id.clone()))
+            .cloned()
+            .chain(drawer_ids)
+            .chain(dock_ids)
+            .map(|id| (key.to_string(), id))
             .collect();
         self.terminal_views
             .retain(|map_key, _| live.contains(map_key));
@@ -528,7 +600,14 @@ impl ChatApp {
             if !self.terminal_views.contains_key(&map_key) {
                 let view = cx.new(|cx| TerminalView::new(client.clone(), launch, cx));
                 let exited_id = id.clone();
+                let origin_thread = key.to_string();
                 let subscription = cx.subscribe(&view, move |this, _, event, cx| match event {
+                    TerminalViewEvent::OpenLink(link) => {
+                        if this.dock_thread_key().as_deref() == Some(&origin_thread) {
+                            this.pending_terminal_link = Some(link.clone());
+                            cx.notify();
+                        }
+                    }
                     TerminalViewEvent::SessionExited => {
                         this.terminal_close(&exited_id, cx);
                     }
@@ -592,12 +671,13 @@ impl ChatApp {
     /// The drawer, mounted at the bottom of the chat column when the open
     /// thread has it toggled on (and the workspace root is known — there is
     /// nowhere to launch a shell before the shell snapshot arrives).
-    pub(super) fn render_terminal_drawer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_terminal_drawer(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let key = self.terminal_thread_key()?;
         let state = self.terminal_ui.map.thread(&key);
-        if !state.terminal_open {
-            return None;
-        }
         self.thread_launch_defaults()?;
         self.ensure_terminal_views(&key, &state, cx);
 
@@ -607,6 +687,24 @@ impl ChatApp {
             .map(|drag| drag.current_height)
             .unwrap_or(state.terminal_height);
         let height = clamp_drawer_height(height, f64::from(self.viewport_height));
+        let animated_height = gpui_base::motion::spring(
+            (
+                SharedString::from(format!("terminal-drawer-{key}")),
+                "height",
+            ),
+            if state.terminal_open {
+                height as f32
+            } else {
+                0.
+            },
+            gpui_base::motion::Spring::new(std::time::Duration::from_millis(320))
+                .with_travel(self.terminal_drag.is_none()),
+            window,
+            cx,
+        );
+        if animated_height < 0.5 {
+            return None;
+        }
 
         let body = if state.terminal_ids.is_empty() {
             self.render_drawer_empty_state(cx)
@@ -647,10 +745,11 @@ impl ChatApp {
                 .relative()
                 .w_full()
                 .flex_shrink_0()
-                .h(px(height as f32))
+                .h(px(animated_height))
+                .overflow_hidden()
                 .border_t_1()
                 .border_color(cx.theme().border.opacity(0.8))
-                .bg(cx.theme().background)
+                .bg(crate::glass::elevated(cx))
                 .child(div().size_full().min_h_0().child(body))
                 .child(
                     // The 6px grab strip along the top edge (Electron's

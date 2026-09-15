@@ -33,6 +33,7 @@ use super::{ChatApp, fresh_id};
 
 /// Electron's `TerminalContextDraft`, minus the thread scoping — the pending
 /// list lives on the open thread and clears with it.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct PendingTerminalContext {
     pub id: String,
     pub selection: TerminalContextSelection,
@@ -69,6 +70,7 @@ impl ChatApp {
             id: fresh_id("terminal-context"),
             selection: normalized,
         });
+        self.schedule_draft_save(cx);
         cx.notify();
     }
 
@@ -77,6 +79,7 @@ impl ChatApp {
         self.pending_terminal_contexts
             .retain(|pending| pending.id != id);
         if self.pending_terminal_contexts.len() != before {
+            self.schedule_draft_save(cx);
             cx.notify();
         }
     }

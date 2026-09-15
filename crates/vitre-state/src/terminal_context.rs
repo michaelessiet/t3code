@@ -21,7 +21,7 @@
 pub const INLINE_TERMINAL_CONTEXT_PLACEHOLDER: char = '\u{FFFC}';
 
 /// `TerminalContextSelection` — what "Add to chat" captures from a terminal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalContextSelection {
     pub terminal_id: String,
     pub terminal_label: String,
