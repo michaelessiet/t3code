@@ -186,9 +186,8 @@ shortcut collision (snippets now use Cmd+Option+J). Backend synchronization now
 honors incremental servers using the previous document's UTF-16 range, fixing
 a real TypeScript server crash when multiline snippets/undo changed line count.
 Scoped Clippy, server typechecking, formatting and lint passed. The verification
-app and sidecar were stopped afterward. A later manual user-test instance is
-currently running as PID `82905` with sidecar PID `83030`; confirm identity
-again before stopping or replacing it.
+app and sidecar were stopped afterward. No native Vitre process remains running
+at this snapshot; always confirm process identity again before acting on it.
 
 Scope remains important: this is **not complete Zed/VS Code replacement
 acceptance**. Semantic services depend on the bundled TS/JS service or installed
@@ -265,8 +264,7 @@ September 15 settings/context-menu follow-up (committed on `feat/vitre-rust-port
   `cargo clippy -p vitre-app --all-targets -- -D warnings`, targeted rustfmt and
   whitespace checks passed. The final clean-profile native pass used
   `/tmp/vitre-polish-menus-bdJA3M`; its app and sidecar were stopped afterward.
-  That disposable instance was stopped. See the current runtime note above for
-  the newer manually launched user-test instance.
+  That disposable instance was stopped.
 
 September 15 Markdown-preview crash follow-up (committed on `feat/vitre-rust-port`):
 
@@ -307,12 +305,11 @@ embedded server completed all migrations, token exchange, WebSocket setup,
 `server.getConfig` and ping. This validates local installation mechanics, not
 Gatekeeper/notarization acceptance for public distribution.
 
-The earlier manual test launch (historically PID `19701`, sidecar `19813`) is
-gone; the current manual instance is recorded above. Use `./run-vitre.sh` for a
-fresh launch with the normal `~/.vitre` home. Never reuse recorded PIDs or assume
-port `3774` is available; recheck process identity and ports before acting.
-Editor acceptance uses separate disposable `vitre-polish-*` profiles, not the
-user's app database.
+The earlier manual test launches are gone. Use `./run-vitre.sh` for a fresh
+launch with the normal `~/.vitre` home. Never reuse recorded PIDs or assume port
+`3774` is available; recheck process identity and ports before acting. Editor
+acceptance uses separate disposable `vitre-polish-*` profiles, not the user's
+app database.
 
 ### Native UI and editor baseline
 
